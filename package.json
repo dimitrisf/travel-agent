@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "start": "tsx src/index.ts",
+    "explore": "tsx src/explore.ts",
     "build": "tsc",
     "dev": "tsx watch src/index.ts"
   },
