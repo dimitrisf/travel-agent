@@ -18,20 +18,47 @@ function getWeather(city: string): string {
   return JSON.stringify({ city, ...w, units: 'celsius' });
 }
 
+function getCountry(city: string): string {
+  const fake: Record<string, string> = {
+    Athens: 'Greece',
+    London: 'United Kingdom',
+    Tokyo: 'Japan',
+    'New York': 'United States',
+  };
+  const country = fake[city] ?? 'unknown';
+  return JSON.stringify({ city, country });
+}
+
+const handlers: Record<string, (args: { city: string }) => string> = {
+  get_weather: ({ city }) => getWeather(city),
+  get_country: ({ city }) => getCountry(city),
+};
+
+const cityParam: Tool = {
+  type: 'function',
+  name: '',
+  description: '',
+  strict: true,
+  parameters: {
+    type: 'object',
+    additionalProperties: false,
+    properties: {
+      city: { type: 'string', description: 'City name, e.g. "Athens"' },
+    },
+    required: ['city'],
+  },
+};
+
 const tools: Tool[] = [
   {
-    type: 'function',
+    ...cityParam,
     name: 'get_weather',
     description: 'Get current weather for a city.',
-    strict: true,
-    parameters: {
-      type: 'object',
-      additionalProperties: false,
-      properties: {
-        city: { type: 'string', description: 'City name, e.g. "Athens"' },
-      },
-      required: ['city'],
-    },
+  },
+  {
+    ...cityParam,
+    name: 'get_country',
+    description: 'Get the country a city belongs to.',
   },
 ];
 
@@ -52,8 +79,10 @@ while (true) {
 
   const toolOutputs: ResponseInputItem[] = toolCalls.map((tc) => {
     const args = JSON.parse(tc.arguments) as { city: string };
-    console.log(`→ get_weather(${JSON.stringify(args.city)})`);
-    const result = getWeather(args.city);
+    const handler = handlers[tc.name];
+    if (!handler) throw new Error(`Unknown tool: ${tc.name}`);
+    console.log(`→ ${tc.name}(${JSON.stringify(args.city)})`);
+    const result = handler(args);
     console.log(`← ${result}\n`);
     return {
       type: 'function_call_output',
