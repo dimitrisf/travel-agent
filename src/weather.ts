@@ -1,4 +1,5 @@
 import 'dotenv/config';
+import readline from 'node:readline/promises';
 import OpenAI from 'openai';
 import type {
   ResponseInputItem,
@@ -62,55 +63,64 @@ const tools: Tool[] = [
   },
 ];
 
-const userQuestion =
-  process.argv.slice(2).join(' ').trim() || 'Weather in Athens';
-
-console.log(`User: ${userQuestion}\n`);
-
-let response = await client.responses.create({
-  model: 'gpt-4o-mini',
-  input: userQuestion,
-  tools,
+const rl = readline.createInterface({
+  input: process.stdin,
+  output: process.stdout,
 });
 
+console.log('Weather REPL — empty line, "exit", or Ctrl+C to quit.\n');
+
+let previousId: string | undefined;
+
 while (true) {
-  const toolCalls = response.output.filter((i) => i.type === 'function_call');
-  if (toolCalls.length === 0) break;
+  const userQuestion = (await rl.question('You: ')).trim();
+  if (!userQuestion || userQuestion === 'exit' || userQuestion === 'quit') {
+    break;
+  }
 
-  const toolOutputs: ResponseInputItem[] = toolCalls.map((tc) => {
-    const args = JSON.parse(tc.arguments) as { city: string };
-    const handler = handlers[tc.name];
-    if (!handler) throw new Error(`Unknown tool: ${tc.name}`);
-    console.log(`→ ${tc.name}(${JSON.stringify(args.city)})`);
-    const result = handler(args);
-    console.log(`← ${result}\n`);
-    return {
-      type: 'function_call_output',
-      call_id: tc.call_id,
-      output: result,
-    };
-  });
-
-  response = await client.responses.create({
+  let response = await client.responses.create({
     model: 'gpt-4o-mini',
-    previous_response_id: response.id,
-    input: toolOutputs,
+    previous_response_id: previousId,
+    input: userQuestion,
     tools,
   });
-}
 
-console.log('Final answer:\n');
-for (const item of response.output) {
-  if (item.type === 'message') {
-    for (const part of item.content) {
-      if (part.type === 'output_text') console.log(part.text);
+  while (true) {
+    const toolCalls = response.output.filter((i) => i.type === 'function_call');
+    if (toolCalls.length === 0) break;
+
+    const toolOutputs: ResponseInputItem[] = toolCalls.map((tc) => {
+      const args = JSON.parse(tc.arguments) as { city: string };
+      const handler = handlers[tc.name];
+      if (!handler) throw new Error(`Unknown tool: ${tc.name}`);
+      console.log(`  → ${tc.name}(${JSON.stringify(args.city)})`);
+      const result = handler(args);
+      console.log(`  ← ${result}`);
+      return {
+        type: 'function_call_output',
+        call_id: tc.call_id,
+        output: result,
+      };
+    });
+
+    response = await client.responses.create({
+      model: 'gpt-4o-mini',
+      previous_response_id: response.id,
+      input: toolOutputs,
+      tools,
+    });
+  }
+
+  for (const item of response.output) {
+    if (item.type === 'message') {
+      for (const part of item.content) {
+        if (part.type === 'output_text') console.log(`AI: ${part.text}\n`);
+      }
     }
   }
+
+  previousId = response.id;
 }
 
-console.log(`\n[response id: ${response.id}]`);
-if (response.usage) {
-  console.log(
-    `[tokens — in: ${response.usage.input_tokens}, out: ${response.usage.output_tokens}, total: ${response.usage.total_tokens}]`,
-  );
-}
+rl.close();
+console.log('Bye.');
