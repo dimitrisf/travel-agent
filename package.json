@@ -6,6 +6,7 @@
   "scripts": {
     "start": "tsx src/index.ts",
     "explore": "tsx src/explore.ts",
+    "weather": "tsx src/weather.ts",
     "build": "tsc",
     "dev": "tsx watch src/index.ts"
   },
