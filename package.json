@@ -8,10 +8,12 @@
     "explore": "tsx src/explore.ts",
     "weather": "tsx src/weather.ts",
     "books": "tsx src/books.ts",
+    "research": "tsx src/research.ts",
     "build": "tsc",
     "dev": "tsx watch src/index.ts"
   },
   "dependencies": {
+    "@openai/agents": "^0.0.14",
     "dotenv": "^16.4.5",
     "openai": "^4.77.0",
     "zod": "^3.23.8"
