@@ -7,12 +7,14 @@
     "start": "tsx src/index.ts",
     "explore": "tsx src/explore.ts",
     "weather": "tsx src/weather.ts",
+    "books": "tsx src/books.ts",
     "build": "tsc",
     "dev": "tsx watch src/index.ts"
   },
   "dependencies": {
     "dotenv": "^16.4.5",
-    "openai": "^4.77.0"
+    "openai": "^4.77.0",
+    "zod": "^3.23.8"
   },
   "devDependencies": {
     "@types/node": "^22.19.21",
