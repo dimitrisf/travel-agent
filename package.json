@@ -9,10 +9,13 @@
     "weather": "tsx src/weather.ts",
     "books": "tsx src/books.ts",
     "research": "tsx src/research.ts",
+    "mcp": "tsx src/mcp-server.ts",
+    "mcp:inspect": "npx -y @modelcontextprotocol/inspector tsx src/mcp-server.ts",
     "build": "tsc",
     "dev": "tsx watch src/index.ts"
   },
   "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.4",
     "@openai/agents": "^0.0.14",
     "dotenv": "^16.4.5",
     "openai": "^4.77.0",
