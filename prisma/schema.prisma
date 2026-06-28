@@ -1,0 +1,45 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model City {
+  id             Int             @id @default(autoincrement())
+  name           String          @unique
+  currentWeather CurrentWeather?
+  forecasts      Forecast[]
+}
+
+model Conditions {
+  id             Int              @id @default(autoincrement())
+  description    String           @unique
+  currentWeather CurrentWeather[]
+  forecasts      Forecast[]
+}
+
+model CurrentWeather {
+  id           Int        @id @default(autoincrement())
+  cityId       Int        @unique
+  city         City       @relation(fields: [cityId], references: [id], onDelete: Cascade)
+  tempC        Float
+  conditionsId Int
+  conditions   Conditions @relation(fields: [conditionsId], references: [id])
+}
+
+model Forecast {
+  id           Int        @id @default(autoincrement())
+  cityId       Int
+  city         City       @relation(fields: [cityId], references: [id], onDelete: Cascade)
+  date         DateTime   @db.Date
+  tempCMin     Float
+  tempCMax     Float
+  conditionsId Int
+  conditions   Conditions @relation(fields: [conditionsId], references: [id])
+
+  @@unique([cityId, date])
+  @@index([cityId, date])
+}

@@ -1,15 +1,23 @@
 # OpenAI Responses — Learning Journey
 
-A progression from a single streaming Responses API call to a production-shaped architecture (REST API → MCP server → OpenAI Agent). Each step builds on the last; nothing is throwaway.
+A progression from a single streaming Responses API call to a production-shaped architecture (Postgres → service layer → REST API → MCP server → OpenAI Agent). Each step builds on the last; nothing is throwaway.
 
 ## Setup
 
 ```bash
 npm install
-cp .env.example .env   # then add your OPENAI_API_KEY
+cp .env.example .env   # then add OPENAI_API_KEY and DATABASE_URL
 ```
 
-Requires Node 18+ (uses global `fetch`) and a valid OpenAI API key.
+Requires Node 18+ (uses global `fetch`), a valid OpenAI API key, and (for the Week 2 extension) a Postgres database (e.g. Neon).
+
+For the Week 2 extension you'll also need to provision the schema and seed data:
+
+```bash
+npm run db:generate          # generate the Prisma client
+npm run db:migrate -- --name init   # create tables (first time)
+npm run db:seed              # populate cities, conditions, forecasts
+```
 
 ## Map of the project
 
@@ -21,6 +29,7 @@ Requires Node 18+ (uses global `fetch`) and a valid OpenAI API key.
 | 6 | `src/research.ts` | OpenAI Agents SDK — `Agent`, `Tool`, `Runner` |
 | 7 | `src/mcp-server.ts` | MCP server (single source of truth for the library tools) |
 | Week 2 | `openapi.yaml`, `src/rest-server.ts`, `src/weather-mcp.ts`, `src/weather-agent.ts` | REST API → MCP wrapper → Agent |
+| Week 2 (extension) | `prisma/schema.prisma`, `prisma/seed.ts`, `src/lib/*`, updated `src/rest-server.ts` | Service layer + Postgres (Neon) via Prisma behind the REST API |
 
 ---
 
@@ -275,6 +284,95 @@ Same thing — both are MCP servers in the protocol sense. *"Wrapper"* describes
 
 Each layer can be tested in isolation: `curl` the REST endpoint, `mcp:inspect` to poke the MCP server, REPL to talk to the agent.
 
+### Extension — Service layer + Postgres (Prisma)
+
+The Week 2 stack had the REST server keep its data in a plain JavaScript object. This extension replaces that with a real database (Postgres on Neon) plus a proper business-logic layer behind the REST handlers. The agent and MCP layers stay exactly the same — only the REST server changes from the outside; the new code sits between Express and the database.
+
+#### Updated stack
+
+```
+weather-agent.ts        (Agents SDK + REPL)
+       │ stdio (MCP)
+       ▼
+weather-mcp.ts          (MCP wrapper)
+       │ HTTP
+       ▼
+rest-server.ts          (Express handlers — thin)
+       │
+       ▼  ┌──────────── src/lib/index.ts ────────────┐
+          │ createWeatherService()                   │
+          │ isWeatherServiceError()                  │
+          │ isZodValidationError()                   │
+          └────┬──────────────────────────────┬──────┘
+               ▼                              ▼
+       WeatherService            ── throws ── WeatherServiceError
+       (Zod validation
+        + business logic)
+               │
+               ▼
+       WeatherRepository
+       (Prisma queries)
+               │
+               ▼
+       PrismaClient ──▶ PostgreSQL (Neon)
+```
+
+#### Pieces
+
+- `prisma/schema.prisma` — four tables: `City`, `Conditions` (lookup), `CurrentWeather` (1:1 with City), `Forecast` (many-per-city, unique on `cityId+date`).
+- `prisma/seed.ts` — idempotent seed. Uses `upsert` so re-running refreshes forecast dates relative to today.
+- `src/lib/WeatherServiceError.ts` — custom error class with a `code` field (`CITY_NOT_FOUND` | `NO_FORECAST_AVAILABLE` | `INTERNAL_ERROR`).
+- `src/lib/WeatherRepository.ts` — Prisma queries. Projects DB rows into plain `{ city, tempC, conditions }` shapes so callers never see Prisma types.
+- `src/lib/WeatherService.ts` — Zod-validated entry points (`getCurrentWeather`, `getForecast`). Wraps repository errors in `WeatherServiceError`. Returns `{..., units: 'celsius'}`.
+- `src/lib/index.ts` — re-exports plus three helpers: `createWeatherService()` (lazy singleton `PrismaClient`), `isWeatherServiceError()`, `isZodValidationError()`.
+
+#### Key design points
+
+- **Validation lives at the service boundary.** `GetCurrentWeatherInput.parse(input)` runs *outside* the try/catch so `ZodError` bubbles up unchanged. The REST handler's error middleware turns it into a 400 with the issue details.
+- **Repository returns plain data, not Prisma rows.** Service callers never depend on Prisma types — keeps the data layer swappable.
+- **`WeatherServiceError` carries a `code`.** Middleware maps `CITY_NOT_FOUND` and `NO_FORECAST_AVAILABLE` to 404, `INTERNAL_ERROR` to 500. Adding new error categories means adding a code, not a new class.
+- **DB errors are wrapped, not leaked.** Any Prisma throw inside the repo call becomes `WeatherServiceError` with `cause` set — Express never sees a `PrismaClientKnownRequestError`.
+- **`createWeatherService()` lazily instantiates one `PrismaClient`.** A passed-in client wins (useful for tests). The shared default keeps the connection pool from multiplying.
+
+#### Schema notes
+
+- `CurrentWeather.cityId` is `@unique` → at most one row per city (1:1).
+- `Forecast` has `@@unique([cityId, date])` → at most one forecast row per city per day, which is what makes the seed's `upsert` work.
+- `onDelete: Cascade` on the city FKs → deleting a city wipes its weather and forecasts.
+- `Conditions` is a lookup table (sunny, overcast with light rain, humid/partly cloudy, clear, clear/windy) — `description` is `@unique` so seeds are idempotent.
+
+#### Run
+
+Same two-terminal pattern as Week 2 — the agent and MCP layers are unchanged.
+
+```bash
+# Terminal A — now talks to Postgres via the service layer
+npm run rest
+
+# Terminal B
+npm run weather:agent
+```
+
+To inspect or repopulate the database:
+```bash
+npm run db:studio     # browser UI
+npm run db:seed       # re-seed (idempotent; refreshes forecast dates)
+```
+
+#### A note on overloaded "client" vocabulary
+
+After this extension there are several "clients" in the codebase. They serve different layers and aren't related:
+
+| Client | Where | Talks to | Hidden or explicit? |
+|---|---|---|---|
+| OpenAI client | `src/index.ts`, `src/weather.ts`, `src/books.ts`, `src/explore.ts` | OpenAI Responses API | Explicit `new OpenAI(...)` |
+| OpenAI client | `src/research.ts`, `src/weather-agent.ts` | OpenAI Responses API | Hidden inside `Agent` (Agents SDK) |
+| MCP client | `src/weather-agent.ts`, `src/research.ts` | MCP server (child process) | Hidden inside `MCPServerStdio` |
+| HTTP client | `src/weather-mcp.ts` | REST API | Implicit (Node global `fetch`) |
+| Prisma client | `src/lib/index.ts` | Postgres | Explicit `new PrismaClient(...)` |
+
+Each layer that talks to another process or service needs its own client for that service's protocol. What varies is whether the framework hides the client behind a higher-level abstraction.
+
 ---
 
 ## Command index
@@ -290,6 +388,11 @@ Each layer can be tested in isolation: `curl` the REST endpoint, `mcp:inspect` t
 | `npm run rest` | Week 2 — Express REST API on `:3000` |
 | `npm run weather:mcp:inspect` | Inspect `weather-mcp.ts` (needs REST API running) |
 | `npm run weather:agent` | Week 2 — agent → MCP → REST → answer |
+| `npm run db:generate` | Generate the Prisma client from `schema.prisma` |
+| `npm run db:migrate` | Create / apply a new dev migration (use `-- --name <name>`) |
+| `npm run db:deploy` | Apply existing migrations (production) |
+| `npm run db:seed` | Populate the database (idempotent) |
+| `npm run db:studio` | Open Prisma Studio (browser UI) |
 
 ## File index
 
@@ -298,8 +401,11 @@ day-1/
 ├─ openapi.yaml             ← API contract (Week 2)
 ├─ package.json
 ├─ tsconfig.json
-├─ .env                     ← OPENAI_API_KEY (gitignored)
+├─ .env                     ← OPENAI_API_KEY, DATABASE_URL (gitignored)
 ├─ .env.example
+├─ prisma/
+│  ├─ schema.prisma         ← Week 2 ext (City / Conditions / CurrentWeather / Forecast)
+│  └─ seed.ts               ← Week 2 ext (idempotent seed)
 └─ src/
    ├─ index.ts              ← Day 1
    ├─ explore.ts            ← raw JSON of Response items
@@ -307,7 +413,12 @@ day-1/
    ├─ books.ts              ← Day 5 (structured outputs)
    ├─ research.ts           ← Day 6/7 (agent + MCP library)
    ├─ mcp-server.ts         ← Day 7 (library MCP server)
-   ├─ rest-server.ts        ← Week 2 (REST API)
+   ├─ rest-server.ts        ← Week 2 (REST API, now backed by service layer)
    ├─ weather-mcp.ts        ← Week 2 (MCP wrapper over REST)
-   └─ weather-agent.ts      ← Week 2 (REPL agent)
+   ├─ weather-agent.ts      ← Week 2 (REPL agent)
+   └─ lib/                  ← Week 2 ext (business logic + data access)
+      ├─ WeatherService.ts        ← Zod-validated entry points
+      ├─ WeatherRepository.ts     ← Prisma queries
+      ├─ WeatherServiceError.ts   ← custom error with `code`
+      └─ index.ts                 ← createWeatherService(), helpers
 ```
