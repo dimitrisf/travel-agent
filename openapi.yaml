@@ -1,0 +1,131 @@
+openapi: 3.1.0
+info:
+  title: Weather API
+  version: 1.0.0
+  description: Demo weather and forecast API used by an MCP wrapper and an OpenAI agent.
+servers:
+  - url: http://localhost:3000
+    description: Local dev server
+
+paths:
+  /weather:
+    get:
+      summary: Get current weather for a city
+      operationId: getWeather
+      parameters:
+        - name: city
+          in: query
+          required: true
+          description: City name, e.g. "Athens"
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Current weather conditions
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CurrentWeather'
+        '400':
+          description: Missing or invalid parameters
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: City not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /forecast:
+    get:
+      summary: Get an N-day forecast for a city
+      operationId: getForecast
+      parameters:
+        - name: city
+          in: query
+          required: true
+          description: City name
+          schema:
+            type: string
+        - name: days
+          in: query
+          required: false
+          description: Number of days to forecast (1–7)
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 7
+            default: 3
+      responses:
+        '200':
+          description: Forecast for the requested period
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Forecast'
+        '400':
+          description: Missing or invalid parameters
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: City not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+components:
+  schemas:
+    CurrentWeather:
+      type: object
+      required: [city, tempC, conditions, units]
+      properties:
+        city:
+          type: string
+        tempC:
+          type: number
+        conditions:
+          type: string
+        units:
+          type: string
+          enum: [celsius]
+
+    ForecastDay:
+      type: object
+      required: [date, tempCMin, tempCMax, conditions]
+      properties:
+        date:
+          type: string
+          format: date
+        tempCMin:
+          type: number
+        tempCMax:
+          type: number
+        conditions:
+          type: string
+
+    Forecast:
+      type: object
+      required: [city, units, days]
+      properties:
+        city:
+          type: string
+        units:
+          type: string
+          enum: [celsius]
+        days:
+          type: array
+          items:
+            $ref: '#/components/schemas/ForecastDay'
+
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: string
