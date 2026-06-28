@@ -7,12 +7,31 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
+// ───────────────────────────────────────────────
+// Geography
+// ───────────────────────────────────────────────
+
+model Country {
+  id      Int    @id @default(autoincrement())
+  name    String
+  isoCode String @unique
+  cities  City[]
+}
+
 model City {
   id             Int             @id @default(autoincrement())
   name           String          @unique
+  countryId      Int
+  country        Country         @relation(fields: [countryId], references: [id])
   currentWeather CurrentWeather?
   forecasts      Forecast[]
+  airports       Airport[]
+  hotels         Hotel[]
 }
+
+// ───────────────────────────────────────────────
+// Weather
+// ───────────────────────────────────────────────
 
 model Conditions {
   id             Int              @id @default(autoincrement())
@@ -42,4 +61,136 @@ model Forecast {
 
   @@unique([cityId, date])
   @@index([cityId, date])
+}
+
+// ───────────────────────────────────────────────
+// Travel — flights
+// ───────────────────────────────────────────────
+
+model Airport {
+  id        Int    @id @default(autoincrement())
+  iataCode  String @unique
+  icaoCode  String @unique
+  name      String
+  cityId    Int
+  city      City   @relation(fields: [cityId], references: [id])
+  latitude  Float
+  longitude Float
+  timezone  String
+
+  originOf      FlightDefinition[] @relation("FlightOrigin")
+  destinationOf FlightDefinition[] @relation("FlightDestination")
+}
+
+model Airline {
+  id                Int                @id @default(autoincrement())
+  iataCode          String             @unique
+  icaoCode          String             @unique
+  name              String
+  flightDefinitions FlightDefinition[]
+}
+
+model FlightDefinition {
+  id                   Int              @id @default(autoincrement())
+  airlineId            Int
+  airline              Airline          @relation(fields: [airlineId], references: [id])
+  flightNumber         String
+  originAirportId      Int
+  originAirport        Airport          @relation("FlightOrigin", fields: [originAirportId], references: [id])
+  destinationAirportId Int
+  destinationAirport   Airport          @relation("FlightDestination", fields: [destinationAirportId], references: [id])
+  basePriceEUR         Float
+  durationMinutes      Int
+  stops                Int              @default(0)
+  instances            FlightInstance[]
+
+  @@unique([airlineId, flightNumber])
+}
+
+model FlightInstance {
+  id                 Int              @id @default(autoincrement())
+  flightDefinitionId Int
+  flightDefinition   FlightDefinition @relation(fields: [flightDefinitionId], references: [id], onDelete: Cascade)
+  departureDatetime  DateTime
+  arrivalDatetime    DateTime
+  status             String           @default("scheduled")
+  aircraft           String?
+  gate               String?
+
+  @@unique([flightDefinitionId, departureDatetime])
+  @@index([departureDatetime])
+}
+
+// ───────────────────────────────────────────────
+// Travel — hotels
+// ───────────────────────────────────────────────
+
+model Hotel {
+  id        Int    @id @default(autoincrement())
+  name      String
+  cityId    Int
+  city      City   @relation(fields: [cityId], references: [id])
+  address   String
+  stars     Int
+  rating    Float
+  latitude  Float
+  longitude Float
+
+  roomTypes          RoomType[]
+  hotelAmenities     HotelAmenity[]
+  cancellationPolicy CancellationPolicy?
+
+  @@unique([cityId, name])
+  @@index([cityId])
+}
+
+model RoomType {
+  id        Int    @id @default(autoincrement())
+  hotelId   Int
+  hotel     Hotel  @relation(fields: [hotelId], references: [id], onDelete: Cascade)
+  name      String
+  maxGuests Int
+  beds      Int
+  basePrice Float
+  currency  String @default("EUR")
+
+  availability Availability[]
+
+  @@unique([hotelId, name])
+}
+
+model Availability {
+  id             Int      @id @default(autoincrement())
+  roomTypeId     Int
+  roomType       RoomType @relation(fields: [roomTypeId], references: [id], onDelete: Cascade)
+  date           DateTime @db.Date
+  roomsAvailable Int
+  price          Float
+  currency       String   @default("EUR")
+
+  @@unique([roomTypeId, date])
+  @@index([date])
+}
+
+model Amenity {
+  id             Int            @id @default(autoincrement())
+  name           String         @unique
+  hotelAmenities HotelAmenity[]
+}
+
+model HotelAmenity {
+  hotelId   Int
+  amenityId Int
+  hotel     Hotel   @relation(fields: [hotelId], references: [id], onDelete: Cascade)
+  amenity   Amenity @relation(fields: [amenityId], references: [id], onDelete: Cascade)
+
+  @@id([hotelId, amenityId])
+}
+
+model CancellationPolicy {
+  id               Int     @id @default(autoincrement())
+  hotelId          Int     @unique
+  hotel            Hotel   @relation(fields: [hotelId], references: [id], onDelete: Cascade)
+  freeCancellation Boolean
+  description      String
 }
