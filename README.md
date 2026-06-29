@@ -375,6 +375,73 @@ Each layer that talks to another process or service needs its own client for tha
 
 ---
 
+## Travel Assistant
+
+A second domain on top of the same project. The pipeline mirrors the weather stack — `Agent → MCP server → REST APIs → service layer → Prisma → Postgres` — but the data model is richer and the agent orchestrates *two* tools (`search_flights`, `search_hotels`) instead of one. The same `City` table is reused across weather and travel.
+
+Built in stages so each layer can be reviewed in isolation:
+
+1. **Stage 1** — Prisma models + idempotent seed
+2. **Stage 2** — service + repository layer under `src/lib/`
+3. **Stage 3** — two REST APIs (flight + hotel) *(pending)*
+4. **Stage 4** — Travel MCP server wrapping both APIs *(pending)*
+5. **Stage 5** — Travel agent that orchestrates both tools *(pending)*
+
+### Stage 1 — schema + seed
+
+`prisma/schema.prisma` gains seven travel models, plus `Country` and a `countryId` FK on the existing `City`:
+
+| Model | Purpose |
+|---|---|
+| `Country` | Lookup. `isoCode` unique. |
+| `City` *(extended)* | Now required `countryId`. Reused by weather. |
+| `Airport` | IATA/ICAO codes unique. FK to City. Lat/lon + IANA timezone. Two named relations to `FlightDefinition`. |
+| `Airline` | IATA/ICAO codes unique. |
+| `FlightDefinition` | Route template — airline + flight number + origin/destination + base price + duration + stops. Unique on `(airlineId, flightNumber)`. |
+| `FlightInstance` | Specific operation of a route on a date. Unique on `(flightDefinitionId, departureDatetime)`. |
+| `Hotel` | Name, address, stars, rating, lat/lon. Unique on `(cityId, name)`. |
+| `RoomType` | Per-hotel rooms with capacity, beds, base price, currency. Unique on `(hotelId, name)`. |
+| `Availability` | Date-varying price + rooms count per `(roomType, date)`. |
+| `Amenity` | Lookup table (Breakfast, Free WiFi, Swimming Pool, Pet Friendly, Parking, Gym, AC, Spa). |
+| `HotelAmenity` | Many-to-many join with composite PK `(hotelId, amenityId)`. |
+| `CancellationPolicy` | 1:1 with Hotel via `hotelId @unique`. Carries `freeCancellation` + `description`. |
+
+Why split price between `RoomType.basePrice` and `Availability.price`? Because real hotels change rates daily. `RoomType.basePrice` is the catalogue figure; `Availability.price` is what you actually pay on a given night. Similarly, `FlightDefinition` carries route-invariant data (price baseline, duration, stops); `FlightInstance` carries the schedule.
+
+`prisma/seed.ts` populates (all upserts, idempotent):
+- 5 countries, 5 cities (Athens, Berlin, London, Tokyo, New York), 5 airports, 5 airlines.
+- 12 flight definitions covering Athens/Berlin/London/Tokyo/JFK pairs.
+- 14 days × 12 routes = **168 flight instances**, computing arrival from departure + `durationMinutes`.
+- 8 amenities, 14 hotels, **27 room types**, **567 availability rows** (21 days × room types; Fri/Sat = base × 1.15), **63 amenity links**, 14 cancellation policies.
+
+### Stage 2 — service + repository layer
+
+Under [src/lib/](src/lib/):
+
+| File | Role |
+|---|---|
+| `TravelServiceError.ts` | Shared error class for flights + hotels. Codes: `CITY_NOT_FOUND`, `AIRPORT_NOT_FOUND`, `INVALID_DATE_RANGE`, `INTERNAL_ERROR`. |
+| `FlightRepository.ts` | `findInstances()` joins FlightInstance → FlightDefinition → Airline + Airport[origin]→City + Airport[destination]→City. `airportExists()` for input validation. |
+| `FlightService.ts` | `searchFlights()` — Zod-validated input matching your spec (`origin`, `destination`, `departure_date`, `return_date?`, `adults`, `children`, `cabin_class`, `nonstop_only`, `max_price?`, `preferred_airlines?`, `currency`). Returns `{ outbound: [...], inbound: [...] }`. |
+| `HotelRepository.ts` | `findAvailable()` joins Hotel → City + RoomType (filtered by `maxGuests`) + Availability (filtered to the date window) + HotelAmenity → Amenity + CancellationPolicy. |
+| `HotelService.ts` | `searchHotels()` — Zod-validated input. Converts boolean flags (`breakfast_required`, `pet_friendly`) into amenity-name filters. |
+| `index.ts` *(updated)* | New exports + helpers: `createFlightService()`, `createHotelService()`, `isTravelServiceError()`. The lazy singleton `PrismaClient` is shared across all three service factories. |
+
+#### Design points
+
+- **Cabin multipliers live in the service, not the DB.** `economy=1, premium_economy=1.5, business=3, first=6` — adjustable without migrations.
+- **`return_date` is optional.** When provided, the service does two queries (origin→destination + destination→origin) and packs them into `{ outbound, inbound }`. When absent, `inbound` is `[]`.
+- **Hotel pricing aggregates across nights.** A hotel result is per `(hotel, room_type)` combination. The service sums `Availability.price` across every night in `[checkin, checkout)`, requires `roomsAvailable >= rooms` for every night, and returns both `total_price` and `avgPricePerNight`. Sorted ascending by avg price so the agent gets the cheapest first.
+- **Boolean flags in the input → amenity-name filters in the repo.** `breakfast_required: true` becomes `requiredAmenities: ['Breakfast']`. The agent doesn't need to know the amenity catalogue exists.
+- **All errors are wrapped.** Prisma throws → `TravelServiceError('INTERNAL_ERROR', { cause: err })`. Express middleware (Stage 3) will then map codes to HTTP statuses (`AIRPORT_NOT_FOUND`/`CITY_NOT_FOUND` → 404, `INVALID_DATE_RANGE` → 400, etc.).
+- **Dates are UTC calendar days.** Both services interpret `YYYY-MM-DD` strings as UTC and query against `gte/lt` ranges. Real production code would need IATA-airport-local tz arithmetic; documented as a known simplification.
+
+#### Conditional-spread trick used by the repos
+
+The repository `where` clauses use `...(cond ? { key: val } : {})` to omit filter keys entirely when no filter is requested — neither `null` nor `undefined` ends up in the Prisma `where`. Keeps the generated SQL clean and the JSON debug-friendly.
+
+---
+
 ## Command index
 
 | Command | Purpose |
@@ -392,6 +459,7 @@ Each layer that talks to another process or service needs its own client for tha
 | `npm run db:migrate` | Create / apply a new dev migration (use `-- --name <name>`) |
 | `npm run db:deploy` | Apply existing migrations (production) |
 | `npm run db:seed` | Populate the database (idempotent) |
+| `npm run db:reset` | Drop the DB, re-apply migrations, run seed |
 | `npm run db:studio` | Open Prisma Studio (browser UI) |
 
 ## File index
@@ -404,8 +472,8 @@ day-1/
 ├─ .env                     ← OPENAI_API_KEY, DATABASE_URL (gitignored)
 ├─ .env.example
 ├─ prisma/
-│  ├─ schema.prisma         ← Week 2 ext (City / Conditions / CurrentWeather / Forecast)
-│  └─ seed.ts               ← Week 2 ext (idempotent seed)
+│  ├─ schema.prisma         ← weather + travel models (Week 2 ext + Travel Stage 1)
+│  └─ seed.ts               ← idempotent seed for all domains
 └─ src/
    ├─ index.ts              ← Day 1
    ├─ explore.ts            ← raw JSON of Response items
@@ -416,9 +484,14 @@ day-1/
    ├─ rest-server.ts        ← Week 2 (REST API, now backed by service layer)
    ├─ weather-mcp.ts        ← Week 2 (MCP wrapper over REST)
    ├─ weather-agent.ts      ← Week 2 (REPL agent)
-   └─ lib/                  ← Week 2 ext (business logic + data access)
+   └─ lib/                  ← business logic + data access (Week 2 ext + Travel Stage 2)
       ├─ WeatherService.ts        ← Zod-validated entry points
       ├─ WeatherRepository.ts     ← Prisma queries
       ├─ WeatherServiceError.ts   ← custom error with `code`
-      └─ index.ts                 ← createWeatherService(), helpers
+      ├─ FlightService.ts         ← Travel Stage 2 (Zod + cabin multipliers)
+      ├─ FlightRepository.ts      ← Travel Stage 2 (FlightInstance joins)
+      ├─ HotelService.ts          ← Travel Stage 2 (Zod + amenity filters)
+      ├─ HotelRepository.ts       ← Travel Stage 2 (Hotel/RoomType/Availability joins)
+      ├─ TravelServiceError.ts    ← shared error for flights + hotels
+      └─ index.ts                 ← createWeatherService/FlightService/HotelService, helpers
 ```
