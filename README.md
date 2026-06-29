@@ -384,7 +384,7 @@ Built in stages so each layer can be reviewed in isolation:
 1. **Stage 1** — Prisma models + idempotent seed
 2. **Stage 2** — service + repository layer under `src/lib/`
 3. **Stage 3** — two REST APIs (`flight-api.ts` on `:3001`, `hotel-api.ts` on `:3002`)
-4. **Stage 4** — Travel MCP server wrapping both APIs *(pending)*
+4. **Stage 4** — Travel MCP server (`travel-mcp.ts`) wrapping both APIs
 5. **Stage 5** — Travel agent that orchestrates both tools *(pending)*
 
 ### Stage 1 — schema + seed
@@ -520,6 +520,70 @@ curl -i "http://localhost:3002/hotels?city=Berlin&checkin=2026-07-06&checkout=20
 
 Three independent REST processes, one database, one `PrismaClient` per process (lazy-singleton via the factories in `src/lib/index.ts`). Stages 4 and 5 will put the Travel MCP server and Travel agent on top of the two travel APIs without changing any of this.
 
+### Stage 4 — Travel MCP server
+
+[src/travel-mcp.ts](src/travel-mcp.ts) is the MCP surface for both travel APIs — one server, two tools, two HTTP backends.
+
+| Field | Value |
+|---|---|
+| Server identity | `name: 'travel', version: '1.0.0'` |
+| Tools | `search_flights`, `search_hotels` |
+| Transport | stdio (JSON-RPC over stdin/stdout) |
+| Backends | `FLIGHT_API_BASE` (default `:3001`) + `HOTEL_API_BASE` (default `:3002`) |
+
+#### Why two MCP servers (weather + travel) instead of one
+
+Group tools by **domain cohesion**, not transport. Three rules of thumb that drove the choice:
+
+1. **Tools used together belong in the same MCP.** Flights and hotels co-occur in nearly every trip-planning query — splitting them into `flight-mcp` + `hotel-mcp` would force agents to mount two connectors to do one task. Over-fragmentation.
+2. **Tools serving different domains belong in different MCPs.** Weather and travel are unrelated capability sets. A travel agent doesn't need `get_weather` cluttering its tool list; a weather-only client doesn't need flight tools.
+3. **Don't build a monolith.** MCP is explicitly designed for *composition* — a hybrid agent that needs both can write `mcpServers: [mcpWeather, mcpTravel]`, which is the natural shape on the agent side. Putting everything in one server forces every consumer to load every tool.
+
+The "sunny weekend in Berlin" scenario is solved at the **agent layer**, not by merging MCPs.
+
+#### What's in the file
+
+- **Input schemas** mirror `SearchFlightsInput` and `SearchHotelsInput` from the service layer, written as raw Zod shapes (the form `registerTool` accepts). Every field carries a `.describe(...)` — those strings become the model-facing parameter docs.
+- **Two handlers** that each build a URL with query params, fetch it, and return the response body as MCP text content.
+- **Two helpers**:
+  - `setParam(url, key, value)` — appends a query param only when value is defined. Arrays are joined with commas (matching how `parseList` in the REST APIs decodes them).
+  - `fetchAsToolResult(url)` — packages `{ content: [{ type: 'text', text }], isError: !r.ok }` so each handler can be a flat list of `setParam` calls plus one `return`.
+
+The handlers don't validate input — the REST APIs (and through them, the services) do. If the model emits malformed input, the REST layer returns 400 with Zod's `issues`, and the MCP wrapper surfaces that as `isError: true`. Single source of truth for validation.
+
+#### Try it
+
+Three terminals:
+
+```bash
+# Terminal 1
+npm run flight:api
+
+# Terminal 2
+npm run hotel:api
+
+# Terminal 3 — browser-based inspector
+npm run travel:mcp:inspect
+```
+
+The inspector shows both tools, their auto-generated JSON Schemas (built from the Zod shapes), and lets you invoke them with sample arguments. Each call traces:
+
+```
+inspector ──stdio──▶ travel-mcp.ts ──HTTP──▶ flight-api.ts / hotel-api.ts ──▶ Postgres
+```
+
+#### Architecture after Stage 4
+
+```
+                                                    ┌── flight-api.ts (:3001) ─┐
+                                                    │                          │
+[ MCP client / inspector / agent ] ── stdio ──▶ travel-mcp.ts                   ├─▶ Postgres
+                                                    │                          │
+                                                    └── hotel-api.ts  (:3002) ─┘
+```
+
+Three external dependencies (two REST APIs + Postgres), one MCP surface. The model sees only `search_flights` and `search_hotels`; it has no idea two REST services are involved.
+
 ---
 
 ## Command index
@@ -537,6 +601,7 @@ Three independent REST processes, one database, one `PrismaClient` per process (
 | `npm run weather:agent` | Week 2 — agent → MCP → REST → answer |
 | `npm run flight:api` | Travel Stage 3 — Express flight REST API on `:3001` |
 | `npm run hotel:api` | Travel Stage 3 — Express hotel REST API on `:3002` |
+| `npm run travel:mcp:inspect` | Travel Stage 4 — inspect `travel-mcp.ts` (needs flight:api + hotel:api running) |
 | `npm run db:generate` | Generate the Prisma client from `schema.prisma` |
 | `npm run db:migrate` | Create / apply a new dev migration (use `-- --name <name>`) |
 | `npm run db:deploy` | Apply existing migrations (production) |
@@ -568,6 +633,7 @@ day-1/
    ├─ weather-agent.ts      ← Week 2 (REPL agent)
    ├─ flight-api.ts         ← Travel Stage 3 (REST API on :3001)
    ├─ hotel-api.ts          ← Travel Stage 3 (REST API on :3002)
+   ├─ travel-mcp.ts         ← Travel Stage 4 (MCP wrapper over flight + hotel APIs)
    └─ lib/                  ← business logic + data access (Week 2 ext + Travel Stage 2)
       ├─ WeatherService.ts        ← Zod-validated entry points
       ├─ WeatherRepository.ts     ← Prisma queries
