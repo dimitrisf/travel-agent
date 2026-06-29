@@ -58,7 +58,7 @@ app.use(
       res.status(status).json({ error: err.message, code: err.code });
       return;
     }
-    console.error('[rest-server] unexpected error:', err);
+    console.error('[weather-api] unexpected error:', err);
     res.status(500).json({ error: 'Internal server error.' });
   },
 );

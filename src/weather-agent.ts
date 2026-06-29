@@ -16,12 +16,12 @@ import {
 // 2. Wraps a Client + StdioClientTransport from @modelcontextprotocol/sdk around its stdin/stdout.
 // 3. On connect(), calls tools/list to discover get_weather and get_forecast.
 // 4. When the agent decides to call one, sends tools/call over the same channel.
-// So the full chain is: Agent → MCPServerStdio → Client → StdioClientTransport → MCP server (weather-mcp.ts) → REST API (rest-server.ts).
+// So the full chain is: Agent → MCPServerStdio → Client → StdioClientTransport → MCP server (weather-mcp.ts) → REST API (weather-api.ts).
 // or in other words:
 // weather-agent.ts ── MCPServerStdio (MCP client) ──stdio──▶ weather-mcp.ts (MCP
 //                        │
 //                        └ wraps @modelcontextprotocol/sdk's Client
-// server) ──HTTP──▶ rest-server.ts
+// server) ──HTTP──▶ weather-api.ts
 // Bottom line, the MCP client is hidden inside MCPServerStdio, which is why we don't see it in this file.
 const mcpWeather = new MCPServerStdio({
   // ← MCP client lives in here

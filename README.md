@@ -28,8 +28,8 @@ npm run db:seed              # populate cities, conditions, forecasts
 | 5 | `src/books.ts` | Structured outputs with Zod / JSON Schema |
 | 6 | `src/research.ts` | OpenAI Agents SDK — `Agent`, `Tool`, `Runner` |
 | 7 | `src/mcp-server.ts` | MCP server (single source of truth for the library tools) |
-| Week 2 | `openapi.yaml`, `src/rest-server.ts`, `src/weather-mcp.ts`, `src/weather-agent.ts` | REST API → MCP wrapper → Agent |
-| Week 2 (extension) | `prisma/schema.prisma`, `prisma/seed.ts`, `src/lib/*`, updated `src/rest-server.ts` | Service layer + Postgres (Neon) via Prisma behind the REST API |
+| Week 2 | `openapi.yaml`, `src/weather-api.ts`, `src/weather-mcp.ts`, `src/weather-agent.ts` | REST API → MCP wrapper → Agent |
+| Week 2 (extension) | `prisma/schema.prisma`, `prisma/seed.ts`, `src/lib/*`, updated `src/weather-api.ts` | Service layer + Postgres (Neon) via Prisma behind the REST API |
 
 ---
 
@@ -217,7 +217,7 @@ A production-shaped stack:
                                                  │  HTTP
                                                  ▼
                                         ┌──────────────────┐
-                                        │ rest-server.ts   │
+                                        │ weather-api.ts   │
                                         │ (Express :3000)  │
                                         └──────────────────┘
 ```
@@ -225,7 +225,7 @@ A production-shaped stack:
 ### Pieces
 
 - `openapi.yaml` — the contract for `GET /weather` and `GET /forecast`. Includes request parameters, success responses, and 400/404 errors.
-- `src/rest-server.ts` — Express implementation of the spec on port 3000.
+- `src/weather-api.ts` — Express implementation of the spec on port 3000.
 - `src/weather-mcp.ts` — *MCP wrapper*: an MCP server whose handlers translate each tool call into an HTTP request to the REST API. Owns no data of its own.
 - `src/weather-agent.ts` — REPL agent that consumes the MCP server.
 
@@ -235,7 +235,7 @@ Two terminals:
 
 **Terminal A:**
 ```bash
-npm run rest
+npm run weather:api
 ```
 
 **Terminal B:**
@@ -254,7 +254,7 @@ The stack is three OS processes running at the same time:
 
 | # | Process | Started by | Role |
 |---|---|---|---|
-| 1 | `rest-server.ts` (Express on `:3000`) | You — `npm run rest` in Terminal A | The actual REST API. Owns the weather data. |
+| 1 | `weather-api.ts` (Express on `:3000`) | You — `npm run weather:api` in Terminal A | The actual REST API. Owns the weather data. |
 | 2 | `weather-agent.ts` (REPL + Agents SDK) | You — `npm run weather:agent` in Terminal B | Parent process. Runs the REPL and the agent runner. |
 | 3 | `weather-mcp.ts` (MCP server) | Automatically spawned as a **child** of process #2 by `MCPServerStdio({ fullCommand: 'tsx src/weather-mcp.ts' })` | The MCP wrapper. Translates each tool call into an HTTP request to process #1. |
 
@@ -297,7 +297,7 @@ weather-agent.ts        (Agents SDK + REPL)
 weather-mcp.ts          (MCP wrapper)
        │ HTTP
        ▼
-rest-server.ts          (Express handlers — thin)
+weather-api.ts          (Express handlers — thin)
        │
        ▼  ┌──────────── src/lib/index.ts ────────────┐
           │ createWeatherService()                   │
@@ -347,7 +347,7 @@ Same two-terminal pattern as Week 2 — the agent and MCP layers are unchanged.
 
 ```bash
 # Terminal A — now talks to Postgres via the service layer
-npm run rest
+npm run weather:api
 
 # Terminal B
 npm run weather:agent
@@ -383,7 +383,7 @@ Built in stages so each layer can be reviewed in isolation:
 
 1. **Stage 1** — Prisma models + idempotent seed
 2. **Stage 2** — service + repository layer under `src/lib/`
-3. **Stage 3** — two REST APIs (flight + hotel) *(pending)*
+3. **Stage 3** — two REST APIs (`flight-api.ts` on `:3001`, `hotel-api.ts` on `:3002`)
 4. **Stage 4** — Travel MCP server wrapping both APIs *(pending)*
 5. **Stage 5** — Travel agent that orchestrates both tools *(pending)*
 
@@ -440,6 +440,86 @@ Under [src/lib/](src/lib/):
 
 The repository `where` clauses use `...(cond ? { key: val } : {})` to omit filter keys entirely when no filter is requested — neither `null` nor `undefined` ends up in the Prisma `where`. Keeps the generated SQL clean and the JSON debug-friendly.
 
+### Stage 3 — REST APIs
+
+Two thin Express servers, each backed by the Stage 2 service layer:
+
+| File | Port | Endpoint |
+|---|---|---|
+| `src/flight-api.ts` | `3001` (overridable via `FLIGHT_API_PORT`) | `GET /flights` |
+| `src/hotel-api.ts` | `3002` (overridable via `HOTEL_API_PORT`) | `GET /hotels` |
+
+These run alongside `weather-api.ts` (`:3000`); three REST processes can coexist.
+
+#### Handlers
+
+Each handler does three things and nothing else:
+
+1. Parse the query string into a typed input object (`parseSearchFlightsQuery` / `parseSearchHotelsQuery`).
+2. Call the service (`flightService.searchFlights(input)` / `hotelService.searchHotels(input)`).
+3. `next(err)` on throw → centralized error middleware does the HTTP mapping.
+
+#### Centralized error middleware
+
+| Error | HTTP status |
+|---|---|
+| `ZodError` (validation) | 400, body `{ error, issues: [...] }` |
+| `TravelServiceError.code === 'AIRPORT_NOT_FOUND'` *(flights)* | 404 |
+| `TravelServiceError.code === 'CITY_NOT_FOUND'` *(hotels)* | 404 |
+| `TravelServiceError.code === 'INVALID_DATE_RANGE'` | 400 |
+| `TravelServiceError.code === 'INTERNAL_ERROR'` | 500 |
+| Anything else | 500 (logged) |
+
+The error checks use the same `isZodValidationError` / `isTravelServiceError` helpers from `src/lib/index.ts` that the weather API uses.
+
+#### Query parsing
+
+`req.query` values are always `string | string[] | undefined`. Each handler runs a small parse step before handing off to the service:
+
+| Field | HTTP shape | After parsing |
+|---|---|---|
+| `adults`, `days`, `max_price` | `"1"` | `1` (via `Number`) |
+| `nonstop_only`, `breakfast_required`, etc. | `"true"` / `"false"` / `"1"` / `"0"` | `true` / `false` |
+| `preferred_airlines` | `"A3,LH"` *or* `["A3","LH"]` (Express auto-arrayifies repeated keys) | `["A3","LH"]` |
+| Missing fields | `undefined` | preserved so Zod's `.default()` applies |
+
+`parseBool` and `parseList` live in [src/lib/queryParsing.ts](src/lib/queryParsing.ts) and are re-exported from `src/lib/index.ts`. Both API files import them rather than redeclaring.
+
+The HTTP layer does the dumb coercion; the Zod schema in the service does strict validation. Two distinct jobs, kept apart deliberately.
+
+#### Try it
+
+```bash
+# Terminal 1
+npm run flight:api
+
+# Terminal 2
+npm run hotel:api
+
+# Anywhere
+curl "http://localhost:3001/flights?origin=ATH&destination=BER&departure_date=2026-07-03"
+curl "http://localhost:3001/flights?origin=ATH&destination=BER&departure_date=2026-07-03&return_date=2026-07-06&cabin_class=business&nonstop_only=true&preferred_airlines=A3,LH"
+curl "http://localhost:3002/hotels?city=Berlin&checkin=2026-07-03&checkout=2026-07-06&min_stars=4&breakfast_required=true&free_cancellation=true&max_price=200"
+
+# Error cases
+curl -i "http://localhost:3001/flights?origin=XXX&destination=BER&departure_date=2026-07-03"   # 404 AIRPORT_NOT_FOUND
+curl -i "http://localhost:3001/flights?origin=ATH&destination=BER&departure_date=2026/07/03"   # 400 ZodError
+curl -i "http://localhost:3002/hotels?city=Atlantis&checkin=2026-07-03&checkout=2026-07-06"    # 404 CITY_NOT_FOUND
+curl -i "http://localhost:3002/hotels?city=Berlin&checkin=2026-07-06&checkout=2026-07-03"      # 400 INVALID_DATE_RANGE
+```
+
+#### Architecture after Stage 3
+
+```
+                                ┌── flight-api.ts (:3001) ─── FlightService ─── FlightRepository ─┐
+                                │                                                                  │
+[ HTTP client / curl / agent ] ─┤── hotel-api.ts  (:3002) ─── HotelService  ─── HotelRepository  ─┤─▶ Postgres (Neon)
+                                │                                                                  │
+                                └── weather-api.ts (:3000) ── WeatherService ── WeatherRepository ─┘
+```
+
+Three independent REST processes, one database, one `PrismaClient` per process (lazy-singleton via the factories in `src/lib/index.ts`). Stages 4 and 5 will put the Travel MCP server and Travel agent on top of the two travel APIs without changing any of this.
+
 ---
 
 ## Command index
@@ -452,9 +532,11 @@ The repository `where` clauses use `...(cond ? { key: val } : {})` to omit filte
 | `npm run explore` | Print raw JSON of a plain and a tool-using response |
 | `npm run research` | Day 6/7 — research agent backed by `mcp-server.ts` |
 | `npm run mcp:inspect` | Inspect `mcp-server.ts` interactively |
-| `npm run rest` | Week 2 — Express REST API on `:3000` |
-| `npm run weather:mcp:inspect` | Inspect `weather-mcp.ts` (needs REST API running) |
+| `npm run weather:api` | Week 2 — Express weather REST API on `:3000` |
+| `npm run weather:mcp:inspect` | Inspect `weather-mcp.ts` (needs weather:api running) |
 | `npm run weather:agent` | Week 2 — agent → MCP → REST → answer |
+| `npm run flight:api` | Travel Stage 3 — Express flight REST API on `:3001` |
+| `npm run hotel:api` | Travel Stage 3 — Express hotel REST API on `:3002` |
 | `npm run db:generate` | Generate the Prisma client from `schema.prisma` |
 | `npm run db:migrate` | Create / apply a new dev migration (use `-- --name <name>`) |
 | `npm run db:deploy` | Apply existing migrations (production) |
@@ -481,9 +563,11 @@ day-1/
    ├─ books.ts              ← Day 5 (structured outputs)
    ├─ research.ts           ← Day 6/7 (agent + MCP library)
    ├─ mcp-server.ts         ← Day 7 (library MCP server)
-   ├─ rest-server.ts        ← Week 2 (REST API, now backed by service layer)
+   ├─ weather-api.ts        ← Week 2 (REST API, now backed by service layer)
    ├─ weather-mcp.ts        ← Week 2 (MCP wrapper over REST)
    ├─ weather-agent.ts      ← Week 2 (REPL agent)
+   ├─ flight-api.ts         ← Travel Stage 3 (REST API on :3001)
+   ├─ hotel-api.ts          ← Travel Stage 3 (REST API on :3002)
    └─ lib/                  ← business logic + data access (Week 2 ext + Travel Stage 2)
       ├─ WeatherService.ts        ← Zod-validated entry points
       ├─ WeatherRepository.ts     ← Prisma queries
@@ -493,5 +577,6 @@ day-1/
       ├─ HotelService.ts          ← Travel Stage 2 (Zod + amenity filters)
       ├─ HotelRepository.ts       ← Travel Stage 2 (Hotel/RoomType/Availability joins)
       ├─ TravelServiceError.ts    ← shared error for flights + hotels
+      ├─ queryParsing.ts          ← Travel Stage 3 (parseBool, parseList)
       └─ index.ts                 ← createWeatherService/FlightService/HotelService, helpers
 ```

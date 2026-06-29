@@ -50,6 +50,9 @@ export {
   type TravelServiceErrorCode,
 } from './TravelServiceError';
 
+// ───── HTTP query-string parsing ─────
+export { parseBool, parseList } from './queryParsing';
+
 // ───── Helpers ─────
 let defaultPrisma: PrismaClient | undefined;
 
