@@ -385,7 +385,7 @@ Built in stages so each layer can be reviewed in isolation:
 2. **Stage 2** — service + repository layer under `src/lib/`
 3. **Stage 3** — two REST APIs (`flight-api.ts` on `:3001`, `hotel-api.ts` on `:3002`)
 4. **Stage 4** — Travel MCP server (`travel-mcp.ts`) wrapping both APIs
-5. **Stage 5** — Travel agent that orchestrates both tools *(pending)*
+5. **Stage 5** — Travel agent (`travel-agent.ts`) that orchestrates both tools
 
 ### Stage 1 — schema + seed
 
@@ -584,6 +584,129 @@ inspector ──stdio──▶ travel-mcp.ts ──HTTP──▶ flight-api.ts /
 
 Three external dependencies (two REST APIs + Postgres), one MCP surface. The model sees only `search_flights` and `search_hotels`; it has no idea two REST services are involved.
 
+### Stage 5 — Travel agent
+
+[src/travel-agent.ts](src/travel-agent.ts) — REPL that mounts `travel-mcp` and lets the model orchestrate `search_flights` + `search_hotels`. Same skeleton as `weather-agent.ts`; conversation state is carried across turns via `result.history`.
+
+#### The instruction block
+
+The system prompt covers what the model can't figure out on its own:
+
+- **Today's date**, injected at agent-startup time (`new Date().toISOString().slice(0, 10)`). Without it, the model can't resolve *"next Friday"* to a concrete `YYYY-MM-DD` — it doesn't reliably know the current date.
+- **IATA-code lookup for the demo library** (`Athens=ATH, Berlin=BER, London=LHR, Tokyo=HND, New York=JFK`). Prevents confident guesses like `ROM` for Rome.
+- **"Do arithmetic yourself"** — the tools return raw data; the model has to sum flight + hotel, compute *budget remaining ÷ nights*, and pick the cheapest combination. No calculator tool needed at this scale.
+- **Reuse prior tool results** — same nudge as the research agent: don't re-query for follow-up questions the transcript already answers.
+- **EUR only** — the demo library doesn't do currency conversion. The model should surface this if the user asks in USD/GBP instead of silently ignoring the request.
+- **Output shape guidance** — keeps flight replies (flight number, times, price, stops) and hotel replies (name, stars, room type, avg/night, total, key amenities) formatted consistently.
+
+#### Run the full stack
+
+Three terminals:
+
+```bash
+# Terminal 1
+npm run flight:api
+
+# Terminal 2
+npm run hotel:api
+
+# Terminal 3
+npm run travel:agent
+```
+
+Four processes total — the agent spawns `travel-mcp.ts` automatically as a child; you don't run it directly.
+
+#### Example conversations
+
+**Simple:**
+```
+You: Find me a flight from Athens to Berlin on July 3rd.
+```
+One `search_flights` call → A3 824 nonstop + LH 1753 (1 stop).
+
+**Relative dates:**
+```
+You: I want to go from Athens to Berlin next Friday for three days. Show me flights and hotels.
+```
+Model resolves "next Friday" against today's date, picks return three days later, issues two tool calls in parallel.
+
+**Budget orchestration** — the "interesting" case from the design brief:
+```
+You: I want to spend under €600 total for a three-day trip to Berlin next Friday.
+```
+The agent decomposes the query into flights + hotels, sums the cheapest round-trip (~€283), computes the remaining hotel budget (~€317 / 3 nights ≈ €105/night), narrows hotels to that ceiling, and reports the cheapest viable combo.
+
+**Multi-turn memory:**
+```
+You: Recommend flights from Athens to Berlin on July 3rd.
+Agent: [lists A3 824, LH 1753]
+You: Which is the cheapest?
+Agent: [answers from history — no new tool call]
+You: What hotels are available in Berlin from that day for 3 nights, under €150/night?
+Agent: [one search_hotels call]
+```
+
+#### Adding weather as a second MCP (optional)
+
+If you want the "sunny weekend in Berlin" scenario, mount `weather-mcp` alongside `travel-mcp`:
+
+```ts
+const mcpWeather = new MCPServerStdio({
+  name: 'weather',
+  fullCommand: 'tsx src/weather-mcp.ts',
+});
+await mcpWeather.connect();
+
+const agent = new Agent({
+  ...,
+  mcpServers: [mcpWeather, mcpTravel],
+});
+```
+
+The model now sees four tools (`get_weather`, `get_forecast`, `search_flights`, `search_hotels`) and can weave forecast into trip suggestions. You'd need `weather-api.ts` running too. This is the MCP composition story from Stage 4: keep servers small and domain-focused; combine at the agent layer.
+
+#### Final architecture
+
+```
+                    You (REPL)
+                       │
+                       ▼
+              ┌─────────────────┐         Agents SDK (Runner + history)
+              │ travel-agent.ts │─────────┐
+              └────────┬────────┘         │ mcpServers: [mcpTravel]
+                       │                  │
+        OpenAI Responses API              │
+                       │                  ▼
+                    (model)         ┌──────────────┐
+                       │            │ MCP client   │  (inside MCPServerStdio)
+                       ▼            └──────┬───────┘
+                    tool calls             │ stdio (JSON-RPC)
+                       ─────────────▶      ▼
+                                    ┌──────────────┐
+                                    │ travel-mcp.ts│  (child process)
+                                    └──┬────────┬──┘
+                                       │ HTTP   │ HTTP
+                                       ▼        ▼
+                            ┌──────────────┐  ┌──────────────┐
+                            │ flight-api   │  │ hotel-api    │
+                            │  (:3001)     │  │  (:3002)     │
+                            └──────┬───────┘  └──────┬───────┘
+                                   │                 │
+                            FlightService     HotelService
+                                   │                 │
+                            FlightRepository  HotelRepository
+                                   │                 │
+                                   ▼                 ▼
+                              ┌──────────────────────┐
+                              │  PrismaClient        │
+                              └──────────┬───────────┘
+                                         │
+                                         ▼
+                                  PostgreSQL (Neon)
+```
+
+Every layer talks to the next through a stable contract (Zod-validated function signature at the service layer, JSON over HTTP between the REST APIs and the wrapper, JSON-RPC between the MCP client and server). You can swap out any single layer — replace Postgres with SQLite, swap Express for Fastify, run the MCP server over Streamable HTTP instead of stdio — and the rest of the stack is unaffected.
+
 ---
 
 ## Command index
@@ -602,6 +725,7 @@ Three external dependencies (two REST APIs + Postgres), one MCP surface. The mod
 | `npm run flight:api` | Travel Stage 3 — Express flight REST API on `:3001` |
 | `npm run hotel:api` | Travel Stage 3 — Express hotel REST API on `:3002` |
 | `npm run travel:mcp:inspect` | Travel Stage 4 — inspect `travel-mcp.ts` (needs flight:api + hotel:api running) |
+| `npm run travel:agent` | Travel Stage 5 — REPL agent orchestrating flights + hotels (needs flight:api + hotel:api running) |
 | `npm run db:generate` | Generate the Prisma client from `schema.prisma` |
 | `npm run db:migrate` | Create / apply a new dev migration (use `-- --name <name>`) |
 | `npm run db:deploy` | Apply existing migrations (production) |
@@ -634,6 +758,7 @@ day-1/
    ├─ flight-api.ts         ← Travel Stage 3 (REST API on :3001)
    ├─ hotel-api.ts          ← Travel Stage 3 (REST API on :3002)
    ├─ travel-mcp.ts         ← Travel Stage 4 (MCP wrapper over flight + hotel APIs)
+   ├─ travel-agent.ts       ← Travel Stage 5 (REPL agent orchestrating both tools)
    └─ lib/                  ← business logic + data access (Week 2 ext + Travel Stage 2)
       ├─ WeatherService.ts        ← Zod-validated entry points
       ├─ WeatherRepository.ts     ← Prisma queries
