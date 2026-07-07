@@ -628,30 +628,48 @@ Six processes total. The agent manages both MCP child processes automatically; y
 
 #### Example conversations
 
+Sample transcripts show the live progress format (spinner + tool calls + tool outputs + streamed answer) documented in the *Real-time progress with streaming* section below.
+
 **Simple flight query:**
 ```
 You: Find me a flight from Athens to Berlin on July 3rd.
+| thinking…
+  → search_flights({"origin":"ATH","destination":"BER","departure_date":"2026-07-03"})
+  ← {"outbound":[{"flight_number":"A3 824","airline":"Aegean Airlines","departure":"2026-07-03T09:40",…
+
+Agent: Two flights from Athens to Berlin on 2026-07-03:
+- A3 824 — 09:40 → 11:20, nonstop, €138
+- LH 1753 — 12:30 → 15:10, 1 stop, €149
 ```
-One `search_flights` call → A3 824 nonstop + LH 1753 (1 stop).
 
 **Relative dates:**
 ```
 You: I want to go from Athens to Berlin next Friday for three days. Show me flights and hotels.
+| thinking…
+  → search_flights({"origin":"ATH","destination":"BER","departure_date":"2026-07-10","return_date":"2026-07-13"})
+  ← {"outbound":[…
+  → search_hotels({"city":"Berlin","checkin":"2026-07-10","checkout":"2026-07-13"})
+  ← [{"hotel":"City Budget Inn",…
+
+Agent: For Fri 2026-07-10 → Mon 2026-07-13:
+- Flights: A3 824 out (€138) + A3 825 back (€145) = €283
+- Cheapest hotel: City Budget Inn Standard, 3 nights at ~€89/night = €267
+- Total: €550
 ```
-Model resolves "next Friday" against the injected date, picks return three days later, issues `search_flights` + `search_hotels` in parallel.
+Model resolves "next Friday" against the injected date and picks return three days later. Two `search_flights` and `search_hotels` calls fire in parallel.
 
 **Budget orchestration:**
 ```
 You: I want to spend under €600 total for a three-day trip to Berlin next Friday.
 ```
-Agent decomposes into flights + hotels, sums the cheapest round-trip (~€283), computes the remaining hotel budget (~€317 / 3 nights ≈ €105/night), narrows hotels to that ceiling, and reports the cheapest viable combo.
+Agent decomposes into flights + hotels, sums the cheapest round-trip (~€283), computes the remaining hotel budget (~€317 / 3 nights ≈ €105/night), calls `search_hotels` with `max_price=105`, and reports the cheapest viable combo.
 
 **Multi-turn memory:**
 ```
 You: Recommend flights from Athens to Berlin on July 3rd.
 Agent: [lists A3 824, LH 1753]
 You: Which is the cheapest?
-Agent: [answers from history — no new tool call]
+Agent: [answers from history — no new tool call, no spinner beyond the initial "thinking"]
 You: What hotels are available in Berlin from that day for 3 nights, under €150/night?
 Agent: [one search_hotels call]
 ```
@@ -660,13 +678,13 @@ Agent: [one search_hotels call]
 ```
 You: I want a sunny weekend in Berlin under €600 total.
 ```
-Agent calls `get_forecast("Berlin")`, checks each upcoming Friday against the injected list, picks the sunniest weekend within the flight window, then calls `search_flights` + `search_hotels` for that Fri→Sun.
+Agent calls `get_forecast("Berlin")`, checks each upcoming Friday against the injected list, picks the sunniest weekend within the flight window, then calls `search_flights` + `search_hotels` for that Fri→Sun. Full sample transcript in the streaming section below.
 
 **Cross-city comparison:**
 ```
 You: I'm choosing between Athens, Berlin, and London for a July weekend. Show me temperatures and cheapest 3-night hotels for each.
 ```
-Six tool calls in parallel: three `get_forecast` + three `search_hotels`.
+Six tool calls in parallel: three `get_forecast` + three `search_hotels`. The tool-call log makes this vivid — you watch all six `→ …` lines fly by before the model composes the comparison.
 
 #### Refining Stage 5 through testing
 
@@ -710,19 +728,53 @@ Fix: re-run `npm run db:seed`. Upsert semantics mean it's idempotent and fast �
 
 Alternative fix: bump `FORECAST_DAYS` to `14` (or higher) in `prisma/seed.ts` so the forecast and flight windows line up. Removes the "no sunny Friday within forecast" fallback path entirely for weekend queries.
 
-#### How to debug when the agent surprises you
+#### Real-time progress with streaming
 
-When the agent does something you don't expect, the fastest path to a diagnosis is a **tool-call trace**. Add this after each `run(...)` in the REPL loop:
+Original problem: silence between the prompt and the answer. The REPL would sit at a blinking cursor for anywhere from 5 to 20 seconds while the model planned, ran tool calls, and drafted a reply. No signal that anything was happening — and no visibility into which tools the model was calling.
 
-```ts
-for (const item of result.newItems) {
-  if (item.type === 'tool_call_item') {
-    console.log(`  → ${item.rawItem.name}(${JSON.stringify(item.rawItem.arguments)})`);
-  }
-}
+Fix: switch from `await run(...)` (which blocks until the final answer is ready) to `run(..., { stream: true })` (which returns a `StreamedRunResult` you iterate for events). Now every phase of the turn is surfaced live.
+
+What you see now per turn:
+
+```
+You: I want a sunny weekend in Berlin under €600 total.
+| thinking…
+  → get_forecast({"city":"Berlin","days":7})
+  ← {"city":"Berlin","days":[{"date":"2026-07-07","tempCMin":20,"tempCMax":26,"conditions":"clear"},…
+\ thinking…
+  → search_flights({"origin":"ATH","destination":"BER","departure_date":"2026-07-10","return_date":"2026-07-12","cabin_class":"economy"})
+  ← {"outbound":[{"flight_number":"A3 824","airline":"Aegean Airlines","departure":"2026-07-10T09:40",…
+- thinking…
+  → search_hotels({"city":"Berlin","checkin":"2026-07-10","checkout":"2026-07-12","max_price":150})
+  ← [{"hotel":"City Budget Inn","address":"Skalitzer Str. 80, 10997 Berlin",…
+
+Agent: For a sunny weekend in Berlin from Fri 2026-07-10 to Sun 2026-07-12:
+- Flights: A3 824 outbound (€138), A3 825 return (€145) — total €283
+- Hotel: City Budget Inn Standard, 2 nights at €89.35/night — total €178.70
+- Grand total: €461.70, well within your €600 budget.
 ```
 
-Now every turn prints the tools the model actually called. Skipped `search_flights`? Called `get_weather` twice? You'll see it. Almost every "the model behaved weirdly" investigation resolves against this log within a minute.
+Three visual channels working together:
+
+1. **Spinner** (`| thinking…`, `/ thinking…`, `- thinking…`, `\ thinking…`) — animated frame refreshed every 100 ms on the same terminal line via `\r`. Runs whenever the model is between decisions (before the first tool call, and between tool outputs and the next call). Stops permanently once the answer starts streaming.
+2. **Tool-call log** (`→ tool(args)`, `← result`) — printed the moment the model emits a tool call, and again when the result comes back. Immediately answers questions like *"did it call search_flights?"* or *"why did it re-query the same thing?"*.
+3. **Streamed answer** (`Agent: …`) — the final reply lands token-by-token as the model produces it, not in one blob at the end.
+
+Two stream event types drive the display:
+
+| Event type | Handler action |
+|---|---|
+| `run_item_stream_event` with `item.type === 'tool_call_item'` | Clear spinner → print `→ name(args)` → restart spinner |
+| `run_item_stream_event` with `item.type === 'tool_call_output_item'` | Clear spinner → print `← unwrapped_output` → restart spinner |
+| `raw_model_stream_event` with `data.type === 'output_text_delta'` | Clear spinner (first delta only) → print `Agent: ` prefix (first delta only) → stream the token |
+
+Three small helpers keep the loop tidy:
+
+- **`createSpinner(label)`** — returns `{ start, clear }`. Braille-style spinners are portable-ish; the code uses plain ASCII (`| / - \`) for maximum terminal compatibility. `\r\x1b[K` erases the line before the next print.
+- **`truncate(s, max)`** — caps arg/output display at 200 chars with a trailing `…`. Prevents a 20 KB flight-search result from flooding the terminal.
+- **`unwrapToolOutput(output)`** — extracts the plain payload from MCP's `{ type: 'text', text: '…' }` wrapper. Without it, `JSON.stringify` on the wrapper double-escapes the inner JSON string and you end up staring at `\"city\":\"Berlin\"…`. The helper checks for both the direct-content-part shape and the full-envelope shape (defensively — different SDK versions unwrap different amounts), and falls back to `JSON.stringify` for anything else.
+
+The whole streaming loop is ~30 lines. The most subtle part is the `if (!sawAssistantText)` guard: `output_text_delta` events arrive many times per second during streaming, but we only want to print the `\nAgent: ` prefix once. Same pattern used in Day 1's `src/index.ts` — proves the same primitive scales from a single-call demo to a full agent runner.
 
 #### Final architecture
 

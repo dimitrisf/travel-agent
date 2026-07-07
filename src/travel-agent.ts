@@ -80,16 +80,138 @@ try {
     const userInput = (await rl.question('You: ')).trim();
     if (!userInput || userInput === 'exit' || userInput === 'quit') break;
 
-    const result = await run(agent, [
-      ...history,
-      { role: 'user', content: userInput },
-    ]);
+    const stream = await run(
+      agent,
+      [...history, { role: 'user', content: userInput }],
+      { stream: true },
+    );
 
-    console.log(`\nAgent: ${result.finalOutput}\n`);
-    history = result.history;
+    const spinner = createSpinner('thinking');
+    spinner.start();
+    let sawAssistantText = false;
+
+    // The agent's output is streamed in real-time. We can handle the streaming events as they arrive.
+    for await (const event of stream) {
+      // Handle streaming events from the agent
+      if (event.type === 'raw_model_stream_event') {
+        // The model may send partial text output in chunks; 'raw_model_stream_event' events contain these chunks. We can display them as they arrive.
+        const data = event.data as { type?: string; delta?: string };
+
+        // 'output_text_delta' events contain the actual text output from the model. We can print these chunks to the console as they arrive.
+        if (
+          data.type === 'output_text_delta' &&
+          typeof data.delta === 'string'
+        ) {
+          // If this is the first chunk of assistant text, clear the spinner and print "Agent: " before the text. 'output_text_delta' events may arrive multiple times, so we only want to print "Agent: " once at the start.
+          if (!sawAssistantText) {
+            spinner.clear();
+            process.stdout.write('\nAgent: ');
+            sawAssistantText = true;
+          }
+          process.stdout.write(data.delta);
+        }
+        continue;
+      }
+
+      if (event.type === 'run_item_stream_event') {
+        // 'run_item_stream_event' events contain information about the execution of individual items in the agent's plan. We can use these events to display tool calls and their outputs in real-time.
+        const item = event.item;
+        if (item.type === 'tool_call_item') {
+          // The agent is calling a tool. We can display the tool name and arguments to the console.
+          spinner.clear();
+          const raw = item.rawItem;
+          if ('name' in raw && 'arguments' in raw) {
+            // If the tool call has a name and arguments, we can display them. We truncate the arguments string to 200 characters for readability.
+            const argsStr =
+              typeof raw.arguments === 'string'
+                ? raw.arguments
+                : JSON.stringify(raw.arguments);
+            console.log(`  → ${raw.name}(${truncate(argsStr, 200)})`);
+          } else {
+            // If the tool call doesn't have a name or arguments, we can display the type of the raw item.
+            console.log(`  → [${raw.type}]`);
+          }
+          spinner.start();
+        } else if (item.type === 'tool_call_output_item') {
+          // The agent has received output from a tool call. We can display the output to the console. We truncate the output string to 200 characters for readability.
+          spinner.clear();
+          console.log(`  ← ${truncate(unwrapToolOutput(item.output), 200)}`);
+          spinner.start();
+        }
+      }
+    }
+
+    await stream.completed;
+    spinner.clear();
+
+    if (!sawAssistantText) {
+      console.log(`\nAgent: ${stream.finalOutput ?? '(no output)'}`);
+    }
+
+    console.log('\n');
+    history = stream.history;
   }
 } finally {
   rl.close();
   await Promise.all([mcpTravel.close(), mcpWeather.close()]);
   console.log('Bye.');
+}
+
+function truncate(s: string, max: number): string {
+  return s.length <= max ? s : `${s.slice(0, max)}…`;
+}
+
+// Unwraps the output of a tool call into a string for display. If the output is already a string, it is returned as-is. If the output is an object with a `text` property, that property is returned. If the output is an object with a `content` array, the text from each item in the array is concatenated and returned. Otherwise, the output is stringified as JSON.
+function unwrapToolOutput(output: unknown): string {
+  if (typeof output === 'string') return output;
+  if (output && typeof output === 'object') {
+    const asObj = output as { text?: unknown; content?: unknown };
+    if (typeof asObj.text === 'string') return asObj.text;
+    if (Array.isArray(asObj.content) && asObj.content.length > 0) {
+      return asObj.content
+        .map((c) => {
+          if (
+            c &&
+            typeof c === 'object' &&
+            'text' in c &&
+            typeof (c as { text: unknown }).text === 'string'
+          ) {
+            return (c as { text: string }).text;
+          }
+          return JSON.stringify(c);
+        })
+        .join('\n');
+    }
+    return JSON.stringify(output);
+  }
+  return String(output ?? '');
+}
+
+function createSpinner(label: string) {
+  const frames = ['|', '/', '-', '\\'];
+  let i = 0;
+  let handle: NodeJS.Timeout | null = null;
+
+  function tick() {
+    process.stdout.write(`\r${frames[i++ % frames.length]} ${label}…`);
+  }
+
+  function clearLine() {
+    process.stdout.write('\r\x1b[K');
+  }
+
+  return {
+    start() {
+      if (handle) return;
+      handle = setInterval(tick, 100);
+      tick();
+    },
+    clear() {
+      if (handle) {
+        clearInterval(handle);
+        handle = null;
+      }
+      clearLine();
+    },
+  };
 }
