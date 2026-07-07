@@ -586,39 +586,49 @@ Three external dependencies (two REST APIs + Postgres), one MCP surface. The mod
 
 ### Stage 5 — Travel agent
 
-[src/travel-agent.ts](src/travel-agent.ts) — REPL that mounts `travel-mcp` and lets the model orchestrate `search_flights` + `search_hotels`. Same skeleton as `weather-agent.ts`; conversation state is carried across turns via `result.history`.
+[src/travel-agent.ts](src/travel-agent.ts) — REPL that mounts **both `travel-mcp` and `weather-mcp`** so the model can orchestrate `search_flights`, `search_hotels`, `get_weather`, and `get_forecast` in one conversation. This is the composition story from Stage 4: two small domain MCPs combined at the agent layer, not merged into one server.
+
+Same skeleton as `weather-agent.ts` — conversation state is carried across turns via `result.history`, and both MCP servers are connected/closed in parallel via `Promise.all(...)`.
 
 #### The instruction block
 
-The system prompt covers what the model can't figure out on its own:
+The system prompt covers what the model can't figure out on its own. Every bullet exists because we hit a real failure without it during testing:
 
-- **Today's date**, injected at agent-startup time (`new Date().toISOString().slice(0, 10)`). Without it, the model can't resolve *"next Friday"* to a concrete `YYYY-MM-DD` — it doesn't reliably know the current date.
-- **IATA-code lookup for the demo library** (`Athens=ATH, Berlin=BER, London=LHR, Tokyo=HND, New York=JFK`). Prevents confident guesses like `ROM` for Rome.
-- **"Do arithmetic yourself"** — the tools return raw data; the model has to sum flight + hotel, compute *budget remaining ÷ nights*, and pick the cheapest combination. No calculator tool needed at this scale.
-- **Reuse prior tool results** — same nudge as the research agent: don't re-query for follow-up questions the transcript already answers.
-- **EUR only** — the demo library doesn't do currency conversion. The model should surface this if the user asks in USD/GBP instead of silently ignoring the request.
-- **Output shape guidance** — keeps flight replies (flight number, times, price, stops) and hotel replies (name, stars, room type, avg/night, total, key amenities) formatted consistently.
+- **Today's date + weekday** — computed at startup and injected as `Today is ${date} (${weekday})`. Model can't reliably compute weekday from an ISO date on its own.
+- **Upcoming Fridays** — the four next Fridays are computed in code and listed in the prompt. Removes the need for the model to do calendar arithmetic to resolve "next weekend", "this weekend", etc.
+- **Weekend semantics** — "weekend" defaults to Fri check-in → Sun check-out (2 nights). "Long weekend" / "3-day weekend" = Fri → Mon (3 nights). Prevents the model from picking mid-week dates.
+- **IATA lookup for the demo library** (`Athens=ATH, Berlin=BER, London=LHR, Tokyo=HND, New York=JFK`). Weather is available for the same five cities. Blocks confident guesses like `ROM` for Rome.
+- **Data-window declarations** — forecast covers 7 days, flight schedules 14 days, hotel availability 21 days. The model must pick check-in dates within the flight window.
+- **Trip planning = both tools** — for any question combining a destination and dates, the model MUST call BOTH `search_flights` AND `search_hotels`. Hotels-only is an incomplete answer.
+- **Forecast integration** — when the user cares about conditions (sunny, no rain, warm), call `get_forecast` and factor it in. If the forecast horizon doesn't reach the candidate weekend, still return the best-available flights + hotels and note the gap. "Clear" counts as broadly sunny.
+- **"Do arithmetic yourself"** — model sums flight + hotel, computes budget remaining ÷ nights, picks the cheapest combination. No calculator tool needed.
+- **Reuse prior tool results** — don't re-query for follow-up questions the transcript already answers.
+- **EUR only** — surface the currency limitation instead of silently ignoring foreign-currency requests.
+- **Output shape guidance** — consistent formatting across flight, hotel, and weather replies.
 
 #### Run the full stack
 
-Three terminals:
+Four REST processes + one agent:
 
 ```bash
 # Terminal 1
-npm run flight:api
+npm run weather:api        # :3000
 
 # Terminal 2
-npm run hotel:api
+npm run flight:api         # :3001
 
 # Terminal 3
-npm run travel:agent
+npm run hotel:api          # :3002
+
+# Terminal 4
+npm run travel:agent       # REPL — spawns travel-mcp.ts AND weather-mcp.ts as children
 ```
 
-Four processes total — the agent spawns `travel-mcp.ts` automatically as a child; you don't run it directly.
+Six processes total. The agent manages both MCP child processes automatically; you don't run either MCP directly.
 
 #### Example conversations
 
-**Simple:**
+**Simple flight query:**
 ```
 You: Find me a flight from Athens to Berlin on July 3rd.
 ```
@@ -628,13 +638,13 @@ One `search_flights` call → A3 824 nonstop + LH 1753 (1 stop).
 ```
 You: I want to go from Athens to Berlin next Friday for three days. Show me flights and hotels.
 ```
-Model resolves "next Friday" against today's date, picks return three days later, issues two tool calls in parallel.
+Model resolves "next Friday" against the injected date, picks return three days later, issues `search_flights` + `search_hotels` in parallel.
 
-**Budget orchestration** — the "interesting" case from the design brief:
+**Budget orchestration:**
 ```
 You: I want to spend under €600 total for a three-day trip to Berlin next Friday.
 ```
-The agent decomposes the query into flights + hotels, sums the cheapest round-trip (~€283), computes the remaining hotel budget (~€317 / 3 nights ≈ €105/night), narrows hotels to that ceiling, and reports the cheapest viable combo.
+Agent decomposes into flights + hotels, sums the cheapest round-trip (~€283), computes the remaining hotel budget (~€317 / 3 nights ≈ €105/night), narrows hotels to that ceiling, and reports the cheapest viable combo.
 
 **Multi-turn memory:**
 ```
@@ -646,24 +656,73 @@ You: What hotels are available in Berlin from that day for 3 nights, under €15
 Agent: [one search_hotels call]
 ```
 
-#### Adding weather as a second MCP (optional)
+**Weather-aware trip planning:**
+```
+You: I want a sunny weekend in Berlin under €600 total.
+```
+Agent calls `get_forecast("Berlin")`, checks each upcoming Friday against the injected list, picks the sunniest weekend within the flight window, then calls `search_flights` + `search_hotels` for that Fri→Sun.
 
-If you want the "sunny weekend in Berlin" scenario, mount `weather-mcp` alongside `travel-mcp`:
+**Cross-city comparison:**
+```
+You: I'm choosing between Athens, Berlin, and London for a July weekend. Show me temperatures and cheapest 3-night hotels for each.
+```
+Six tool calls in parallel: three `get_forecast` + three `search_hotels`.
+
+#### Refining Stage 5 through testing
+
+The instruction block isn't guessed — every bullet earned its place after a specific failure. Documented here so the lessons carry over next time you build an agent.
+
+**Symptom 1 — "sunny weekend" returned mid-week dates.** Query: *"I want a sunny weekend in Berlin under €600 total."* Agent returned July 8–10, which is Wed–Fri.
+
+Root cause: models don't reliably compute day-of-week from an ISO date. Given `2026-07-08`, the model doesn't consistently know that's a Wednesday.
+
+Fix: compute deterministic things in **code**, judgment things in the **model**. Added weekday + upcoming-Friday computation at agent startup:
 
 ```ts
-const mcpWeather = new MCPServerStdio({
-  name: 'weather',
-  fullCommand: 'tsx src/weather-mcp.ts',
-});
-await mcpWeather.connect();
+const WEEKDAY_NAMES = ['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'] as const;
+const todayWeekday = WEEKDAY_NAMES[now.getUTCDay()];
 
-const agent = new Agent({
-  ...,
-  mcpServers: [mcpWeather, mcpTravel],
-});
+const upcomingFridays: string[] = [];
+for (let offset = 0; offset < 28 && upcomingFridays.length < 4; offset++) {
+  const d = new Date(now);
+  d.setUTCDate(now.getUTCDate() + offset);
+  if (d.getUTCDay() === 5) upcomingFridays.push(d.toISOString().slice(0, 10));
+}
 ```
 
-The model now sees four tools (`get_weather`, `get_forecast`, `search_flights`, `search_hotels`) and can weave forecast into trip suggestions. You'd need `weather-api.ts` running too. This is the MCP composition story from Stage 4: keep servers small and domain-focused; combine at the agent layer.
+Injected into the prompt as `Today is ${today} (${todayWeekday}). Upcoming Fridays: ${upcomingFridays.join(', ')}.` plus a weekend-semantics rule.
+
+Test: re-run the "sunny weekend in Berlin" query. Agent should now pick a Friday from the injected list.
+
+**Symptom 2 — agent returned hotels but no flights.** Same query. Root cause: the model chose a Friday outside the 14-day flight window because the 7-day forecast didn't reach a "sunny" Friday. Silent failure — the model just skipped `search_flights` when it couldn't reconcile constraints.
+
+Fix: declare the data windows explicitly and mandate that trip planning always calls both tools. Added to the prompt:
+
+> *Demo data windows: forecast covers the next 7 days, flight schedules the next 14 days, hotel availability the next 21 days. Only pick check-in dates within the flight window. For a trip-planning request (any question that combines a destination and dates), you MUST call BOTH `search_flights` AND `search_hotels`. Presenting only one is an incomplete answer.*
+
+Also added graceful fallback: *"If the forecast horizon doesn't reach the candidate weekend, still return the best-available flights + hotels for that weekend and note that the forecast doesn't extend that far. If no candidate weekend has the requested condition, pick the closest match (e.g. treat 'clear' as broadly sunny) and note the compromise."*
+
+Test: same query. Agent should now return both flights and hotels, either for a sunny Friday within reach or for the least-bad Friday within the flight window (with a note explaining the tradeoff).
+
+**Symptom 3 — forecast rows exhausted after a few days.** The seed generates dates *relative to when it runs*, with `FORECAST_DAYS = 7`, `FLIGHT_INSTANCE_DAYS = 14`, `HOTEL_AVAILABILITY_DAYS = 21`. If you leave the DB idle for a few days, the horizons shrink.
+
+Fix: re-run `npm run db:seed`. Upsert semantics mean it's idempotent and fast — every date-based table gets fresh future rows. Old rows aren't deleted but are excluded by `date: { gte: today }` filters in the repositories.
+
+Alternative fix: bump `FORECAST_DAYS` to `14` (or higher) in `prisma/seed.ts` so the forecast and flight windows line up. Removes the "no sunny Friday within forecast" fallback path entirely for weekend queries.
+
+#### How to debug when the agent surprises you
+
+When the agent does something you don't expect, the fastest path to a diagnosis is a **tool-call trace**. Add this after each `run(...)` in the REPL loop:
+
+```ts
+for (const item of result.newItems) {
+  if (item.type === 'tool_call_item') {
+    console.log(`  → ${item.rawItem.name}(${JSON.stringify(item.rawItem.arguments)})`);
+  }
+}
+```
+
+Now every turn prints the tools the model actually called. Skipped `search_flights`? Called `get_weather` twice? You'll see it. Almost every "the model behaved weirdly" investigation resolves against this log within a minute.
 
 #### Final architecture
 
@@ -673,37 +732,39 @@ The model now sees four tools (`get_weather`, `get_forecast`, `search_flights`, 
                        ▼
               ┌─────────────────┐         Agents SDK (Runner + history)
               │ travel-agent.ts │─────────┐
-              └────────┬────────┘         │ mcpServers: [mcpTravel]
+              └────────┬────────┘         │ mcpServers: [mcpTravel, mcpWeather]
                        │                  │
         OpenAI Responses API              │
                        │                  ▼
-                    (model)         ┌──────────────┐
-                       │            │ MCP client   │  (inside MCPServerStdio)
-                       ▼            └──────┬───────┘
-                    tool calls             │ stdio (JSON-RPC)
-                       ─────────────▶      ▼
-                                    ┌──────────────┐
-                                    │ travel-mcp.ts│  (child process)
-                                    └──┬────────┬──┘
-                                       │ HTTP   │ HTTP
-                                       ▼        ▼
-                            ┌──────────────┐  ┌──────────────┐
-                            │ flight-api   │  │ hotel-api    │
-                            │  (:3001)     │  │  (:3002)     │
-                            └──────┬───────┘  └──────┬───────┘
-                                   │                 │
-                            FlightService     HotelService
-                                   │                 │
-                            FlightRepository  HotelRepository
-                                   │                 │
-                                   ▼                 ▼
-                              ┌──────────────────────┐
-                              │  PrismaClient        │
-                              └──────────┬───────────┘
-                                         │
-                                         ▼
-                                  PostgreSQL (Neon)
+                    (model)         ┌──────────────────────────┐
+                       │            │ two MCP clients          │  (inside MCPServerStdio × 2)
+                       ▼            └──────┬────────────┬──────┘
+                    tool calls             │ stdio      │ stdio
+                       ─────────────▶      ▼            ▼
+                                    ┌──────────────┐  ┌──────────────┐
+                                    │ travel-mcp.ts│  │ weather-mcp  │  (child processes)
+                                    └──┬────────┬──┘  └──────┬───────┘
+                                       │ HTTP   │ HTTP       │ HTTP
+                                       ▼        ▼            ▼
+                            ┌──────────────┐  ┌──────────────┐  ┌──────────────┐
+                            │ flight-api   │  │ hotel-api    │  │ weather-api  │
+                            │  (:3001)     │  │  (:3002)     │  │  (:3000)     │
+                            └──────┬───────┘  └──────┬───────┘  └──────┬───────┘
+                                   │                 │                 │
+                            FlightService     HotelService      WeatherService
+                                   │                 │                 │
+                            FlightRepository  HotelRepository   WeatherRepository
+                                   │                 │                 │
+                                   ▼                 ▼                 ▼
+                                        ┌─────────────────────┐
+                                        │    PrismaClient     │
+                                        └─────────┬───────────┘
+                                                  │
+                                                  ▼
+                                           PostgreSQL (Neon)
 ```
+
+Every layer talks to the next through a stable contract — Zod-validated function signature at the service layer, JSON over HTTP between REST APIs and wrappers, JSON-RPC between MCP client and server. You can swap any single layer (Postgres → SQLite, Express → Fastify, stdio → Streamable HTTP) without touching the others.
 
 Every layer talks to the next through a stable contract (Zod-validated function signature at the service layer, JSON over HTTP between the REST APIs and the wrapper, JSON-RPC between the MCP client and server). You can swap out any single layer — replace Postgres with SQLite, swap Express for Fastify, run the MCP server over Streamable HTTP instead of stdio — and the rest of the stack is unaffected.
 
@@ -758,7 +819,7 @@ day-1/
    ├─ flight-api.ts         ← Travel Stage 3 (REST API on :3001)
    ├─ hotel-api.ts          ← Travel Stage 3 (REST API on :3002)
    ├─ travel-mcp.ts         ← Travel Stage 4 (MCP wrapper over flight + hotel APIs)
-   ├─ travel-agent.ts       ← Travel Stage 5 (REPL agent orchestrating both tools)
+   ├─ travel-agent.ts       ← Travel Stage 5 (REPL agent mounting travel + weather MCPs)
    └─ lib/                  ← business logic + data access (Week 2 ext + Travel Stage 2)
       ├─ WeatherService.ts        ← Zod-validated entry points
       ├─ WeatherRepository.ts     ← Prisma queries
