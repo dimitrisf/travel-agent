@@ -1,9 +1,13 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
+import { createMcpApiClient } from '../lib';
 
-const FLIGHT_BASE = process.env.FLIGHT_API_BASE ?? 'http://localhost:3001';
-const HOTEL_BASE = process.env.HOTEL_API_BASE ?? 'http://localhost:3002';
+const BASE = process.env.TRAVEL_API_BASE ?? 'http://localhost:3000';
+const FLIGHTS_PATH = '/api/flights';
+const HOTELS_PATH = '/api/hotels';
+
+const { callApi } = createMcpApiClient(BASE);
 
 const server = new McpServer({
   name: 'travel',
@@ -72,21 +76,8 @@ server.registerTool(
   },
   // Handler for the search_flights tool. Constructs a URL with query parameters based on the input arguments and fetches the results from the flight API.
   // args comes from the inputSchema defined above, and is used to set query parameters for the flight search.
-  async (args) => {
-    const url = new URL('/flights', FLIGHT_BASE);
-    setParam(url, 'origin', args.origin);
-    setParam(url, 'destination', args.destination);
-    setParam(url, 'departure_date', args.departure_date);
-    setParam(url, 'return_date', args.return_date);
-    setParam(url, 'adults', args.adults);
-    setParam(url, 'children', args.children);
-    setParam(url, 'cabin_class', args.cabin_class);
-    setParam(url, 'nonstop_only', args.nonstop_only);
-    setParam(url, 'max_price', args.max_price);
-    setParam(url, 'preferred_airlines', args.preferred_airlines);
-    setParam(url, 'currency', args.currency);
-    return fetchAsToolResult(url);
-  },
+  // URL is constructed using the BASE and FLIGHTS_PATH constants, and query parameters are set using the setParam helper function. (URL() is a built-in class in Node.js and browsers that makes it easy to construct and manipulate URLs.)
+  async (args) => callApi(FLIGHTS_PATH, args),
 );
 
 // ───────────────────────────────────────────────
@@ -148,60 +139,22 @@ server.registerTool(
         .describe('If true, only pet-friendly hotels are returned.'),
     },
   },
-  async (args) => {
-    const url = new URL('/hotels', HOTEL_BASE);
-    setParam(url, 'city', args.city);
-    setParam(url, 'checkin', args.checkin);
-    setParam(url, 'checkout', args.checkout);
-    setParam(url, 'guests', args.guests);
-    setParam(url, 'rooms', args.rooms);
-    setParam(url, 'min_stars', args.min_stars);
-    setParam(url, 'max_price', args.max_price);
-    setParam(url, 'currency', args.currency);
-    setParam(url, 'breakfast_required', args.breakfast_required);
-    setParam(url, 'free_cancellation', args.free_cancellation);
-    setParam(url, 'pet_friendly', args.pet_friendly);
-    return fetchAsToolResult(url);
-  },
+  // Handler for the search_hotels tool. Constructs a URL with query parameters based on the input arguments and fetches the results from the hotel API.
+  async (args) => callApi(HOTELS_PATH, args),
 );
-
-// ───────────────────────────────────────────────
-// Helpers
-// ───────────────────────────────────────────────
-
-// Helper to set a query parameter on a URL, skipping undefined or null values. Arrays are joined with commas.
-// e.g. setParam(url, 'preferred_airlines', ['A3', 'LH']) → ?preferred_airlines=A3,LH
-// e.g. setParam(url, 'max_price', undefined) → (no query parameter added)
-// e.g. setParam(url, 'cabin_class', 'economy') → ?cabin_class=economy
-// e.g. setParam(url, 'nonstop_only', true) → ?nonstop_only=true
-// e.g. setParam(url, 'nonstop_only', false) → ?nonstop_only=false
-// e.g. setParam(url, 'return_date', null) → (no query parameter added)
-// e.g. setParam(url, 'return_date', '2024-07-01') → ?return_date=2024-07-01
-// e.g. setParam(url, 'preferred_airlines', []) → ?preferred_airlines= (empty string)
-function setParam(url: URL, key: string, value: unknown): void {
-  if (value === undefined || value === null) return;
-  url.searchParams.set(
-    key,
-    Array.isArray(value) ? value.join(',') : String(value),
-  );
-}
-
-// Helper to fetch a URL and return the result in the format expected by the MCP server. Returns an object with `content` (array of text blocks) and `isError` (boolean indicating if the response was not OK).
-async function fetchAsToolResult(url: URL) {
-  const r = await fetch(url);
-  const text = await r.text();
-  return {
-    content: [{ type: 'text' as const, text }],
-    isError: !r.ok,
-  };
-}
 
 // ───────────────────────────────────────────────
 // Connect
 // ───────────────────────────────────────────────
 
 const transport = new StdioServerTransport();
-await server.connect(transport);
-console.error(
-  `[travel MCP] proxying flights → ${FLIGHT_BASE}, hotels → ${HOTEL_BASE}`,
-);
+
+async function main() {
+  await server.connect(transport);
+  console.error(`[travel MCP] proxying to ${BASE}`);
+}
+
+main().catch((error) => {
+  console.error('[travel MCP] failed to start:', error);
+  process.exit(1);
+});

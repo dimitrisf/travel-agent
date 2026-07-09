@@ -12,7 +12,7 @@ import {
 //
 // It's hidden inside MCPServerStdio. In our current setup it's the mcpWeather instance.
 // MCPServerStdio is the misleadingly-named class from @openai/agents that internally manages the MCP client. More specifically:
-// 1. Spawns tsx src/weather-mcp.ts as a child process.
+// 1. Spawns tsx src/mcp-servers/weather-mcp.ts as a child process.
 // 2. Wraps a Client + StdioClientTransport from @modelcontextprotocol/sdk around its stdin/stdout.
 // 3. On connect(), calls tools/list to discover get_weather and get_forecast.
 // 4. When the agent decides to call one, sends tools/call over the same channel.
@@ -26,7 +26,7 @@ import {
 const mcpWeather = new MCPServerStdio({
   // ← MCP client lives in here
   name: 'weather',
-  fullCommand: 'tsx src/weather-mcp.ts',
+  fullCommand: 'tsx src/mcp-servers/weather-mcp.ts',
 });
 
 await mcpWeather.connect();

@@ -1,8 +1,13 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
+import { createMcpApiClient } from '../lib';
 
 const BASE = process.env.WEATHER_API_BASE ?? 'http://localhost:3000';
+const WEATHER_PATH = '/api/weather/current';
+const FORECAST_PATH = '/api/weather/forecast';
+
+const { callApi } = createMcpApiClient(BASE);
 
 const server = new McpServer({
   name: 'weather',
@@ -18,17 +23,7 @@ server.registerTool(
       city: z.string().describe('City name, e.g. "Athens"'),
     },
   },
-  async ({ city }) => {
-    const url = new URL('/weather', BASE);
-    url.searchParams.set('city', city);
-    const r = await fetch(url);
-    const text = await r.text();
-    // Return the raw JSON text from the REST API, along with an error flag if the response was not OK
-    return {
-      content: [{ type: 'text', text }],
-      isError: !r.ok,
-    };
-  },
+  async (args) => callApi(WEATHER_PATH, args),
 );
 
 server.registerTool(
@@ -47,20 +42,17 @@ server.registerTool(
         .describe('Number of days to forecast (1–7). Defaults to 3.'),
     },
   },
-  async ({ city, days }) => {
-    const url = new URL('/forecast', BASE);
-    url.searchParams.set('city', city);
-    if (days !== undefined) url.searchParams.set('days', String(days));
-    const r = await fetch(url);
-    const text = await r.text();
-    // Return the raw JSON text from the REST API, along with an error flag if the response was not OK
-    return {
-      content: [{ type: 'text', text }],
-      isError: !r.ok,
-    };
-  },
+  async (args) => callApi(FORECAST_PATH, args),
 );
 
 const transport = new StdioServerTransport();
-await server.connect(transport);
-console.error(`[weather MCP] proxying to ${BASE}`);
+
+async function main() {
+  await server.connect(transport);
+  console.error(`[weather MCP] proxying to ${BASE}`);
+}
+
+main().catch((error) => {
+  console.error('[weather MCP] failed to start:', error);
+  process.exit(1);
+});

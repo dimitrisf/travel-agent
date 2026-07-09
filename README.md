@@ -1,35 +1,36 @@
 # OpenAI Responses — Learning Journey
 
-A progression from a single streaming Responses API call to a production-shaped architecture (Postgres → service layer → REST API → MCP server → OpenAI Agent). Each step builds on the last; nothing is throwaway.
+A progression from a single streaming Responses API call to a **production-shaped Next.js app**: Postgres → service layer → Next.js Route Handlers → MCP servers → OpenAI Agent → MUI chat UI. Each step builds on the last; the historical Day-by-day exploration is preserved in `legacy/` for reference.
 
-## Setup
+## Quick start
 
 ```bash
 npm install
-cp .env.example .env   # then add OPENAI_API_KEY and DATABASE_URL
+cp .env.example .env    # then add OPENAI_API_KEY and DATABASE_URL
+
+npm run db:generate
+npm run db:migrate -- --name init
+npm run db:seed
+
+npm run dev             # Next.js dev server on http://localhost:3000
 ```
 
-Requires Node 18+ (uses global `fetch`), a valid OpenAI API key, and (for the Week 2 extension) a Postgres database (e.g. Neon).
+Open [http://localhost:3000](http://localhost:3000) — you'll get the Travel Assistant chat page. It talks to the same code the CLI REPL used to talk to; just wrapped in Next.js Route Handlers instead of Express, and driven from a browser instead of a terminal.
 
-For the Week 2 extension you'll also need to provision the schema and seed data:
-
-```bash
-npm run db:generate          # generate the Prisma client
-npm run db:migrate -- --name init   # create tables (first time)
-npm run db:seed              # populate cities, conditions, forecasts
-```
+Requires Node 18+ (global `fetch`), a valid OpenAI API key, and a Postgres database (e.g. Neon).
 
 ## Map of the project
 
-| Day / Week | File(s) | Concept |
+The current stack (active files) and the historical journey (files preserved in `legacy/`):
+
+| Layer | Files | Notes |
 |---|---|---|
-| 1 | `src/index.ts` | Streaming Responses API, token usage, response ID |
-| 3 | `src/weather.ts` | Manual tool-call loop, `previous_response_id`, REPL |
-| 5 | `src/books.ts` | Structured outputs with Zod / JSON Schema |
-| 6 | `src/research.ts` | OpenAI Agents SDK — `Agent`, `Tool`, `Runner` |
-| 7 | `src/mcp-server.ts` | MCP server (single source of truth for the library tools) |
-| Week 2 | `openapi.yaml`, `src/weather-api.ts`, `src/weather-mcp.ts`, `src/weather-agent.ts` | REST API → MCP wrapper → Agent |
-| Week 2 (extension) | `prisma/schema.prisma`, `prisma/seed.ts`, `src/lib/*`, updated `src/weather-api.ts` | Service layer + Postgres (Neon) via Prisma behind the REST API |
+| **Frontend** | `app/page.tsx`, `app/layout.tsx`, `app/theme.ts` | React Client Component chat UI, MUI theming. Streams SSE events into the DOM. |
+| **API Route Handlers** | `app/api/weather/current/route.ts`, `app/api/weather/forecast/route.ts`, `app/api/flights/route.ts`, `app/api/hotels/route.ts`, `app/api/agent/route.ts` | Replace the three Express `*-api.ts` servers. `/api/agent` streams the agent's turn as SSE. |
+| **MCP servers** | `src/mcp-servers/weather-mcp.ts`, `src/mcp-servers/travel-mcp.ts` | Unchanged in intent; only the fetch URLs moved to `/api/…` and got consolidated onto one BASE. |
+| **Service + repositories + helpers** | `src/lib/*` | Unchanged from Week 2 extension. `apiErrorResponse.ts` was added for centralized Route Handler error mapping. |
+| **Data** | `prisma/schema.prisma`, `prisma/seed.ts` | Unchanged. |
+| **Historical journey** | `legacy/index.ts` (Day 1), `legacy/weather.ts` (Day 3), `legacy/books.ts` (Day 5), `legacy/research.ts` (Day 6/7), `legacy/mcp-server.ts` (Day 7), `legacy/weather-agent.ts`, `legacy/travel-agent.ts` (CLI REPLs) | Preserved but not part of the running app. Run individually with `tsx legacy/<file>` if you want to revisit the lesson. |
 
 ---
 
@@ -226,7 +227,7 @@ A production-shaped stack:
 
 - `openapi.yaml` — the contract for `GET /weather` and `GET /forecast`. Includes request parameters, success responses, and 400/404 errors.
 - `src/weather-api.ts` — Express implementation of the spec on port 3000.
-- `src/weather-mcp.ts` — *MCP wrapper*: an MCP server whose handlers translate each tool call into an HTTP request to the REST API. Owns no data of its own.
+- `src/mcp-servers/weather-mcp.ts` — *MCP wrapper*: an MCP server whose handlers translate each tool call into an HTTP request to the REST API. Owns no data of its own.
 - `src/weather-agent.ts` — REPL agent that consumes the MCP server.
 
 ### Run order
@@ -256,7 +257,7 @@ The stack is three OS processes running at the same time:
 |---|---|---|---|
 | 1 | `weather-api.ts` (Express on `:3000`) | You — `npm run weather:api` in Terminal A | The actual REST API. Owns the weather data. |
 | 2 | `weather-agent.ts` (REPL + Agents SDK) | You — `npm run weather:agent` in Terminal B | Parent process. Runs the REPL and the agent runner. |
-| 3 | `weather-mcp.ts` (MCP server) | Automatically spawned as a **child** of process #2 by `MCPServerStdio({ fullCommand: 'tsx src/weather-mcp.ts' })` | The MCP wrapper. Translates each tool call into an HTTP request to process #1. |
+| 3 | `weather-mcp.ts` (MCP server) | Automatically spawned as a **child** of process #2 by `MCPServerStdio({ fullCommand: 'tsx src/mcp-servers/weather-mcp.ts' })` | The MCP wrapper. Translates each tool call into an HTTP request to process #1. |
 
 You only manually start two (#1 and #2). Process #3 is launched and managed by the Agents SDK on your behalf — its lifetime is tied to `mcpWeather.connect()` / `mcpWeather.close()`.
 
@@ -368,7 +369,7 @@ After this extension there are several "clients" in the codebase. They serve dif
 | OpenAI client | `src/index.ts`, `src/weather.ts`, `src/books.ts`, `src/explore.ts` | OpenAI Responses API | Explicit `new OpenAI(...)` |
 | OpenAI client | `src/research.ts`, `src/weather-agent.ts` | OpenAI Responses API | Hidden inside `Agent` (Agents SDK) |
 | MCP client | `src/weather-agent.ts`, `src/research.ts` | MCP server (child process) | Hidden inside `MCPServerStdio` |
-| HTTP client | `src/weather-mcp.ts` | REST API | Implicit (Node global `fetch`) |
+| HTTP client | `src/mcp-servers/weather-mcp.ts` | REST API | Implicit (Node global `fetch`) |
 | Prisma client | `src/lib/index.ts` | Postgres | Explicit `new PrismaClient(...)` |
 
 Each layer that talks to another process or service needs its own client for that service's protocol. What varies is whether the framework hides the client behind a higher-level abstraction.
@@ -522,7 +523,7 @@ Three independent REST processes, one database, one `PrismaClient` per process (
 
 ### Stage 4 — Travel MCP server
 
-[src/travel-mcp.ts](src/travel-mcp.ts) is the MCP surface for both travel APIs — one server, two tools, two HTTP backends.
+[src/mcp-servers/travel-mcp.ts](src/mcp-servers/travel-mcp.ts) is the MCP surface for both travel APIs — one server, two tools, two HTTP backends.
 
 | Field | Value |
 |---|---|
@@ -822,65 +823,310 @@ Every layer talks to the next through a stable contract (Zod-validated function 
 
 ---
 
+## Next.js port
+
+Everything below Stage 5 was ported to a single Next.js 15 (App Router) app. What changed and what didn't:
+
+### What got removed
+
+- **Three Express servers** (`src/weather-api.ts`, `src/flight-api.ts`, `src/hotel-api.ts`) — replaced by five Route Handlers under `app/api/`. Same query-string parsing, same service layer underneath, same error mapping (centralized in `src/lib/apiErrorResponse.ts`).
+- **Three separate ports** — everything is now on `:3000`. The MCP servers just use path segments (`/api/flights`, `/api/hotels`, `/api/weather/current`, `/api/weather/forecast`) to distinguish domains.
+- **Two CLI REPL agents** — `weather-agent.ts` and `travel-agent.ts` moved to `legacy/`. Their streaming logic (tool-call log, spinner, `unwrapToolOutput`) was ported into the new `app/api/agent/route.ts` + `app/page.tsx`.
+- **The Express `dev` script** — `npm run dev` now runs `next dev`.
+
+### What got added
+
+- **`app/api/agent/route.ts`** — the new heart of the app. Accepts POST `{ history, userInput }`, spawns the two MCP servers as singletons (persisted via `globalThis` across dev-mode HMR), builds the Agent with fresh date/weekday/Friday injection, then streams events back as **Server-Sent Events**:
+  - `data: {"type":"tool_call","name":"...","args":"..."}`
+  - `data: {"type":"tool_output","output":"..."}`
+  - `data: {"type":"text_delta","delta":"..."}`
+  - `data: {"type":"done","history":[...]}`
+- **`app/page.tsx`** — MUI-based Client Component chat UI. Renders user/agent bubbles, tool calls as collapsible `Accordion` entries (args + output), and streams the agent's answer token-by-token. Sample prompts as clickable chips on the empty state.
+- **`app/layout.tsx`** + **`app/theme.ts`** — MUI setup with `AppRouterCacheProvider` (required for App Router SSR of Emotion styles), custom palette.
+- **`src/lib/apiErrorResponse.ts`** — one helper mapping `ZodError` / `WeatherServiceError` / `TravelServiceError` to `NextResponse` with the right status codes. All four data-endpoint Route Handlers share it.
+
+### What didn't change
+
+- **`src/lib/*`** — services, repositories, error classes, helpers. All Route Handlers call the same `createWeatherService()` / `createFlightService()` / `createHotelService()` factories the Express servers used. That's the payoff of the Stage-2 layer separation: the API framework is a swappable outer skin.
+- **`src/mcp-servers/weather-mcp.ts` and `src/mcp-servers/travel-mcp.ts`** — only the URL constants moved (`/weather` → `/api/weather/current`, etc.) and the two travel BASEs consolidated to one. Everything else — tool schemas, handlers, error propagation — is identical.
+- **`prisma/*`** — untouched.
+
+### Runtime model
+
+Before: three Express processes on three ports + a CLI REPL that spawned two MCP children per turn.
+
+After: one Next.js process on port `:3000` that spawns two MCP children as `globalThis`-cached singletons on first request. In-place development via `next dev` (Turbopack); the MCP children are hot-reloaded independently by tsx.
+
+The MCP servers still fetch over HTTP — but now they hit the same Next.js process that spawned them. That's a slight weirdness (loopback HTTP), and in a "hardened" version you'd short-circuit MCP handlers to call the services directly. For learning, the round trip is nice: it keeps the layers crisp and lets you `curl` the Route Handlers to test them in isolation.
+
+### The MUI SSR gotcha
+
+Emotion (which MUI uses) needs a specific setup to work with React Server Components streaming. `@mui/material-nextjs`'s `AppRouterCacheProvider` handles this — it collects style rules on the server, injects them into the streamed HTML, and re-hydrates on the client. Without it, you get a flash of unstyled content on first load. `app/layout.tsx` wraps children in this provider before `ThemeProvider`.
+
+### Directory shape after the port
+
+```
+day-1/
+├─ app/                              ← Next.js App Router
+│  ├─ layout.tsx                     ← MUI theme + CssBaseline
+│  ├─ page.tsx                       ← Chat UI (Client Component)
+│  ├─ theme.ts                       ← MUI theme (client)
+│  └─ api/
+│     ├─ weather/
+│     │  ├─ current/route.ts         ← GET /api/weather/current
+│     │  └─ forecast/route.ts        ← GET /api/weather/forecast
+│     ├─ flights/route.ts            ← GET /api/flights
+│     ├─ hotels/route.ts             ← GET /api/hotels
+│     └─ agent/route.ts              ← POST /api/agent (SSE)
+├─ legacy/                            ← historical CLI journey (still runnable via tsx)
+│  ├─ index.ts, explore.ts, weather.ts, books.ts, research.ts,
+│  ├─ mcp-server.ts, weather-agent.ts, travel-agent.ts
+├─ src/
+│  ├─ weather-mcp.ts                 ← unchanged (URL constants updated)
+│  ├─ travel-mcp.ts                  ← unchanged (URL constants updated)
+│  └─ lib/                           ← unchanged (+ apiErrorResponse.ts)
+├─ prisma/                            ← unchanged
+├─ openapi.yaml                       ← contract remains valid; paths are now /api/…
+├─ next.config.mjs, next-env.d.ts    ← Next.js scaffolding
+├─ tsconfig.json                      ← Next.js compat
+└─ package.json                       ← next/react/MUI in; express out
+```
+
+---
+
+## Architecture walkthrough
+
+Top-to-bottom explanation of the running system: what each layer does, what happens on a single request, what runs where, and why we made the choices we did.
+
+### One-paragraph summary
+
+One Next.js 15 process on `:3000` handles everything the app does. The browser talks to it over HTTP + SSE. Route Handlers call the service layer (`src/lib/`), which calls Prisma, which talks to Postgres (Neon). One special Route Handler — `POST /api/agent` — is the agent surface: it runs the Agents SDK, streams the run as SSE frames, and its MCP tools are backed by two child processes (spawned once, cached in `globalThis`) that fetch back into the same Next.js process over loopback HTTP.
+
+```
+        Browser (React + MUI, client)
+            │
+            │ POST /api/agent  { history, userInput }
+            │ ← SSE frames back
+            ▼
+     ┌──────────────────────────────────────────────────┐
+     │ Next.js 15 App Router process (:3000)            │
+     │                                                  │
+     │  ┌── app/api/agent/route.ts ─────────────────┐   │
+     │  │ 1. read POST body                         │   │
+     │  │ 2. get or init MCP singletons             │   │
+     │  │ 3. build Agent (today, weekday, Fridays)  │   │
+     │  │ 4. run(agent, input, { stream:true })     │   │
+     │  │ 5. for-await events → SSE frames          │   │
+     │  └───────┬───────────────────────────────────┘   │
+     │          │ MCP tool calls                        │
+     │          ▼                                       │
+     │  ┌── MCP clients (inside MCPServerStdio) ────┐   │
+     │  │ speak JSON-RPC over stdio to two children │   │
+     │  └──┬──────────────────────────────────┬─────┘   │
+     │     │                                  │         │
+     │  ┌──▼──────────────────┐      ┌────────▼──────────┐│
+     │  │ src/mcp-servers/    │      │ src/mcp-servers/  ││
+     │  │  travel-mcp.ts      │      │  weather-mcp.ts   ││
+     │  │  (child process)    │      │  (child process)  ││
+     │  └──┬──────────────────┘      └────────┬──────────┘│
+     │     │ HTTP over loopback               │         │
+     │     ▼                                  ▼         │
+     │  ┌── app/api/flights/route.ts ─────────────┐     │
+     │  │      app/api/hotels/route.ts            │     │
+     │  │      app/api/weather/current/route.ts   │     │
+     │  │      app/api/weather/forecast/route.ts  │     │
+     │  └──┬─────────────────────────────────────┘      │
+     │     │ createXxxService() → service.method(...)   │
+     │     ▼                                            │
+     │  ┌── src/lib/{Weather,Flight,Hotel}Service ──┐   │
+     │  │      … Repository, … Error, index.ts      │   │
+     │  └──┬────────────────────────────────────────┘   │
+     │     │ Prisma queries                             │
+     │     ▼                                            │
+     │  ┌── PrismaClient (lazy singleton) ──────────┐   │
+     │  └──┬────────────────────────────────────────┘   │
+     └─────┼────────────────────────────────────────────┘
+           │
+           ▼
+      PostgreSQL (Neon)
+```
+
+### The layers, top to bottom
+
+**Layer 1 — Browser (React + MUI).** Single Client Component, `app/page.tsx`. Owns four pieces of state:
+
+- `messages: ChatMessage[]` — what's rendered.
+- `history: AgentInputItem[]` — the transcript the server needs on the next turn.
+- `input: string` — the text field.
+- `pending: boolean` — locks the send button while a turn is in flight.
+
+On submit, it POSTs `{ history, userInput }` to `/api/agent`, then reads `response.body` as a stream, parses SSE frames (`data: …\n\n`), and applies each frame:
+
+| Frame | Effect |
+|---|---|
+| `{ type: 'text_delta', delta }` | Append delta to the current agent message's `text` |
+| `{ type: 'tool_call', name, args }` | Push a `ToolCall { name, args }` onto the current agent message |
+| `{ type: 'tool_output', output }` | Populate the last `ToolCall.output` |
+| `{ type: 'done', history }` | Update client-side `history`; unlock send button |
+| `{ type: 'error', message }` | Replace agent message with an error |
+
+MUI theming happens in `app/layout.tsx` with `AppRouterCacheProvider` + `ThemeProvider`.
+
+**Layer 2 — Route Handlers (server-side).** Five endpoints. Four are boring data endpoints; one is the agent endpoint.
+
+*Data endpoints* — `app/api/weather/current/route.ts`, `/forecast`, `/api/flights`, `/api/hotels`. Each is ~20 lines: parse query, call `createXxxService().searchXxx(input)`, `NextResponse.json(result)`, `catch → apiErrorResponse(err)`.
+
+`apiErrorResponse` (`src/lib/apiErrorResponse.ts`) is one function all four share:
+
+```
+ZodError                                   → 400 { error, issues }
+WeatherServiceError CITY_NOT_FOUND         → 404
+WeatherServiceError NO_FORECAST_AVAILABLE  → 404
+TravelServiceError  AIRPORT_NOT_FOUND      → 404
+TravelServiceError  CITY_NOT_FOUND         → 404
+TravelServiceError  INVALID_DATE_RANGE     → 400
+* INTERNAL_ERROR                           → 500
+```
+
+*Agent endpoint* — `app/api/agent/route.ts`. Four things happen:
+
+1. `getOrInitMcps()` — lazy-init the two MCP child processes. `globalThis`-cached so subsequent requests reuse them.
+2. `buildAgent(mcpTravel, mcpWeather)` — freshly-computed today's date + weekday + upcoming Fridays, plus the long instruction block, plus `mcpServers: [...]`.
+3. `run(agent, [...history, { role: 'user', content: userInput }], { stream: true })` — returns a `StreamedRunResult` that yields events.
+4. `new Response(new ReadableStream(...))` with `Content-Type: text/event-stream`. The stream's `start()` iterates the run events, encodes each as `data: …\n\n`, and enqueues bytes to the controller.
+
+The `for await (const event of stream)` block does essentially what the CLI REPL did — but instead of `console.log`-ing tool calls and streaming to stdout, it sends SSE frames to the browser.
+
+**Layer 3 — Service + Repository (`src/lib`).** Unchanged from the pre-Next.js version. This is the payoff of Stage 2: the API framework is a swappable outer skin.
+
+- `{Weather,Flight,Hotel}Service` — Zod validation, business rules (cabin multipliers, night aggregation, amenity name lookup), typed errors.
+- `{Weather,Flight,Hotel}Repository` — Prisma queries + projection to plain types (no Prisma types leak upward).
+- `{Weather,Travel}ServiceError` — typed error codes for HTTP mapping.
+- `index.ts` — barrel + factory helpers + `is*Error` type guards + `PrismaClient` lazy singleton.
+- `queryParsing.ts` — `parseBool`, `parseList` (shared with the Route Handler layer).
+- `apiErrorResponse.ts` — the Next.js-specific error → response mapper (added during the port).
+
+**Layer 4 — MCP servers (child processes).** `src/mcp-servers/weather-mcp.ts` and `src/mcp-servers/travel-mcp.ts`. Each:
+
+- Instantiates `McpServer` with two tools.
+- Each tool handler builds a URL against the shared `BASE` (default `http://localhost:3000`) and `fetch`es a Route Handler under `/api/…`.
+- Returns `{ content: [{ type: 'text', text: responseBody }], isError: !r.ok }`.
+- Connects via `StdioServerTransport`.
+
+Two things this design buys us: same tool surface as the CLI REPL, and inspector-compatible via `npm run travel:mcp:inspect`.
+
+**Layer 5 — Database (Postgres via Prisma).** `schema.prisma` unchanged. `PrismaClient` singleton in `src/lib/index.ts`. Route Handlers, MCP handlers (indirectly), and the agent all use the same connection pool.
+
+### Trace of one request, end-to-end
+
+User types **"I want a sunny weekend in Berlin under €600 total."** and hits send.
+
+1. **Browser** — `send(prompt)` pushes user + empty agent messages, sets `pending = true`, POSTs `/api/agent` with `{ history, userInput }`.
+2. **Next.js** — routes to `app/api/agent/route.ts::POST`.
+3. **MCP init.** `getOrInitMcps()` on first request spawns `tsx src/mcp-servers/travel-mcp.ts` and `tsx src/mcp-servers/weather-mcp.ts` as child processes, establishes JSON-RPC over their stdin/stdout, sends `tools/list`, registers each discovered tool with the parent's internal registry. ~2 seconds cold; cached from then on.
+4. **Build agent.** `today = "2026-07-08"`, `todayWeekday = "Wednesday"`, `upcomingFridays = ["2026-07-10","2026-07-17","2026-07-24","2026-07-31"]`. Constructs the full instruction block. Discardable — only its config matters.
+5. **Start the run.** `run(agent, input, { stream: true })` returns a `StreamedRunResult` (async iterable of events). Internally kicks off the first Responses API call.
+6. **Response body — the SSE stream.** Route Handler returns a `Response(readable)` where `readable.start(controller)` runs the for-await loop. Bytes flow to the browser as soon as they're enqueued.
+7. **First model turn — decision.** The agent decides "I need the forecast for Berlin and both search tools." It emits three `function_call` items in one turn (approximately):
+   - `get_forecast({ city: "Berlin", days: 7 })`
+   - `search_flights({ origin: "ATH", destination: "BER", departure_date: "2026-07-10", return_date: "2026-07-12" })`
+   - `search_hotels({ city: "Berlin", checkin: "2026-07-10", checkout: "2026-07-12", max_price: 150 })`
+8. **Runner dispatch.** For each `function_call`, the Runner looks up which MCP registered that tool name and sends a `tools/call` JSON-RPC frame over stdin to the corresponding child.
+9. **Inside the child** (say `travel-mcp.ts` handling `search_flights`): builds `new URL('/api/flights', 'http://localhost:3000')`, sets query params, `fetch`es — loopback HTTP back into the same Next.js process.
+10. **Loopback into Next.js.** `GET /api/flights?…` routes to `app/api/flights/route.ts::GET`.
+11. **Route Handler — flights.** `parseSearchFlightsQuery(req)` → coerces types. `flightService.searchFlights(input)` → Zod parses, `flightRepository.airportExists` × 2 in parallel, `flightRepository.findInstances(...)` (Prisma joins across FlightInstance → FlightDefinition → Airline + two Airport→City chains), maps rows, applies cabin multiplier, filters by `max_price`. `NextResponse.json({ outbound, inbound })`.
+12. **HTTP response back to child.** `fetch` resolves. Child wraps body: `{ content: [{ type: 'text', text: bodyText }], isError: !r.ok }`.
+13. **JSON-RPC response** goes back over stdout to the parent's MCP client.
+14. **Runner emits a `tool_call_output_item` event.**
+15. **Route Handler for-await.** Event lands in the `tool_call_output_item` branch, `unwrapToolOutput` peels off the MCP envelope, `send({ type: 'tool_output', output })` encodes as `data: …\n\n` and enqueues.
+16. **Browser receives bytes.** `for-await` on `res.body.getReader()` buffers by `\n\n`, parses `data:` lines, calls `applyEvent(agentMsgId, payload)`. The corresponding `ToolCall.output` field populates; the MUI Accordion refreshes.
+17. **Repeat for the other two tools** — potentially in parallel; the SDK dispatches concurrently and events arrive as each resolves.
+18. **Second model turn — reasoning.** With all three tool outputs, the model composes the final answer. It emits `output_text_delta` events (many per second).
+19. **Text deltas → SSE `text_delta` frames.** Browser appends each delta to the current agent message. The MUI bubble updates on every delta.
+20. **Stream completes.** `for await` exits, `await stream.completed` resolves, Route Handler sends `{ type: 'done', history }` and closes the controller. Browser receives it, updates `history`, releases the send button.
+
+Total wall-clock: ~4–8 seconds. Most of it is model latency; MCP + DB overhead is milliseconds.
+
+### Process / lifetime model
+
+| Thing | Where it lives | How long it lives |
+|---|---|---|
+| Next.js process | Your terminal running `npm run dev` | Until you Ctrl+C |
+| PrismaClient | `src/lib/index.ts` singleton | Same as Next.js process |
+| MCP children (travel + weather) | Spawned by `MCPServerStdio` | First `/api/agent` request → until Next.js process dies (or dev-mode HMR recycles) |
+| Agent object | Created per request | Discarded after `run()` returns |
+| Conversation history | Browser `useState` | Until page reload |
+| Streaming response | Route Handler's `ReadableStream` | One request lifetime |
+| OpenAI HTTPS calls | Inside Agents SDK | Per model turn (typically 2 per user turn: initial + post-tools) |
+
+Nothing here persists across process restarts except the DB. The whole app is stateless on the server side; state that matters (conversation) is client-side, and could be persisted to `localStorage` or a `Conversation` DB table as a future addition.
+
+### Where each design decision came from
+
+- **Route Handlers > Server Actions for data endpoints.** GET semantics, cacheable, MCP-consumable via `fetch`, `curl`-able for debugging. Server Actions are POST-only and coupled to React components — wrong shape here.
+- **SSE for the agent stream.** Turn-based interaction: one request in, many events out, done. Native `Response(ReadableStream)` fit. No custom Node server needed.
+- **`fetch` + manual SSE parse (not `EventSource`) on the client.** Because we need to POST a body. Wire format is still SSE.
+- **MCP over stdio, child processes.** Same protocol Claude Desktop / VS Code Claude Code / any other MCP client uses. Keeps our MCPs portable.
+- **`globalThis`-cached MCP singletons.** Spawning `tsx src/mcp-servers/travel-mcp.ts` takes ~1 second cold. Doing that per user turn would be miserable. Caching in `globalThis` survives Next.js dev-mode HMR (same pattern PrismaClient uses in every Next.js template).
+- **Fresh Agent per request, not cached.** Instructions embed today's date + upcoming Fridays. If we cached the Agent, midnight would break it. Building it costs ~microseconds.
+- **`apiErrorResponse` centralized.** Four call sites; one truth. Adding a new service error code is a one-line change in the mapper.
+- **Client-side history.** Server has no session store, no user model, no auth. Adding those is a future extension; right now the browser is the source of truth per session.
+- **Chat bubbles + Accordion tool cards.** MUI defaults get you clean, accessible components without hand-writing chat CSS.
+
+### What breaks, and how it recovers
+
+| Failure | Behavior |
+|---|---|
+| No `OPENAI_API_KEY` | Agents SDK throws on first call. Route Handler catches inside the for-await's try, sends `{ type: 'error', message }`. Browser shows red-tinted message. |
+| DB unavailable | Prisma throws. Service wraps as `INTERNAL_ERROR` with `cause`. Route Handler → 500 JSON. MCP child returns `isError: true`. Agent tells the user "the tool errored" and gives up. |
+| Unknown IATA / city | Service throws typed `AIRPORT_NOT_FOUND` / `CITY_NOT_FOUND`. Route Handler → 404. MCP → `isError: true`. Agent says the destination isn't in the demo library. |
+| Malformed request body to `/api/agent` | Route Handler returns 400 JSON early. Browser sees non-OK response, shows error. |
+| MCP child dies mid-request | The `tools/call` future rejects. Runner throws. Route Handler's try/catch sends error frame. Recovery: kill the parent process — the `globalThis` cache holds the dead handle. A production fix would add a health check + re-init. |
+| Browser closes tab | Server-side for-await keeps running until the underlying HTTP connection tears down. Wasted work but no leak. Fix would be `req.signal.addEventListener('abort', () => …)`. |
+| Malformed SSE frame on client | `try/catch` in the frame parser skips it silently. |
+| Very long turn (~2 min) | `export const maxDuration = 120` in the Route Handler sets Vercel's timeout to 2 min. `next dev` has no timeout. |
+
+---
+
 ## Command index
 
 | Command | Purpose |
 |---|---|
-| `npm start` | Day 1 — streaming Responses API call |
-| `npm run weather` | Day 3 — manual tool-call REPL (no framework, no MCP) |
-| `npm run books` | Day 5 — structured outputs |
-| `npm run explore` | Print raw JSON of a plain and a tool-using response |
-| `npm run research` | Day 6/7 — research agent backed by `mcp-server.ts` |
-| `npm run mcp:inspect` | Inspect `mcp-server.ts` interactively |
-| `npm run weather:api` | Week 2 — Express weather REST API on `:3000` |
-| `npm run weather:mcp:inspect` | Inspect `weather-mcp.ts` (needs weather:api running) |
-| `npm run weather:agent` | Week 2 — agent → MCP → REST → answer |
-| `npm run flight:api` | Travel Stage 3 — Express flight REST API on `:3001` |
-| `npm run hotel:api` | Travel Stage 3 — Express hotel REST API on `:3002` |
-| `npm run travel:mcp:inspect` | Travel Stage 4 — inspect `travel-mcp.ts` (needs flight:api + hotel:api running) |
-| `npm run travel:agent` | Travel Stage 5 — REPL agent orchestrating flights + hotels (needs flight:api + hotel:api running) |
-| `npm run db:generate` | Generate the Prisma client from `schema.prisma` |
-| `npm run db:migrate` | Create / apply a new dev migration (use `-- --name <name>`) |
+| `npm run dev` | Next.js dev server on `:3000` |
+| `npm run build` | Production build |
+| `npm start` | Production server (after `build`) |
+| `npm run lint` | ESLint via `next lint` |
+| `npm run weather:mcp:inspect` | Inspect `src/mcp-servers/weather-mcp.ts` (needs `npm run dev` up so it can reach `/api/weather/*`) |
+| `npm run travel:mcp:inspect` | Inspect `src/mcp-servers/travel-mcp.ts` (needs `npm run dev` up) |
+| `npm run db:generate` | Generate the Prisma client |
+| `npm run db:migrate` | Create/apply a dev migration (`-- --name <name>`) |
 | `npm run db:deploy` | Apply existing migrations (production) |
 | `npm run db:seed` | Populate the database (idempotent) |
-| `npm run db:reset` | Drop the DB, re-apply migrations, run seed |
+| `npm run db:reset` | Drop DB, re-apply migrations, run seed |
 | `npm run db:studio` | Open Prisma Studio (browser UI) |
+
+Legacy CLI scripts (Day 1–7, Travel Stage 5) live under `legacy/` and can be run directly, e.g.:
+
+```bash
+tsx legacy/index.ts                # Day 1 streaming demo
+tsx legacy/weather.ts              # Day 3 manual tool loop
+tsx legacy/research.ts             # Day 6/7 research agent
+tsx legacy/travel-agent.ts         # Travel Stage 5 CLI REPL
+```
+
+The legacy REPLs still work — the CLI travel-agent talks to the same MCP servers over stdio, which now fetch from `http://localhost:3000/api/…` instead of the old `:3001` / `:3002` Express ports.
 
 ## File index
 
 ```
 day-1/
-├─ openapi.yaml             ← API contract (Week 2)
-├─ package.json
-├─ tsconfig.json
-├─ .env                     ← OPENAI_API_KEY, DATABASE_URL (gitignored)
-├─ .env.example
-├─ prisma/
-│  ├─ schema.prisma         ← weather + travel models (Week 2 ext + Travel Stage 1)
-│  └─ seed.ts               ← idempotent seed for all domains
-└─ src/
-   ├─ index.ts              ← Day 1
-   ├─ explore.ts            ← raw JSON of Response items
-   ├─ weather.ts            ← Day 3 (manual tool loop, REPL)
-   ├─ books.ts              ← Day 5 (structured outputs)
-   ├─ research.ts           ← Day 6/7 (agent + MCP library)
-   ├─ mcp-server.ts         ← Day 7 (library MCP server)
-   ├─ weather-api.ts        ← Week 2 (REST API, now backed by service layer)
-   ├─ weather-mcp.ts        ← Week 2 (MCP wrapper over REST)
-   ├─ weather-agent.ts      ← Week 2 (REPL agent)
-   ├─ flight-api.ts         ← Travel Stage 3 (REST API on :3001)
-   ├─ hotel-api.ts          ← Travel Stage 3 (REST API on :3002)
-   ├─ travel-mcp.ts         ← Travel Stage 4 (MCP wrapper over flight + hotel APIs)
-   ├─ travel-agent.ts       ← Travel Stage 5 (REPL agent mounting travel + weather MCPs)
-   └─ lib/                  ← business logic + data access (Week 2 ext + Travel Stage 2)
-      ├─ WeatherService.ts        ← Zod-validated entry points
-      ├─ WeatherRepository.ts     ← Prisma queries
-      ├─ WeatherServiceError.ts   ← custom error with `code`
-      ├─ FlightService.ts         ← Travel Stage 2 (Zod + cabin multipliers)
-      ├─ FlightRepository.ts      ← Travel Stage 2 (FlightInstance joins)
-      ├─ HotelService.ts          ← Travel Stage 2 (Zod + amenity filters)
-      ├─ HotelRepository.ts       ← Travel Stage 2 (Hotel/RoomType/Availability joins)
-      ├─ TravelServiceError.ts    ← shared error for flights + hotels
-      ├─ queryParsing.ts          ← Travel Stage 3 (parseBool, parseList)
-      └─ index.ts                 ← createWeatherService/FlightService/HotelService, helpers
+├─ app/                              (Next.js App Router — the running app)
+├─ src/lib/                          (services, repositories, error classes, helpers)
+├─ src/mcp-servers/weather-mcp.ts, src/mcp-servers/travel-mcp.ts   (MCP wrappers over the Route Handlers)
+├─ prisma/                            (schema + seed)
+├─ legacy/                            (Day 1–7 + CLI REPLs, historical)
+├─ openapi.yaml                       (contract for /api/weather/current, /forecast, /flights, /hotels)
+├─ next.config.mjs, next-env.d.ts    (Next.js scaffolding)
+├─ tsconfig.json                      (Next.js-compatible)
+└─ package.json                       (Next.js + MUI + Prisma + OpenAI Agents)
 ```

@@ -53,6 +53,9 @@ export {
 // ───── HTTP query-string parsing ─────
 export { parseBool, parseList } from './queryParsing';
 
+// ───── MCP → REST API helper ─────
+export { createMcpApiClient } from './mcpApiClient';
+
 // ───── Helpers ─────
 let defaultPrisma: PrismaClient | undefined;
 

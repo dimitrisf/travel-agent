@@ -9,12 +9,12 @@ import {
 
 const mcpTravel = new MCPServerStdio({
   name: 'travel',
-  fullCommand: 'tsx src/travel-mcp.ts',
+  fullCommand: 'tsx src/mcp-servers/travel-mcp.ts',
 });
 
 const mcpWeather = new MCPServerStdio({
   name: 'weather',
-  fullCommand: 'tsx src/weather-mcp.ts',
+  fullCommand: 'tsx src/mcp-servers/weather-mcp.ts',
 });
 
 await Promise.all([mcpTravel.connect(), mcpWeather.connect()]);
