@@ -71,20 +71,41 @@ function upcomingFridaysFrom(anchor: Date, count = 4): string[] {
   return fridays;
 }
 
-// We define a function that builds a new Agent instance with the given MCP servers. The agent is configured with instructions that describe its role as a travel planning assistant, the tools it can use, and the rules it should follow when processing user input. The instructions include information about the current date, upcoming Fridays, and how to handle various user requests related to flights, hotels, and weather.
-function buildAgent(mcpTravel: MCPServerStdio, mcpWeather: MCPServerStdio) {
-  const now = new Date();
-  now.setUTCHours(0, 0, 0, 0);
-  const today = now.toISOString().slice(0, 10);
-  const todayWeekday = WEEKDAY_NAMES[now.getUTCDay()];
+// The weather specialist. Narrow scope: current conditions and short-term
+// forecasts for the five demo cities. Triage will hand off to it for pure
+// weather questions; anything mixing travel returns to the Travel specialist.
+function buildWeatherAgent(mcpWeather: MCPServerStdio, today: string, todayWeekday: string) {
+  return new Agent({
+    name: 'WeatherAgent',
+    model: 'gpt-4o-mini',
+    instructions: [
+      `You are the Weather specialist. Today is ${today} (${todayWeekday}).`,
+      'Tools:',
+      '- `get_weather(city)` returns current conditions for a city.',
+      '- `get_forecast(city, days?)` returns a 1–7 day forecast for a city.',
+      'Cities available: Athens, Berlin, London, Tokyo, New York. If the user asks about a different city, tell them only these five are supported.',
+      'Answer only weather / forecast questions. If the user shifts to flights, hotels, budgets, or trip planning, tell them a trip-planning specialist will handle it and stop — do not attempt to plan the trip yourself.',
+      'Be concise: city, temperature in °C, conditions. For forecasts, include the date range and per-day highlights.',
+    ].join(' '),
+    mcpServers: [mcpWeather],
+  });
+}
 
-  const upcomingFridays = upcomingFridaysFrom(now);
-
+// The travel/concierge specialist. Owns both MCPs so it can factor weather
+// into trip decisions ("sunny weekend in Berlin under €600 total"). Inherits
+// the full instruction block that lived on the pre-handoff single agent.
+function buildTravelAgent(
+  mcpTravel: MCPServerStdio,
+  mcpWeather: MCPServerStdio,
+  today: string,
+  todayWeekday: string,
+  upcomingFridays: string[],
+) {
   return new Agent({
     name: 'TravelAgent',
     model: 'gpt-4o-mini',
     instructions: [
-      `You are a travel planning assistant. Today is ${today} (${todayWeekday}). Upcoming Fridays: ${upcomingFridays.join(', ')}.`,
+      `You are the Travel specialist and trip planner. Today is ${today} (${todayWeekday}). Upcoming Fridays: ${upcomingFridays.join(', ')}.`,
       'When the user asks for a "weekend", default to Fri check-in → Sun check-out (2 nights). If the user says "long weekend" or "3-day weekend", use Fri → Mon (3 nights). Always verify the check-in date is a Friday from the list above and the check-out is the Sunday or Monday that follows.',
       'Tools:',
       '- `search_flights(origin, destination, departure_date, ...)` returns `{ outbound: [...], inbound: [...] }` of matching flights. Requires 3-letter IATA airport codes.',
@@ -103,6 +124,49 @@ function buildAgent(mcpTravel: MCPServerStdio, mcpWeather: MCPServerStdio) {
     ].join(' '),
     mcpServers: [mcpTravel, mcpWeather],
   });
+}
+
+// The triage agent. No MCPs, no tools of its own — its only capability is to
+// hand off to WeatherAgent or TravelAgent via the SDK's `handoffs` array.
+function buildTriageAgent(weatherAgent: Agent, travelAgent: Agent) {
+  return new Agent({
+    name: 'TriageAgent',
+    model: 'gpt-4o-mini',
+    instructions: [
+      'You are a routing triage agent. You do NOT answer questions yourself.',
+      'You have two specialists:',
+      '- WeatherAgent — answers pure current weather / forecast questions.',
+      '- TravelAgent — plans trips, searches flights and hotels, and can factor in weather for trip decisions.',
+      'Rules:',
+      '- If the user is asking only about weather (current conditions, forecast, "is it sunny", "will it rain"), with no travel intent, hand off to WeatherAgent.',
+      '- Otherwise — flights, hotels, budgets, "sunny weekend in Berlin", trip planning, or anything mixing weather with travel — hand off to TravelAgent.',
+      'Hand off immediately. Do not narrate the decision. Do not attempt to answer.',
+    ].join(' '),
+    handoffs: [weatherAgent, travelAgent],
+  });
+}
+
+// Wire the three agents together for one turn. Returns the triage as the entry
+// point; the Runner walks handoffs as they happen.
+function buildAgentGraph(
+  mcpTravel: MCPServerStdio,
+  mcpWeather: MCPServerStdio,
+) {
+  const now = new Date();
+  now.setUTCHours(0, 0, 0, 0);
+  const today = now.toISOString().slice(0, 10);
+  const todayWeekday = WEEKDAY_NAMES[now.getUTCDay()];
+  const upcomingFridays = upcomingFridaysFrom(now);
+
+  const weatherAgent = buildWeatherAgent(mcpWeather, today, todayWeekday);
+  const travelAgent = buildTravelAgent(
+    mcpTravel,
+    mcpWeather,
+    today,
+    todayWeekday,
+    upcomingFridays,
+  );
+  return buildTriageAgent(weatherAgent, travelAgent);
 }
 
 // ───────────────────────────────────────────────
@@ -158,7 +222,8 @@ export async function POST(req: NextRequest) {
   }
 
   const { mcpTravel, mcpWeather } = await getOrInitMcps();
-  const agent = buildAgent(mcpTravel, mcpWeather);
+  // Start at the triage agent; the Runner follows handoffs into the specialists.
+  const agent = buildAgentGraph(mcpTravel, mcpWeather);
 
   // We run the agent with the user's input and the conversation history. We pass the stream: true option to enable streaming of the agent's output. The agent will process the input, call tools as needed, and generate a response in real-time.
   const stream = await run(
@@ -186,6 +251,17 @@ export async function POST(req: NextRequest) {
         //
         // The for await (const event of stream) block does essentially what the CLI REPL did — but instead of console.log-ing tool calls and streaming to stdout, it sends SSE frames to the browser.
         for await (const event of stream) {
+          // Agent-updated events fire when the active agent changes — i.e. after
+          // a handoff. Forward the new agent's name to the client so the UI can
+          // show which specialist is now driving.
+          if (event.type === 'agent_updated_stream_event') {
+            const agent = (event as { agent?: { name?: string } }).agent;
+            if (agent?.name) {
+              send({ type: 'agent_updated', agentName: agent.name });
+            }
+            continue;
+          }
+
           // Handle streaming events from the agent
           if (event.type === 'raw_model_stream_event') {
             // The model may send partial text output in chunks; 'raw_model_stream_event' events contain these chunks. We can display them as they arrive.

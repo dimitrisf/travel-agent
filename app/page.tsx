@@ -31,14 +31,23 @@ type ChatMessage = {
   role: 'user' | 'agent';
   text: string;
   toolCalls: ToolCall[];
+  handoffs: string[]; // agent names emitted by the SDK as it walks handoffs
   pending: boolean;
 };
 
+// StreamEvent represents the different types of events that can be received from the agent API via Server-Sent Events (SSE). Each event type has a specific payload structure, which is used to update the chat UI in real-time as the agent processes the user's input and interacts with tools.
 type StreamEvent =
+  // The 'text_delta' event is emitted when the agent generates text output. The payload includes the delta (new text) to append to the current agent message.
   | { type: 'text_delta'; delta: string }
+  // The 'tool_call' event is emitted when the agent calls a tool. The payload includes the tool name, arguments, and an optional callId that can be used to match the corresponding 'tool_output' event.
   | { type: 'tool_call'; name: string; args: string; callId?: string }
+  // The 'tool_output' event is emitted when the agent receives output from a tool call. The payload includes the output string and an optional callId that can be used to match the corresponding 'tool_call' event.
   | { type: 'tool_output'; output: string; callId?: string }
+  // The 'agent_updated' event is emitted when the SDK hands off control to a different agent. The payload includes the new agent's name, which can be used to display a chip in the UI indicating the handoff.
+  | { type: 'agent_updated'; agentName: string }
+  // The 'done' event is emitted when the agent has finished processing the user's input and has sent a final response. The payload includes the full conversation history so far, which can be used to update the client-side history state.
   | { type: 'done'; history: AgentInputItem[] }
+  // The 'error' event is emitted when an error occurs during processing. The payload includes an error message, which can be displayed in the UI to inform the user of the issue.
   | { type: 'error'; message: string };
 
 const SAMPLE_PROMPTS = [
@@ -82,6 +91,7 @@ export default function Home() {
       role: 'user',
       text: userInput,
       toolCalls: [],
+      handoffs: [],
       pending: false,
     };
 
@@ -173,6 +183,7 @@ export default function Home() {
       role: 'agent',
       text: '',
       toolCalls: [],
+      handoffs: [],
       pending: true,
     };
 
@@ -318,6 +329,17 @@ export default function Home() {
           return { ...m, toolCalls: tc };
         }),
       );
+    } else if (payload.type === 'agent_updated') {
+      // Fires when the SDK hands off control to a different agent. We record
+      // the new agent's name so the UI can render a chip like
+      // "→ handed off to WeatherAgent".
+      setMessages((prev) =>
+        prev.map((m) =>
+          m.id === agentMsgId
+            ? { ...m, handoffs: [...m.handoffs, payload.agentName] }
+            : m,
+        ),
+      );
     } else if (payload.type === 'done') {
       // Update client-side history; unlock send button
       // Mark the agent message as no longer pending, so the UI can stop showing the "thinking..." indicator. We find the agent message in the messages state by its id (agentMsgId) and set its pending flag to false. This indicates that the agent has finished processing the user's input and has sent a final response.
@@ -459,6 +481,24 @@ function MessageBubble({ message }: { message: ChatMessage }) {
               </Box>
             ) : null)}
         </Paper>
+        {/* Handoff chips — one per agent switch during the turn (Triage → Weather / Travel). */}
+        {!isUser && message.handoffs.length > 0 && (
+          <Stack
+            direction="row"
+            spacing={0.5}
+            sx={{ mt: 0.5, flexWrap: 'wrap', gap: 0.5 }}
+          >
+            {message.handoffs.map((agentName, i) => (
+              <Chip
+                key={`${i}-${agentName}`}
+                label={`→ ${agentName}`}
+                size="small"
+                variant="outlined"
+                color="secondary"
+              />
+            ))}
+          </Stack>
+        )}
         {/* The following line displays the tool calls if the message is from the agent and has tool calls. */}
         {!isUser && message.toolCalls.length > 0 && (
           <Stack spacing={0.5} sx={{ mt: 0.5 }}>

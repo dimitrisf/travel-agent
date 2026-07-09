@@ -821,6 +821,81 @@ Every layer talks to the next through a stable contract — Zod-validated functi
 
 Every layer talks to the next through a stable contract (Zod-validated function signature at the service layer, JSON over HTTP between the REST APIs and the wrapper, JSON-RPC between the MCP client and server). You can swap out any single layer — replace Postgres with SQLite, swap Express for Fastify, run the MCP server over Streamable HTTP instead of stdio — and the rest of the stack is unaffected.
 
+### Stage 6 — Multi-agent handoffs
+
+Splits the monolithic `TravelAgent` into a **triage + specialists** structure using the fourth Agents SDK concept from Day 6 (Handoff), which we deliberately deferred at the time.
+
+#### Structure
+
+```
+User request
+    ▼
+TriageAgent  (no MCPs, no tools — just routing instructions)
+    │
+    ├── handoff to ──▶ WeatherAgent  (weather MCP only, tight instructions)
+    │                       └── returns final answer
+    │
+    └── handoff to ──▶ TravelAgent   (travel MCP + weather MCP — concierge role)
+                            └── returns final answer
+```
+
+Three agents, all constructed per request inside `buildAgentGraph(mcpTravel, mcpWeather)` in [app/api/agent/route.ts](app/api/agent/route.ts):
+
+- **`buildWeatherAgent(mcpWeather, today, todayWeekday)`** — narrow specialist. Only the weather MCP. Instructions restrict it to current conditions / forecasts across the five demo cities and tell it *not* to attempt trip planning if the user drifts off-topic.
+- **`buildTravelAgent(mcpTravel, mcpWeather, today, todayWeekday, upcomingFridays)`** — the concierge. Mounts both MCPs so multi-domain queries ("sunny weekend in Berlin under €600") still work in one agent. Instruction block is essentially what Stage 5's single agent had.
+- **`buildTriageAgent(weatherAgent, travelAgent)`** — no MCPs, no tools. `handoffs: [weatherAgent, travelAgent]`. Instructions: "route to the right specialist and hand off immediately; do not answer yourself."
+
+The Route Handler now runs `run(triageAgent, …)`. The SDK exposes each entry in `handoffs` as an internal `transfer_to_X` tool the model can call; when it does, the Runner switches the active agent seamlessly and continues emitting stream events from the specialist's perspective.
+
+#### Design choices, and what we didn't do
+
+- **Concierge instead of a strict 4-way split.** A Flight-only agent and a Hotel-only agent would look tidy in a diagram but would force every real trip query to route through a concierge anyway — the specialists would earn their keep less. Keeping travel unified is honest.
+- **Fresh triage every user turn.** Each request builds the whole graph and runs from the triage. No per-user "current agent" persistence. Matches how OpenAI's own examples work; simpler mental model.
+- **No `Agent.asTool()` composition.** That's a different pattern (agent-as-tool for delegation without control transfer) worth exploring later. Handoff already illustrates the core concept.
+- **No shared instruction module.** Weather and Travel duplicate ~5 lines about IATA codes and EUR-only. Two files ≠ premature abstraction; once we see a third specialist we can consolidate.
+
+#### New stream event
+
+The Route Handler forwards `agent_updated_stream_event` (fired by the Runner when the active agent changes) as a new SSE frame:
+
+```
+data: {"type":"agent_updated","agentName":"TravelAgent"}
+```
+
+The chat client ([app/page.tsx](app/page.tsx)) records these in a `handoffs: string[]` on the current agent message and renders each one as a small MUI Chip (`→ TravelAgent`, `→ WeatherAgent`, etc.) directly above the tool-call accordions. You get a visible trail of routing decisions per turn.
+
+The SDK also emits `handoff_call_item` / `handoff_output_item` as `run_item_stream_event` items. We deliberately skip those on the server side — the `agent_updated` frame carries the same information more cleanly, and forwarding both would clutter the UI with a `transfer_to_TravelAgent(…)` tool card next to every handoff chip.
+
+#### What to try
+
+**Pure weather query** — should route to WeatherAgent:
+```
+What's the weather in Berlin right now?
+→ [→ WeatherAgent chip]
+  get_weather({"city":"Berlin"})
+Agent: Berlin is 24°C and clear.
+```
+
+**Trip planning query** — should route to TravelAgent:
+```
+Find me a flight from Athens to Berlin on July 10th.
+→ [→ TravelAgent chip]
+  search_flights({...})
+Agent: Two flights from Athens to Berlin on 2026-07-10 …
+```
+
+**Multi-domain query** — TriageAgent still routes to TravelAgent (which has both MCPs):
+```
+I want a sunny weekend in Berlin under €600 total.
+→ [→ TravelAgent chip]
+  get_forecast({...})
+  search_flights({...})
+  search_hotels({...})
+Agent: For Fri 2026-07-10 → Sun 2026-07-12 …
+```
+
+If you removed the concierge-style TravelAgent and only had narrow Flight and Hotel specialists, this third query would need either a further handoff chain or an `Agent.asTool()` composition — a good exercise for a future stage.
+
 ---
 
 ## Next.js port
