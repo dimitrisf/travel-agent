@@ -2,7 +2,7 @@ import 'server-only';
 import { NextRequest } from 'next/server';
 import {
   Agent,
-  MCPServerStdio,
+  MCPServerStreamableHttp,
   run,
   type AgentInputItem,
 } from '@openai/agents';
@@ -18,7 +18,7 @@ export const maxDuration = 120;
 // ───────────────────────────────────────────────
 
 // We define a type for the MCP server bundle, which includes the travel and weather MCP servers. This allows us to type the global variable that will hold the initialized MCP server instances.
-type McpBundle = { mcpTravel: MCPServerStdio; mcpWeather: MCPServerStdio };
+type McpBundle = { mcpTravel: MCPServerStreamableHttp; mcpWeather: MCPServerStreamableHttp };
 
 // We use a global variable to hold the MCP server instances so that they are only initialized once and reused across requests. This avoids the overhead of starting new processes for each request.
 // globalThis is a special object in Node.js that persists across requests, so we can attach our MCP server instances to it. We use a type assertion to extend the globalThis type with our _mcpInit property, which will hold a Promise that resolves to our MCP server instances. This allows us to check if the servers have already been initialized and reuse them if they have.
@@ -31,13 +31,19 @@ const g = globalThis as G;
 function getOrInitMcps(): Promise<McpBundle> {
   if (!g._mcpInit) {
     g._mcpInit = (async () => {
-      const mcpTravel = new MCPServerStdio({
+      // Both MCP endpoints live inside the same Next.js process, one path
+      // segment apart. The URL can be overridden per-server via env var when
+      // deploying MCPs as separate services.
+      const appBase =
+        process.env.APP_BASE ??
+        `http://localhost:${process.env.PORT ?? 3000}`;
+      const mcpTravel = new MCPServerStreamableHttp({
         name: 'travel',
-        fullCommand: 'tsx src/mcp-servers/travel-mcp.ts',
+        url: process.env.TRAVEL_MCP_URL ?? `${appBase}/api/mcp/travel`,
       });
-      const mcpWeather = new MCPServerStdio({
+      const mcpWeather = new MCPServerStreamableHttp({
         name: 'weather',
-        fullCommand: 'tsx src/mcp-servers/weather-mcp.ts',
+        url: process.env.WEATHER_MCP_URL ?? `${appBase}/api/mcp/weather`,
       });
       await Promise.all([mcpTravel.connect(), mcpWeather.connect()]);
       return { mcpTravel, mcpWeather };
@@ -74,7 +80,7 @@ function upcomingFridaysFrom(anchor: Date, count = 4): string[] {
 // The weather specialist. Narrow scope: current conditions and short-term
 // forecasts for the five demo cities. Triage will hand off to it for pure
 // weather questions; anything mixing travel returns to the Travel specialist.
-function buildWeatherAgent(mcpWeather: MCPServerStdio, today: string, todayWeekday: string) {
+function buildWeatherAgent(mcpWeather: MCPServerStreamableHttp, today: string, todayWeekday: string) {
   return new Agent({
     name: 'WeatherAgent',
     model: 'gpt-4o-mini',
@@ -95,8 +101,8 @@ function buildWeatherAgent(mcpWeather: MCPServerStdio, today: string, todayWeekd
 // into trip decisions ("sunny weekend in Berlin under €600 total"). Inherits
 // the full instruction block that lived on the pre-handoff single agent.
 function buildTravelAgent(
-  mcpTravel: MCPServerStdio,
-  mcpWeather: MCPServerStdio,
+  mcpTravel: MCPServerStreamableHttp,
+  mcpWeather: MCPServerStreamableHttp,
   today: string,
   todayWeekday: string,
   upcomingFridays: string[],
@@ -149,8 +155,8 @@ function buildTriageAgent(weatherAgent: Agent, travelAgent: Agent) {
 // Wire the three agents together for one turn. Returns the triage as the entry
 // point; the Runner walks handoffs as they happen.
 function buildAgentGraph(
-  mcpTravel: MCPServerStdio,
-  mcpWeather: MCPServerStdio,
+  mcpTravel: MCPServerStreamableHttp,
+  mcpWeather: MCPServerStreamableHttp,
 ) {
   const now = new Date();
   now.setUTCHours(0, 0, 0, 0);
