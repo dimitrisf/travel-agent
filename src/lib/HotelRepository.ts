@@ -13,6 +13,8 @@ export interface HotelSearchOptions {
 }
 
 export interface HotelSearchRow {
+  hotelId: number;
+  roomTypeId: number; // required as `room_type_id` in propose_booking
   hotelName: string;
   address: string;
   city: string;
@@ -107,6 +109,8 @@ export class HotelRepository {
         }
 
         results.push({
+          hotelId: hotel.id,
+          roomTypeId: room.id,
           hotelName: hotel.name,
           address: hotel.address,
           city: hotel.city.name,

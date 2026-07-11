@@ -16,6 +16,7 @@ export interface FlightSearchOptions {
 
 // Represents a single flight instance (i.e. a single flight on a specific date/time) returned by the FlightRepository.
 export interface FlightSearchRow {
+  flightInstanceId: number; // FlightInstance.id — needed by the booking flow
   flightNumber: string; // e.g. "A3 824"
   airlineName: string;
   airlineIata: string;
@@ -47,7 +48,9 @@ export class FlightRepository {
     // Add 24 hours to get the end of the day (exclusive)
     const dayEnd = new Date(dayStart.getTime() + 24 * 60 * 60_000);
 
-    const rows = await this.prisma.flightInstance.findMany({
+    // Query the database for flight instances that match the search criteria
+    // flightInstanceRows is of type FlightInstance[] with nested FlightDefinition, Airline, Airport, City
+    const flightInstanceRows = await this.prisma.flightInstance.findMany({
       where: {
         departureDatetime: { gte: dayStart, lt: dayEnd },
         flightDefinition: {
@@ -71,7 +74,8 @@ export class FlightRepository {
       orderBy: { departureDatetime: 'asc' },
     });
 
-    return rows.map((r) => ({
+    return flightInstanceRows.map((r) => ({
+      flightInstanceId: r.id,
       flightNumber: `${r.flightDefinition.airline.iataCode} ${r.flightDefinition.flightNumber}`,
       airlineName: r.flightDefinition.airline.name,
       airlineIata: r.flightDefinition.airline.iataCode,

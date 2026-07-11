@@ -51,6 +51,7 @@ const SearchFlightsInput = z.object({
 export type SearchFlightsInput = z.input<typeof SearchFlightsInput>;
 
 export interface FlightResult {
+  flight_instance_id: number; // required as `flight_instance_id` in propose_booking
   flight_number: string;
   airline: string;
   departure: string; // ISO without timezone (YYYY-MM-DDTHH:MM)
@@ -147,9 +148,10 @@ export class FlightService {
     airlines: string[] | undefined;
     currency: string;
   }): Promise<FlightResult[]> {
-    let rows;
+    let flightSearchRows;
     try {
-      rows = await this.repo.findInstances({
+      // flightSearchRows is of type FlightSearchRow[] with nested origin and destination airport/city info
+      flightSearchRows = await this.repo.findInstances({
         originIata: args.origin,
         destinationIata: args.destination,
         departureDate: args.date,
@@ -167,10 +169,11 @@ export class FlightService {
     }
 
     const multiplier = CABIN_MULTIPLIER[args.cabin];
-    return rows
+    return flightSearchRows
       .map((r): FlightResult => {
         const price = Math.round(r.basePriceEUR * multiplier);
         return {
+          flight_instance_id: r.flightInstanceId,
           flight_number: r.flightNumber,
           airline: r.airlineName,
           // Departure and arrival are returned as ISO strings without timezone, in the format YYYY-MM-DDTHH:MM

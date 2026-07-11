@@ -10,6 +10,7 @@
 
 export function createMcpApiClient(base: string) {
   return {
+    // GET-with-query helper.
     // Given a path and an args object, build a URL with each arg as a query
     // parameter (via setParam), then fetch the backing REST API and wrap the
     // result in the MCP content shape. All args key names must match the REST
@@ -21,6 +22,18 @@ export function createMcpApiClient(base: string) {
         setParam(url, key, value);
       }
       return fetchAsToolResult(url);
+    },
+    // POST-with-JSON-body helper.
+    // Used by mutating tools like `propose_booking` and `cancel_booking` where
+    // the payload is a JSON object, not query-string args. Returns the same
+    // MCP content shape.
+    async postApi(path: string, body: unknown) {
+      const url = new URL(path, base);
+      return fetchAsToolResult(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
     },
   };
 }
@@ -43,8 +56,8 @@ function setParam(url: URL, key: string, value: unknown): void {
 }
 
 // Helper to fetch a URL and return the result in the format expected by the MCP server. Returns an object with `content` (array of text blocks) and `isError` (boolean indicating if the response was not OK).
-async function fetchAsToolResult(url: URL) {
-  const r = await fetch(url);
+async function fetchAsToolResult(url: URL, init?: RequestInit) {
+  const r = await fetch(url, init);
   const text = await r.text();
   return {
     content: [{ type: 'text' as const, text }],

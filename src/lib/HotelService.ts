@@ -23,6 +23,8 @@ const SearchHotelsInput = z.object({
 export type SearchHotelsInput = z.input<typeof SearchHotelsInput>;
 
 export interface HotelResult {
+  hotel_id: number;
+  room_type_id: number; // required as `room_type_id` in propose_booking
   hotel: string;
   address: string;
   city: string;
@@ -72,9 +74,10 @@ export class HotelService {
     if (parsed.breakfast_required) requiredAmenities.push('Breakfast');
     if (parsed.pet_friendly) requiredAmenities.push('Pet Friendly');
 
-    let rows;
+    let hotelSearchRows;
     try {
-      rows = await this.repo.findAvailable({
+      // hotelSearchRows is of type HotelSearchRow[]
+      hotelSearchRows = await this.repo.findAvailable({
         cityName: parsed.city,
         checkinDate: parsed.checkin,
         checkoutDate: parsed.checkout,
@@ -86,12 +89,18 @@ export class HotelService {
         freeCancellationRequired: parsed.free_cancellation,
       });
     } catch (err) {
-      throw new TravelServiceError('Failed to search hotels.', 'INTERNAL_ERROR', {
-        cause: err,
-      });
+      throw new TravelServiceError(
+        'Failed to search hotels.',
+        'INTERNAL_ERROR',
+        {
+          cause: err,
+        },
+      );
     }
 
-    return rows.map((r) => ({
+    return hotelSearchRows.map((r) => ({
+      hotel_id: r.hotelId,
+      room_type_id: r.roomTypeId,
       hotel: r.hotelName,
       address: r.address,
       city: r.city,
@@ -101,7 +110,7 @@ export class HotelService {
       price_per_night: r.avgPricePerNight,
       total_price: r.totalPrice,
       nights: r.nights,
-      currency: 'EUR',
+      currency: r.currency,
       amenities: r.amenities,
       free_cancellation: r.freeCancellation,
       cancellation_description: r.cancellationDescription,
