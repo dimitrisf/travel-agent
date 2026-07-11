@@ -5,6 +5,9 @@ import type { Prisma, PrismaClient } from '@prisma/client';
 // Consumers get a fully-populated aggregate, not a bare row.
 export const bookingInclude = {
   flightBookings: {
+    // Order legs by departure time so consumers see outbound → return in
+    // travel order, regardless of the order they were inserted.
+    orderBy: { flightInstance: { departureDatetime: 'asc' } },
     include: {
       flightInstance: {
         include: {
@@ -20,6 +23,8 @@ export const bookingInclude = {
     },
   },
   hotelBookings: {
+    // Multi-city itineraries visit hotels in check-in order.
+    orderBy: { checkinDate: 'asc' },
     include: {
       roomType: {
         include: { hotel: { include: { city: true } } },

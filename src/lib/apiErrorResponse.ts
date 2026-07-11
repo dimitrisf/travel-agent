@@ -51,6 +51,11 @@ export function apiErrorResponse(err: unknown): NextResponse {
           : err.code === 'INSUFFICIENT_SEATS' || err.code === 'INSUFFICIENT_ROOMS'
             ? 409
             : 500;
+    // For INTERNAL_ERROR we bury the underlying cause in `.cause` — surface it
+    // in the server log so we can diagnose failures without losing them.
+    if (err.code === 'INTERNAL_ERROR') {
+      console.error('[booking] internal error:', err.message, err.cause ?? err);
+    }
     return NextResponse.json(
       { error: err.message, code: err.code },
       { status },

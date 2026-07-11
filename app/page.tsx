@@ -14,9 +14,20 @@ import Accordion from '@mui/material/Accordion';
 import AccordionSummary from '@mui/material/AccordionSummary';
 import AccordionDetails from '@mui/material/AccordionDetails';
 import Chip from '@mui/material/Chip';
+import Alert from '@mui/material/Alert';
+import Button from '@mui/material/Button';
+import Card from '@mui/material/Card';
+import CardActions from '@mui/material/CardActions';
+import CardContent from '@mui/material/CardContent';
+import CardHeader from '@mui/material/CardHeader';
+import Divider from '@mui/material/Divider';
 import SendIcon from '@mui/icons-material/Send';
 import ExpandMoreIcon from '@mui/icons-material/ExpandMore';
 import BuildIcon from '@mui/icons-material/Build';
+import CheckCircleIcon from '@mui/icons-material/CheckCircle';
+import CancelIcon from '@mui/icons-material/Cancel';
+import FlightIcon from '@mui/icons-material/Flight';
+import HotelIcon from '@mui/icons-material/Hotel';
 import { types } from 'util';
 
 type ToolCall = {
@@ -36,6 +47,74 @@ type ChatMessage = {
 };
 
 // StreamEvent represents the different types of events that can be received from the agent API via Server-Sent Events (SSE). Each event type has a specific payload structure, which is used to update the chat UI in real-time as the agent processes the user's input and interacts with tools.
+// Booking tool names — used to switch rendering from generic accordion to
+// a rich BookingCard with Confirm/Cancel buttons.
+const BOOKING_TOOL_NAMES = new Set<string>([
+  'propose_booking',
+  'get_booking',
+  'cancel_booking',
+]);
+
+type BookingStatus = 'PROPOSED' | 'CONFIRMED' | 'PAID' | 'CANCELLED' | 'FAILED';
+
+// BookingLike is a simplified representation of a booking object returned by the travel agent's booking tools. It includes the booking ID, reference, status, customer information, total price, and arrays of flight and hotel bookings associated with the booking. Each flight booking includes details about the flight instance, cabin class, number of travelers, and total price. Each hotel booking includes details about the check-in/check-out dates, number of nights, guests, rooms, total price, and room type information.
+// It's a structural type matching the API's fully-populated Booking JSON (flight + hotel line items with nested airline/airport/city and hotel/city).
+type BookingLike = {
+  id: number;
+  reference: string;
+  status: BookingStatus;
+  customerName: string;
+  customerEmail: string;
+  totalPriceEUR: number;
+  currency: string;
+  cancellationReason: string | null;
+  flightBookings: Array<{
+    id: number;
+    cabinClass: string;
+    adults: number;
+    children: number;
+    seats: number;
+    totalPriceEUR: number;
+    flightInstance: {
+      id: number;
+      departureDatetime: string;
+      arrivalDatetime: string;
+      flightDefinition: {
+        flightNumber: string;
+        airline: { iataCode: string; name: string };
+        originAirport: {
+          iataCode: string;
+          name: string;
+          city: { name: string };
+        };
+        destinationAirport: {
+          iataCode: string;
+          name: string;
+          city: { name: string };
+        };
+      };
+    };
+  }>;
+  hotelBookings: Array<{
+    id: number;
+    checkinDate: string;
+    checkoutDate: string;
+    nights: number;
+    guests: number;
+    rooms: number;
+    totalPriceEUR: number;
+    roomType: {
+      name: string;
+      hotel: {
+        name: string;
+        address: string;
+        stars: number;
+        city: { name: string };
+      };
+    };
+  }>;
+};
+
 type StreamEvent =
   // The 'text_delta' event is emitted when the agent generates text output. The payload includes the delta (new text) to append to the current agent message.
   | { type: 'text_delta'; delta: string }
@@ -514,6 +593,14 @@ function MessageBubble({ message }: { message: ChatMessage }) {
 
 // ToolCallView displays a single tool call in an accordion. The accordion shows the tool name and truncated arguments, and can be expanded to show the full arguments and output. If the tool call is still pending (no output yet), it shows a loading indicator.
 function ToolCallView({ toolCall }: { toolCall: ToolCall }) {
+  // If this is one of the booking tools AND the output has parsed cleanly into
+  // a Booking-shaped object, render the rich BookingCard with Confirm/Cancel
+  // buttons instead of the generic accordion.
+  const booking = BOOKING_TOOL_NAMES.has(toolCall.name)
+    ? tryParseBooking(toolCall.output)
+    : null;
+  if (booking) return <BookingCard initialBooking={booking} />;
+
   return (
     <Accordion
       disableGutters
@@ -577,6 +664,302 @@ function ToolCallView({ toolCall }: { toolCall: ToolCall }) {
       </AccordionDetails>
     </Accordion>
   );
+}
+
+// Try to parse a tool output as a Booking. Returns null if the output isn't a
+// booking-shaped JSON object (or isn't JSON at all).
+function tryParseBooking(output: string | undefined): BookingLike | null {
+  if (!output) return null;
+  try {
+    const parsed = JSON.parse(output) as unknown;
+    if (
+      parsed &&
+      typeof parsed === 'object' &&
+      typeof (parsed as { id?: unknown }).id === 'number' &&
+      typeof (parsed as { reference?: unknown }).reference === 'string' &&
+      typeof (parsed as { status?: unknown }).status === 'string'
+    ) {
+      return parsed as BookingLike;
+    }
+  } catch {
+    // not JSON — not a booking
+  }
+  return null;
+}
+
+// A booking rendered as a rich MUI Card with flights, hotels, total, and
+// action buttons. The card owns its own state for the current booking snapshot
+// so Confirm / Cancel actions update it in place without touching the
+// surrounding chat message.
+function BookingCard({ initialBooking }: { initialBooking: BookingLike }) {
+  // booking is the current snapshot of the booking, which may be updated by Confirm or Cancel actions. We initialize it with the initialBooking prop, which is the booking data parsed from the tool output. The card owns its own state for the current booking snapshot so Confirm / Cancel actions update it in place without touching the surrounding chat message.
+  const [booking, setBooking] = useState<BookingLike>(initialBooking);
+
+  // The busy state tracks whether a Confirm or Cancel action is currently in progress. It can be 'confirm', 'cancel', or null (no action in progress). This state is used to disable the buttons and show a loading indicator while the action is being processed.
+  const [busy, setBusy] = useState<'confirm' | 'cancel' | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  async function callBookingAction(action: 'confirm' | 'cancel') {
+    setBusy(action);
+    setError(null);
+    try {
+      // We call the booking action API endpoint with the booking id and action (confirm or cancel). The API returns the updated booking data, which we use to update the booking state. If the API returns an error, we throw an error to be caught in the catch block.
+      const res = await fetch(`/api/booking/${booking.id}/${action}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+      });
+      const body = (await res.json()) as BookingLike & {
+        // The API may return an error message in the body if the action fails. We check for this and throw an error if present. The error message is displayed in the card below the total price.
+        error?: string;
+        // code is an optional field that may be returned by the API to indicate a specific error code. We don't use it in the UI, but it may be useful for debugging or logging purposes.
+        code?: string;
+      };
+      if (!res.ok) {
+        throw new Error(body.error ?? `HTTP ${res.status}`);
+      }
+      setBooking(body);
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  const isProposed = booking.status === 'PROPOSED';
+  const isPaid = booking.status === 'PAID';
+  const isCancelled = booking.status === 'CANCELLED';
+
+  return (
+    <Card variant="outlined" sx={{ mt: 0.5 }}>
+      <CardHeader
+        title={
+          <Stack direction="row" alignItems="center" spacing={1}>
+            <Typography variant="body2" sx={{ fontFamily: 'monospace' }}>
+              {booking.reference}
+            </Typography>
+            <Chip
+              label={booking.status}
+              size="small"
+              color={statusChipColor(booking.status)}
+              variant={isProposed ? 'outlined' : 'filled'}
+            />
+          </Stack>
+        }
+        subheader={`${booking.customerName} · ${booking.customerEmail}`}
+        sx={{ pb: 1 }}
+      />
+      <CardContent sx={{ pt: 0, pb: 1 }}>
+        {booking.flightBookings.length > 0 && (
+          <Box sx={{ mb: booking.hotelBookings.length > 0 ? 1.5 : 0 }}>
+            <Stack
+              direction="row"
+              alignItems="center"
+              spacing={0.5}
+              sx={{ mb: 0.5 }}
+            >
+              <FlightIcon fontSize="small" color="action" />
+              <Typography variant="subtitle2">Flights</Typography>
+            </Stack>
+            <Stack spacing={1}>
+              {booking.flightBookings.map((fb) => (
+                <FlightLegRow key={fb.id} leg={fb} />
+              ))}
+            </Stack>
+          </Box>
+        )}
+
+        {booking.hotelBookings.length > 0 && (
+          <Box>
+            <Stack
+              direction="row"
+              alignItems="center"
+              spacing={0.5}
+              sx={{ mb: 0.5 }}
+            >
+              <HotelIcon fontSize="small" color="action" />
+              <Typography variant="subtitle2">Hotels</Typography>
+            </Stack>
+            <Stack spacing={1}>
+              {booking.hotelBookings.map((hb) => (
+                <HotelStayRow key={hb.id} stay={hb} />
+              ))}
+            </Stack>
+          </Box>
+        )}
+
+        <Divider sx={{ my: 1 }} />
+        <Stack direction="row" justifyContent="space-between">
+          <Typography variant="subtitle2">Total</Typography>
+          <Typography variant="subtitle2">
+            {formatEUR(booking.totalPriceEUR)}
+          </Typography>
+        </Stack>
+
+        {booking.cancellationReason && (
+          <Typography
+            variant="caption"
+            color="text.secondary"
+            sx={{ mt: 1, display: 'block' }}
+          >
+            Cancellation reason: {booking.cancellationReason}
+          </Typography>
+        )}
+
+        {error && (
+          <Alert severity="error" sx={{ mt: 1 }}>
+            {error}
+          </Alert>
+        )}
+      </CardContent>
+      {(isProposed || isPaid) && (
+        <CardActions sx={{ pt: 0, pb: 1, px: 2 }}>
+          {isProposed && (
+            <Button
+              variant="contained"
+              size="small"
+              startIcon={
+                busy === 'confirm' ? (
+                  <CircularProgress size={14} color="inherit" />
+                ) : (
+                  <CheckCircleIcon />
+                )
+              }
+              disabled={busy !== null}
+              onClick={() => callBookingAction('confirm')}
+            >
+              Confirm
+            </Button>
+          )}
+          <Button
+            variant="outlined"
+            size="small"
+            color={isPaid ? 'warning' : 'primary'}
+            startIcon={
+              busy === 'cancel' ? (
+                <CircularProgress size={14} />
+              ) : (
+                <CancelIcon />
+              )
+            }
+            disabled={busy !== null}
+            onClick={() => callBookingAction('cancel')}
+          >
+            {isProposed ? 'Cancel' : 'Cancel booking'}
+          </Button>
+        </CardActions>
+      )}
+      {isCancelled && (
+        <CardActions sx={{ pt: 0, pb: 1, px: 2 }}>
+          <Chip
+            icon={<CancelIcon fontSize="small" />}
+            label="Cancelled"
+            size="small"
+            variant="outlined"
+          />
+        </CardActions>
+      )}
+    </Card>
+  );
+}
+
+// each leg is a flight instance + cabin class + seats + price, so we can render it in a single row.
+// E.g., "Aegean · A3 123 — ATH → BER, Fri 1 Sep 14:30 → Fri 1 Sep 16:15, Economy, 2 seats, €350.00"
+// The FlightLegRow component takes a flight booking leg as a prop and renders it in a Box with two Typography elements: one for the flight details and one for the timing, cabin class, seats, and price.
+// The type BookingLike['flightBookings'][number] means that the leg prop is one of the elements of the flightBookings array in a BookingLike object. This allows us to access the flightInstance, cabinClass, seats, and totalPriceEUR properties of the leg.
+function FlightLegRow({ leg }: { leg: BookingLike['flightBookings'][number] }) {
+  // We use the flight definition to get the airline, flight number, origin and destination airports, and the flight instance to get the departure and arrival datetimes. We also display the cabin class, number of seats, and total price in EUR.
+  const fi = leg.flightInstance;
+  const fd = fi.flightDefinition;
+  return (
+    <Box>
+      <Typography variant="body2">
+        {fd.airline.name} · {fd.airline.iataCode} {fd.flightNumber} —{' '}
+        {fd.originAirport.iataCode} → {fd.destinationAirport.iataCode}
+      </Typography>
+      <Typography variant="caption" color="text.secondary">
+        {formatDT(fi.departureDatetime)} → {formatDT(fi.arrivalDatetime)} ·{' '}
+        {leg.cabinClass} · {leg.seats} seat{leg.seats > 1 ? 's' : ''} ·{' '}
+        {formatEUR(leg.totalPriceEUR)}
+      </Typography>
+    </Box>
+  );
+}
+
+// each stay is a hotel + room type + checkin/checkout + nights + guests + rooms + price, so we can render it in a single row.
+function HotelStayRow({
+  stay,
+}: {
+  stay: BookingLike['hotelBookings'][number];
+}) {
+  const rt = stay.roomType;
+  const hotel = rt.hotel;
+  return (
+    <Box>
+      <Typography variant="body2">
+        {hotel.name} · {rt.name} · {hotel.city.name}
+      </Typography>
+      <Typography variant="caption" color="text.secondary">
+        {formatDate(stay.checkinDate)} → {formatDate(stay.checkoutDate)} ·{' '}
+        {stay.nights} night{stay.nights > 1 ? 's' : ''} · {stay.guests} guest
+        {stay.guests > 1 ? 's' : ''}, {stay.rooms} room
+        {stay.rooms > 1 ? 's' : ''} · {formatEUR(stay.totalPriceEUR)}
+      </Typography>
+    </Box>
+  );
+}
+
+// statusChipColor returns the MUI color for a booking status. E.g., 'PROPOSED' → 'warning', 'CONFIRMED' → 'success', 'CANCELLED' → 'error'.
+function statusChipColor(
+  status: BookingStatus,
+): 'default' | 'success' | 'error' | 'warning' {
+  switch (status) {
+    case 'PROPOSED':
+      return 'warning';
+    case 'CONFIRMED':
+    case 'PAID':
+      return 'success';
+    case 'CANCELLED':
+    case 'FAILED':
+      return 'error';
+    default:
+      return 'default';
+  }
+}
+
+// formatEUR formats a number into a Euro currency string. E.g., 1234.56 → "€1,234.56"
+function formatEUR(n: number): string {
+  return new Intl.NumberFormat(undefined, {
+    style: 'currency',
+    currency: 'EUR',
+    maximumFractionDigits: 2,
+  }).format(n);
+}
+
+// Flight/hotel datetimes are stored as UTC wall-clock — i.e. the ISO "09:40Z"
+// means "09:40 at the airport", not a real UTC instant — so we render with
+// timeZone: 'UTC' to keep the display consistent with what the agent (and the
+// search results) show, regardless of the browser's local offset.
+function formatDate(iso: string): string {
+  return new Date(iso).toLocaleDateString(undefined, {
+    weekday: 'short',
+    day: 'numeric',
+    month: 'short',
+    timeZone: 'UTC',
+  });
+}
+
+function formatDT(iso: string): string {
+  const d = new Date(iso);
+  return `${d.toLocaleDateString(undefined, {
+    weekday: 'short',
+    day: 'numeric',
+    month: 'short',
+    timeZone: 'UTC',
+  })} ${d.toLocaleTimeString(undefined, {
+    hour: '2-digit',
+    minute: '2-digit',
+    timeZone: 'UTC',
+  })}`;
 }
 
 function truncate(s: string, max: number): string {
