@@ -1,5 +1,8 @@
 import { PrismaClient } from '@prisma/client';
 import { z } from 'zod';
+import { BookingRepository } from './BookingRepository';
+import { BookingService } from './BookingService';
+import { BookingServiceError } from './BookingServiceError';
 import { FlightRepository } from './FlightRepository';
 import { FlightService } from './FlightService';
 import { HotelRepository } from './HotelRepository';
@@ -50,6 +53,16 @@ export {
   type TravelServiceErrorCode,
 } from './TravelServiceError';
 
+// ───── Bookings (Stage 8) ─────
+export { BookingRepository } from './BookingRepository';
+export type { BookingWithRelations } from './BookingRepository';
+export { BookingService } from './BookingService';
+export type { ProposeBookingInput } from './BookingService';
+export {
+  BookingServiceError,
+  type BookingServiceErrorCode,
+} from './BookingServiceError';
+
 // ───── HTTP query-string parsing ─────
 export { parseBool, parseList } from './queryParsing';
 
@@ -83,6 +96,11 @@ export function createHotelService(prisma?: PrismaClient): HotelService {
   return new HotelService(new HotelRepository(client));
 }
 
+export function createBookingService(prisma?: PrismaClient): BookingService {
+  const client = prisma ?? sharedPrisma();
+  return new BookingService(client, new BookingRepository(client));
+}
+
 export function isWeatherServiceError(
   err: unknown,
 ): err is WeatherServiceError {
@@ -91,6 +109,12 @@ export function isWeatherServiceError(
 
 export function isTravelServiceError(err: unknown): err is TravelServiceError {
   return err instanceof TravelServiceError;
+}
+
+export function isBookingServiceError(
+  err: unknown,
+): err is BookingServiceError {
+  return err instanceof BookingServiceError;
 }
 
 export function isZodValidationError(err: unknown): err is z.ZodError {

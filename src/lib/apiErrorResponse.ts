@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 import {
+  isBookingServiceError,
   isTravelServiceError,
   isWeatherServiceError,
   isZodValidationError,
@@ -33,6 +34,23 @@ export function apiErrorResponse(err: unknown): NextResponse {
         : err.code === 'INVALID_DATE_RANGE'
           ? 400
           : 500;
+    return NextResponse.json(
+      { error: err.message, code: err.code },
+      { status },
+    );
+  }
+
+  if (isBookingServiceError(err)) {
+    const status =
+      err.code === 'BOOKING_NOT_FOUND' ||
+      err.code === 'FLIGHT_INSTANCE_NOT_FOUND' ||
+      err.code === 'ROOM_TYPE_NOT_FOUND'
+        ? 404
+        : err.code === 'INVALID_STATE' || err.code === 'NON_REFUNDABLE'
+          ? 409 // Conflict — request is well-formed but conflicts with current state
+          : err.code === 'INSUFFICIENT_SEATS' || err.code === 'INSUFFICIENT_ROOMS'
+            ? 409
+            : 500;
     return NextResponse.json(
       { error: err.message, code: err.code },
       { status },

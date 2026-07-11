@@ -116,6 +116,9 @@ model FlightInstance {
   status             String           @default("scheduled")
   aircraft           String?
   gate               String?
+  seatsAvailable     Int              @default(180)
+
+  flightBookings     FlightBooking[]
 
   @@unique([flightDefinitionId, departureDatetime])
   @@index([departureDatetime])
@@ -154,7 +157,8 @@ model RoomType {
   basePrice Float
   currency  String @default("EUR")
 
-  availability Availability[]
+  availability  Availability[]
+  hotelBookings HotelBooking[]
 
   @@unique([hotelId, name])
 }
@@ -193,4 +197,125 @@ model CancellationPolicy {
   hotel            Hotel   @relation(fields: [hotelId], references: [id], onDelete: Cascade)
   freeCancellation Boolean
   description      String
+}
+
+// ───────────────────────────────────────────────
+// Travel — bookings (Stage 8)
+// ───────────────────────────────────────────────
+
+// A booking is a trip-level container. It groups one or more flight legs and
+// zero or more hotel stays (or vice versa) into a single unit that transitions
+// through a state machine (PROPOSED → CONFIRMED/PAID → CANCELLED/FAILED).
+//
+// Two keys of note:
+//   - `reference`      : human-facing ID shown in the UI ("BKG-2026-A9F3K2").
+//   - `idempotencyKey` : agent-generated UUID that lets the propose_booking tool
+//                        be retried safely — a repeat call with the same key
+//                        returns the existing row instead of creating a new one.
+model Booking {
+  id                 Int             @id @default(autoincrement())
+  reference          String          @unique
+  idempotencyKey     String          @unique
+  status             BookingStatus   @default(PROPOSED)
+
+  // Denormalized customer info — replaced by userId FK once Stage 11 lands.
+  customerName       String
+  customerEmail      String
+
+  totalPriceEUR      Float
+  currency           String          @default("EUR")
+
+  createdAt          DateTime        @default(now())
+  updatedAt          DateTime        @updatedAt
+  confirmedAt        DateTime?
+  cancelledAt        DateTime?
+  cancellationReason String?
+
+  flightBookings     FlightBooking[]
+  hotelBookings      HotelBooking[]
+  payments           Payment[]
+
+  @@index([status, createdAt])
+}
+
+enum BookingStatus {
+  PROPOSED
+  CONFIRMED
+  PAID
+  CANCELLED
+  FAILED
+}
+
+// One row per flight leg. A round-trip has two FlightBooking rows; a one-way
+// has one. `pricePerSeatEUR` is frozen at booking time so past bookings never
+// change if the pricing rules do.
+model FlightBooking {
+  id               Int            @id @default(autoincrement())
+  bookingId        Int
+  booking          Booking        @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+
+  flightInstanceId Int
+  flightInstance   FlightInstance @relation(fields: [flightInstanceId], references: [id])
+
+  cabinClass       String
+  adults           Int            @default(1)
+  children         Int            @default(0)
+  seats            Int
+  pricePerSeatEUR  Float
+  totalPriceEUR    Float
+
+  createdAt        DateTime       @default(now())
+
+  @@index([bookingId])
+  @@index([flightInstanceId])
+}
+
+// One row per hotel stay. Nights is stored explicitly for convenience even
+// though it's derivable from (checkoutDate - checkinDate).
+model HotelBooking {
+  id            Int      @id @default(autoincrement())
+  bookingId     Int
+  booking       Booking  @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+
+  roomTypeId    Int
+  roomType      RoomType @relation(fields: [roomTypeId], references: [id])
+
+  checkinDate   DateTime @db.Date
+  checkoutDate  DateTime @db.Date
+  nights        Int
+  guests        Int      @default(2)
+  rooms         Int      @default(1)
+  totalPriceEUR Float
+
+  createdAt     DateTime @default(now())
+
+  @@index([bookingId])
+  @@index([roomTypeId, checkinDate])
+}
+
+// Stub payment table — provider defaults to "stub" and every attempt succeeds.
+// When real Stripe integration lands, provider becomes "stripe" and providerRef
+// holds the PaymentIntent ID; this table's shape is already ready.
+model Payment {
+  id          Int           @id @default(autoincrement())
+  bookingId   Int
+  booking     Booking       @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+
+  amount      Float
+  currency    String        @default("EUR")
+  status      PaymentStatus @default(PENDING)
+  provider    String        @default("stub")
+  providerRef String?
+
+  createdAt   DateTime      @default(now())
+  completedAt DateTime?
+
+  @@index([bookingId, status])
+}
+
+enum PaymentStatus {
+  PENDING
+  SUCCEEDED
+  FAILED
+  REFUNDED
 }
