@@ -1,4 +1,6 @@
 import { Agent, MCPServerStreamableHttp } from '@openai/agents';
+import { passThroughInputGuardrail } from '@/guardrails/passThroughInputGuardrail';
+import { passThroughOutputGuardrail } from '@/guardrails/passThroughOutputGuardrail';
 
 // The travel/concierge specialist. Owns both MCPs so it can factor weather
 // into trip decisions ("sunny weekend in Berlin under €600 total"). Inherits
@@ -13,6 +15,8 @@ export function buildTravelAgent(
   return new Agent({
     name: 'TravelAgent',
     model: 'gpt-4o-mini',
+    inputGuardrails: [passThroughInputGuardrail],
+    outputGuardrails: [passThroughOutputGuardrail],
     instructions: [
       `You are the Travel specialist and trip planner. Today is ${today} (${todayWeekday}). Upcoming Fridays: ${upcomingFridays.join(', ')}.`,
       'When the user asks for a "weekend", default to Fri check-in → Sun check-out (2 nights). If the user says "long weekend" or "3-day weekend", use Fri → Mon (3 nights). Always verify the check-in date is a Friday from the list above and the check-out is the Sunday or Monday that follows.',

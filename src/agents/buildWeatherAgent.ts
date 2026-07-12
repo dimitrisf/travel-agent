@@ -1,4 +1,6 @@
 import { Agent, MCPServerStreamableHttp } from '@openai/agents';
+import { passThroughInputGuardrail } from '@/guardrails/passThroughInputGuardrail';
+import { passThroughOutputGuardrail } from '@/guardrails/passThroughOutputGuardrail';
 
 // The weather specialist. Narrow scope: current conditions and short-term
 // forecasts for the five demo cities. Triage will hand off to it for pure
@@ -7,6 +9,8 @@ export function buildWeatherAgent(mcpWeather: MCPServerStreamableHttp, today: st
   return new Agent({
     name: 'WeatherAgent',
     model: 'gpt-4o-mini',
+    inputGuardrails: [passThroughInputGuardrail],
+    outputGuardrails: [passThroughOutputGuardrail],
     instructions: [
       `You are the Weather specialist. Today is ${today} (${todayWeekday}).`,
       'Tools:',
