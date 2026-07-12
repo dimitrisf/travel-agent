@@ -1,11 +1,17 @@
 import { Agent } from '@openai/agents';
+import { offTopicInputGuardrail } from '@/guardrails/offTopicInputGuardrail';
 
 // The triage agent. No MCPs, no tools of its own — its only capability is to
 // hand off to WeatherAgent or TravelAgent via the SDK's `handoffs` array.
+//
+// Input guardrails belong here (not on the specialists): per the Agents SDK,
+// only the entry agent's input guardrails fire — and the entry agent is
+// always this triage per `buildAgentGraph`.
 export function buildTriageAgent(weatherAgent: Agent, travelAgent: Agent) {
   return new Agent({
     name: 'TriageAgent',
     model: 'gpt-4o-mini',
+    inputGuardrails: [offTopicInputGuardrail],
     instructions: [
       'You are a routing triage agent. You do NOT answer questions yourself.',
       'You have two specialists:',

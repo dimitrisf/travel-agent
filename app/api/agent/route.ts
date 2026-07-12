@@ -7,6 +7,7 @@ import {
 } from '@openai/agents';
 import { buildAgentGraph } from '@/agents/buildAgentGraph';
 import { unwrapToolOutput } from '@/utils/toolOutput';
+import { userFacingGuardrailErrorMessage } from '@/utils/userFacingGuardrailErrorMessage';
 
 export const runtime = 'nodejs';
 // This route is a streaming endpoint, so we force dynamic to avoid caching issues
@@ -19,7 +20,10 @@ export const maxDuration = 120;
 // ───────────────────────────────────────────────
 
 // We define a type for the MCP server bundle, which includes the travel and weather MCP servers. This allows us to type the global variable that will hold the initialized MCP server instances.
-type McpBundle = { mcpTravel: MCPServerStreamableHttp; mcpWeather: MCPServerStreamableHttp };
+type McpBundle = {
+  mcpTravel: MCPServerStreamableHttp;
+  mcpWeather: MCPServerStreamableHttp;
+};
 
 // We use a global variable to hold the MCP server instances so that they are only initialized once and reused across requests. This avoids the overhead of starting new processes for each request.
 // globalThis is a special object in Node.js that persists across requests, so we can attach our MCP server instances to it. We use a type assertion to extend the globalThis type with our _mcpInit property, which will hold a Promise that resolves to our MCP server instances. This allows us to check if the servers have already been initialized and reuse them if they have.
@@ -36,8 +40,7 @@ function getOrInitMcps(): Promise<McpBundle> {
       // segment apart. The URL can be overridden per-server via env var when
       // deploying MCPs as separate services.
       const appBase =
-        process.env.APP_BASE ??
-        `http://localhost:${process.env.PORT ?? 3000}`;
+        process.env.APP_BASE ?? `http://localhost:${process.env.PORT ?? 3000}`;
       const mcpTravel = new MCPServerStreamableHttp({
         name: 'travel',
         url: process.env.TRAVEL_MCP_URL ?? `${appBase}/api/mcp/travel`,
@@ -80,6 +83,9 @@ export async function POST(req: NextRequest) {
   const agent = buildAgentGraph(mcpTravel, mcpWeather);
 
   // We run the agent with the user's input and the conversation history. We pass the stream: true option to enable streaming of the agent's output. The agent will process the input, call tools as needed, and generate a response in real-time.
+  //
+  // This agent (actually the triage agent) will hand off to the appropriate specialist (WeatherAgent or TravelAgent) based on the user's input. The agent's output is streamed back to the client as SSE events, allowing the client to display the response in real-time as it is generated.
+  // We call the agent passed to the run() function the "entry agent" because it is the first agent that receives the user's input. The entry agent is responsible for routing the input to the appropriate specialist agent based on the user's intent. The entry agent's input guardrails are applied to the user's input before it is passed to the specialist agents.
   const stream = await run(
     agent,
     [...history, { role: 'user', content: userInput }],
@@ -175,7 +181,7 @@ export async function POST(req: NextRequest) {
         send({ type: 'done', history: stream.history });
       } catch (err) {
         console.error('[api/agent] error:', err);
-        send({ type: 'error', message: (err as Error).message ?? String(err) });
+        send({ type: 'error', message: userFacingGuardrailErrorMessage(err) });
       } finally {
         controller.close();
       }
@@ -191,3 +197,4 @@ export async function POST(req: NextRequest) {
     },
   });
 }
+
