@@ -25,11 +25,13 @@ The current stack (active files) and the historical journey (files preserved in 
 
 | Layer | Files | Notes |
 |---|---|---|
-| **Frontend** | `app/page.tsx`, `app/layout.tsx`, `app/theme.ts` | React Client Component chat UI, MUI theming. Streams SSE events into the DOM. |
-| **API Route Handlers** | `app/api/weather/current/route.ts`, `app/api/weather/forecast/route.ts`, `app/api/flights/route.ts`, `app/api/hotels/route.ts`, `app/api/agent/route.ts` | Replace the three Express `*-api.ts` servers. `/api/agent` streams the agent's turn as SSE. |
-| **MCP servers** | `app/api/mcp/travel/route.ts`, `app/api/mcp/weather/route.ts` (Stage 7 — Streamable HTTP) | Route Handlers using the shared `createMcpHttpHandler` helper. Previously child processes over stdio; now HTTP endpoints in the same Next.js process. |
-| **Service + repositories + helpers** | `src/lib/*` | Unchanged from Week 2 extension. `apiErrorResponse.ts` was added for centralized Route Handler error mapping. |
-| **Data** | `prisma/schema.prisma`, `prisma/seed.ts` | Unchanged. |
+| **Frontend** | `app/page.tsx`, `app/layout.tsx`, `app/theme.ts`, `src/components/*`, `src/hooks/useAgentChat.ts` | React Client Component chat UI, MUI theming. Streams SSE events into the DOM. Rich `BookingCard` for booking tool outputs (Stage 8). |
+| **API Route Handlers** | `app/api/weather/*`, `app/api/flights/route.ts`, `app/api/hotels/route.ts`, `app/api/booking/*` (Stage 8), `app/api/agent/route.ts` | Replace the three Express `*-api.ts` servers. `/api/agent` streams the agent's turn as SSE. The `/api/booking/*` set is a booking state machine with idempotency and CAS-based inventory reservation. |
+| **MCP servers** | `app/api/mcp/travel/route.ts`, `app/api/mcp/weather/route.ts` | Route Handlers using `createMcpHttpHandler` (Stage 7 — Streamable HTTP). Tool specs live under `src/mcp/tools/{travel,weather}/` (restructure). |
+| **Agent graph** | `src/agents/build{Weather,Travel,Triage,Agent}Agent.ts`, `src/agents/buildAgentGraph.ts` | One file per agent's instructions + a wire-up (restructure). |
+| **Domain layer** | `src/lib/services/*`, `src/lib/repositories/*`, `src/lib/index.ts` | Services + typed errors + Prisma-backed repositories + barrel with factory helpers (post-Stage-8 subfolder split). |
+| **Utils / config / types** | `src/utils/*` (`apiErrorResponse`, `parsers`, `dates`, `toolOutput`, `queries/`), `src/config/samplePrompts.ts`, `src/types/*` (`chat`, `booking`, `stream`) | Stateless helpers, editable constants, shared types (restructure). |
+| **Data** | `prisma/schema.prisma`, `prisma/seed.ts` | Booking, FlightBooking, HotelBooking, Payment + BookingStatus/PaymentStatus enums added in Stage 8. |
 | **Historical journey** | `legacy/index.ts` (Day 1), `legacy/weather.ts` (Day 3), `legacy/books.ts` (Day 5), `legacy/research.ts` (Day 6/7), `legacy/mcp-server.ts` (Day 7), `legacy/weather-agent.ts`, `legacy/travel-agent.ts` (CLI REPLs) | Preserved but not part of the running app. Run individually with `tsx legacy/<file>` if you want to revisit the lesson. |
 
 ---
@@ -484,7 +486,7 @@ The error checks use the same `isZodValidationError` / `isTravelServiceError` he
 | `preferred_airlines` | `"A3,LH"` *or* `["A3","LH"]` (Express auto-arrayifies repeated keys) | `["A3","LH"]` |
 | Missing fields | `undefined` | preserved so Zod's `.default()` applies |
 
-`parseBool` and `parseList` live in [src/lib/queryParsing.ts](src/lib/queryParsing.ts) and are re-exported from `src/lib/index.ts`. Both API files import them rather than redeclaring.
+`parseBool` and `parseList` live in [src/utils/parsers.ts](src/utils/parsers.ts). Both query-parser files ([src/utils/queries/searchFlightsQuery.ts](src/utils/queries/searchFlightsQuery.ts) and [searchHotelsQuery.ts](src/utils/queries/searchHotelsQuery.ts)) import them rather than redeclaring. (These moves happened in the post-Stage-8 restructure; before that they lived under `src/lib/`.)
 
 The HTTP layer does the dumb coercion; the Zod schema in the service does strict validation. Two distinct jobs, kept apart deliberately.
 
@@ -970,6 +972,203 @@ The agent turn now involves **zero child processes** — the whole exchange is o
 
 ---
 
+### Stage 8 — Booking flow
+
+Stage 8 turns the travel agent from a **planner** into a **booker**. Alongside `search_flights` / `search_hotels`, the agent can now `propose_booking`, `get_booking`, and `cancel_booking` — creating a `PROPOSED` booking record, looking it up, or cancelling it. **Confirming is deliberately not an agent tool**: the user clicks a button on a rich booking card in the chat UI, and that button POSTs to a REST endpoint the agent can't reach. Same reason a checkout page never lets an agent hit "Pay Now" without a human in the loop.
+
+#### The six design defaults
+
+Before writing any code, we picked six things:
+
+1. **One `Booking` per trip, not per leg.** Matches how GDS/PNR systems shape their records: the booking is the container, `FlightBooking` / `HotelBooking` rows are line items. Cancelling a "trip" cascades to all its line items.
+2. **Round-trip = 2 flight rows.** Each leg is its own `FlightBooking` referencing a `FlightInstance`. Simpler pricing and seat reservation than modelling out-and-back as one row.
+3. **Three IDs for three jobs.** `id` (autoincrement, foreign-key target), `reference` (`BKG-2026-A9F3K2`, human-facing, monospace-friendly), `idempotencyKey` (client-generated UUID, retry-safe).
+4. **Compare-and-swap for inventory.** Reserving seats / rooms uses `updateMany({ where: { seatsAvailable: { gte: N } }, data: { seatsAvailable: { decrement: N } } })`. Postgres executes the check + decrement atomically; two concurrent confirms can't over-book.
+5. **Confirm is a UI action.** The agent proposes; the user confirms. No `confirm_booking` tool exists. Full rationale below.
+6. **Soft-delete on cancel.** Cancelled bookings stay in the DB with `status: CANCELLED` — payments FK, idempotency safety, cancellation-rate analytics, and audit trail all fall out for free.
+
+#### Data model
+
+New enums and tables in [prisma/schema.prisma](prisma/schema.prisma):
+
+- `BookingStatus` — `PROPOSED | CONFIRMED | PAID | CANCELLED | FAILED`.
+- `Booking` — `reference`, `idempotencyKey` (unique), `status`, `customerName` / `customerEmail`, `totalPriceEUR`, `cancellationReason`, timestamps.
+- `FlightBooking` — `flightInstanceId` FK, `cabinClass`, `adults`, `children`, `seats`, `pricePerSeatEUR`, `totalPriceEUR`.
+- `HotelBooking` — `roomTypeId` FK, `checkinDate`, `checkoutDate`, `nights`, `guests`, `rooms`, `totalPriceEUR`.
+- `Payment` — `bookingId` FK, `amount`, `currency`, `PaymentStatus` (`PENDING | SUCCEEDED | FAILED | REFUNDED`), `provider` (`'stub'`), `providerRef`, `completedAt`.
+- `FlightInstance.seatsAvailable` — new field, default 180. The counter the confirm step decrements.
+- Back-relations added to `City`, `RoomType`, `FlightInstance`.
+
+#### Service layer
+
+[src/lib/services/BookingService.ts](src/lib/services/BookingService.ts) exposes four operations, all wrapped in `prisma.$transaction`:
+
+| Method | State transition | Inventory | Notes |
+|---|---|---|---|
+| `proposeBooking(input)` | (new) → `PROPOSED` | untouched | Idempotent on `idempotencyKey` — retry with the same key returns the same row. Prices every line item from live data. |
+| `confirmBooking(id)` | `PROPOSED` → `PAID` | reserves seats + rooms via CAS | Creates a `Payment` row. Fails with `INSUFFICIENT_SEATS` / `INSUFFICIENT_ROOMS` if inventory has been eaten since propose. |
+| `cancelBooking(id, reason?)` | `PROPOSED` \| `PAID` → `CANCELLED` | restores if previously reserved | Enforces per-hotel `CancellationPolicy` for `PAID` bookings (non-refundable hotels throw `NON_REFUNDABLE`). |
+| `getBooking(id)` \| `getBookingByReference(reference)` | (read) | — | Returns the full aggregate with all line items. |
+
+All reads use a single shared `bookingInclude` shape in [src/lib/repositories/BookingRepository.ts](src/lib/repositories/BookingRepository.ts) — one place to change what "fully populated Booking" means, plus consistent `orderBy` (flights by `departureDatetime asc`, hotels by `checkinDate asc`) so the UI always sees legs in travel order.
+
+#### Idempotency
+
+The agent generates a fresh UUID `idempotency_key` per new booking intent (per instruction). If the same call is retried (network hiccup, tool-retry logic), `proposeBooking` finds the existing row by unique key and returns it verbatim — no duplicate. If the caller intends a *new* booking, they must generate a new UUID. Same pattern Stripe uses on its `Idempotency-Key` header.
+
+#### REST endpoints
+
+- `POST /api/booking/propose` → `201 { booking }` (or 200 if idempotent hit).
+- `GET /api/booking/[id]` → `200 { booking }`.
+- `POST /api/booking/[id]/confirm` → `200 { booking updated }`. **Called by the Confirm button in the UI, never by an agent tool.**
+- `POST /api/booking/[id]/cancel` (optional `{ reason }` body) → `200 { booking updated }`.
+
+Error mapping ([src/utils/apiErrorResponse.ts](src/utils/apiErrorResponse.ts)):
+
+```
+*_NOT_FOUND      → 404
+INVALID_STATE    → 409  (Conflict — e.g. confirm a CANCELLED booking)
+NON_REFUNDABLE   → 409
+INSUFFICIENT_*   → 409
+INTERNAL_ERROR   → 500
+```
+
+#### MCP tools
+
+Three new specs under [src/mcp/tools/travel/](src/mcp/tools/travel/):
+
+- `propose_booking` — takes `idempotency_key`, `customer_name`, `customer_email`, `flights[]` (with `flight_instance_id` from a `search_flights` result), `hotels[]` (with `room_type_id` from a `search_hotels` result). Round-trip = 2 entries in `flights`.
+- `get_booking` — takes `id`. For the agent to look up prior bookings.
+- `cancel_booking` — takes `id`, optional `reason`. Agent instructions require confirming with the user in prose first.
+
+Note the missing tool: **`confirm_booking` is deliberately not registered**. See "Why the agent can't confirm" below.
+
+The existing search-result rows were extended so the agent has IDs to pass through:
+
+- `FlightService` result now includes `flight_instance_id`.
+- `HotelService` result now includes `hotel_id` and `room_type_id`.
+
+#### UI — the BookingCard
+
+When the client-side detects a tool output from `propose_booking` / `get_booking` / `cancel_booking` whose JSON parses to a booking-shaped object, [src/components/ToolCallView.tsx](src/components/ToolCallView.tsx) renders a rich [BookingCard](src/components/BookingCard.tsx) instead of the generic accordion:
+
+- **Header** — `reference` (monospace) + status chip (colour-coded).
+- **Flights section** — one `FlightLegRow` per leg (stacked by `FlightLegRows`).
+- **Hotels section** — one `HotelStayRow` per stay (stacked by `HotelStayRows`).
+- **Total** — sum, formatted as EUR via `Intl.NumberFormat`.
+- **Actions** —
+  - `PROPOSED` → **Confirm** (primary) + **Cancel** (outlined).
+  - `PAID` → **Cancel booking** (outlined, warning colour).
+  - `CANCELLED` → a small "Cancelled" chip; no buttons.
+- **Error alert** — if a confirm or cancel action fails, the API's error message surfaces inline.
+
+Clicking Confirm POSTs to `/api/booking/[id]/confirm`; clicking Cancel POSTs to `/api/booking/[id]/cancel`. The card owns its own booking state — the response updates it in place without touching the surrounding chat message.
+
+Datetime formatting uses `timeZone: 'UTC'` throughout. Flight ISO strings in the DB are stored as UTC wall-clock (i.e. `09:40Z` means "09:40 at the airport"), so rendering with the browser's local offset would shift them wrong. All BookingCard formatters explicitly stay in UTC.
+
+#### Why the agent can't confirm
+
+- **User consent surface.** A cancel-and-refund policy needs a human clicking the button, not the model choosing to.
+- **Payment integration.** Real confirm calls will one day charge a card via Stripe. The button is where 3-D Secure / SCA challenges will live.
+- **Prompt-injection defense.** A user (or a fetched page) can't say "confirm my booking" and have the agent do it — there's no tool to reach for.
+- **Prose contract.** Post-`propose_booking`, agent instructions explicitly forbid saying "confirmed" / "successful". They say: "ready to confirm — click the Confirm button."
+
+#### Agent instructions
+
+[buildTravelAgent](src/agents/buildTravelAgent.ts) grew a "Bookings" subsection: how to propose, how to summarize in prose first, when to generate a fresh UUID vs reuse for retries, forbid `confirm_booking`, use search-result IDs, one leg per direction. It also grew two orthogonal rules the pre-booking version needed but never had:
+
+- **Origin** — never guess. If the user hasn't stated an origin airport, ask before calling `search_flights`. Destination alone doesn't imply origin.
+- **Round-trip** — a "weekend" or multi-night stay is a round trip. `search_flights` must be called with both `departure_date` and `return_date`; `propose_booking` must include both leg IDs. Only skip when the user explicitly says "one-way".
+
+These weren't strictly Stage 8 changes — they were emergent behaviours on `gpt-4o-mini` that broke once the tool surface grew from 4 to 7 (adding booking tools crowded the attention budget and the model started defaulting to one-way, guessing origins).
+
+#### Verification checklist
+
+1. *"I want a sunny weekend in Berlin under €600 total."* → agent asks for origin.
+2. Reply *"Athens."* → agent calls `search_flights` with `return_date`, `search_hotels`, `get_forecast`, summarizes trip.
+3. *"Book me the cheapest, one adult, economy. My name is Dimitris, dimitris@example.com."* → agent calls `propose_booking` with two flight legs. A **BookingCard** renders with status `PROPOSED`, both legs in chronological order, total price.
+4. Click **Confirm** → card updates to `PAID` (green chip); Confirm button disappears; only Cancel booking remains.
+5. Click **Cancel booking** on a `PAID` booking with a refundable hotel → card updates to `CANCELLED` (red chip).
+6. On a non-refundable hotel → error alert appears with the policy description; booking stays `PAID`.
+
+---
+
+### Post-Stage-8 restructure
+
+By the end of Stage 8, the repo had outgrown a flat `src/lib/`. `app/page.tsx` was ~1000 lines. `src/lib/` was mixing five different concerns (services, repositories, error classes, MCP transport helpers, HTTP-error mapper, query-string parsers). This stage doesn't add features — it moves files so the layout matches the mental model.
+
+#### Guiding principles
+
+1. **Domain vs glue.** `src/lib/` is *only* domain services and their repositories/errors. Everything else — HTTP mapping, URL parsing, date helpers, MCP transport — moves to a colocated helper folder.
+2. **One thing per file.** `MessageBubble`, `ToolCallView`, `BookingCard`, `FlightLegRow`, `FlightLegRows`, `HotelStayRow`, `HotelStayRows`, `SamplePrompts`, `MessageBubbles` — each in its own file under `src/components/`. Same rule for agent builders, MCP tool specs. Tuning any one is a file-scoped operation.
+3. **Grouped by concern, not by name.** `src/mcp/tools/travel/` groups the five travel MCP tools; `src/lib/repositories/` groups all four Prisma-backed data-access files; `src/agents/` groups all three build-agent factories plus the wire-up.
+4. **camelCase everywhere.** File names match their default export where reasonable (`useAgentChat.ts`, `BookingCard.tsx`, `buildTravelAgent.ts`) — greppable, no mixed conventions.
+
+#### The new layout
+
+```
+src/
+├── agents/              — Agent graph (buildTravelAgent, buildWeatherAgent,
+│                          buildTriageAgent, buildAgentGraph)
+├── components/          — All React components (MessageBubble, MessageBubbles,
+│                          ToolCallView, BookingCard, FlightLegRow(s),
+│                          HotelStayRow(s), SamplePrompts)
+├── config/              — Editable constants (samplePrompts.ts)
+├── hooks/               — React hooks (useAgentChat — owns messages, history,
+│                          pending, send; exposes { messages, pending, send })
+├── lib/                 — Domain layer
+│   ├── index.ts             — Barrel + factory helpers + PrismaClient singleton
+│   ├── repositories/        — BookingRepository, FlightRepository,
+│   │                           HotelRepository, WeatherRepository
+│   └── services/            — BookingService, FlightService, HotelService,
+│                              WeatherService + typed error classes
+├── mcp/                 — MCP transport and tool specs
+│   ├── mcpHttpHandler.ts    — JSON-RPC-over-HTTP handler for Route Handlers
+│   ├── mcpApiClient.ts      — callApi / postApi factory
+│   └── tools/
+│       ├── travel/          — searchFlights, searchHotels, proposeBooking,
+│       │                      getBooking, cancelBooking (5 factories)
+│       └── weather/         — getWeather, getForecast (2 factories)
+├── types/               — Shared types
+│   ├── booking.ts           — BookingLike + BookingStatus
+│   ├── chat.ts              — ToolCall + ChatMessage
+│   └── stream.ts            — StreamEvent union
+└── utils/               — Stateless helpers
+    ├── apiErrorResponse.ts  — Service error → HTTP response mapper
+    ├── dates.ts             — WEEKDAY_NAMES, upcomingFridaysFrom
+    ├── parsers.ts           — parseBool, parseList
+    ├── toolOutput.ts        — Unwrap MCP tool result → string
+    └── queries/
+        ├── searchFlightsQuery.ts
+        └── searchHotelsQuery.ts
+```
+
+#### Notable extractions
+
+- **[useAgentChat](src/hooks/useAgentChat.ts)** — the ~300-line `send()` + `applyEvent()` chunk lifted out of `page.tsx`. Owns `messages`, `history`, `pending`; returns `{ messages, pending, send }`. Page has no chat mechanics left — just JSX and text-input state.
+- **MCP tool factories.** Each tool spec exports a `makeXxxToolSpec(callApi)` (or `postApi`) factory rather than a spec object. The route file creates one API client from its own env-var-derived BASE and hands it to each factory. Preserves the per-MCP env override (`TRAVEL_API_BASE` / `WEATHER_API_BASE`) and makes the tool spec files pure and testable.
+- **Agents.** `buildTravelAgent` / `buildWeatherAgent` / `buildTriageAgent` moved from `app/api/agent/route.ts` (which had grown to ~350 lines) into one file each. `buildAgentGraph` is the wire-up. Editing one agent's instructions is now file-scoped.
+- **Autoscroll encapsulated.** `MessageBubbles` owns its own `bottomRef` + `useEffect(scrollIntoView, [messages])`. `page.tsx` never touches scroll concerns.
+
+#### What stayed put
+
+- `app/` — Next.js App Router. Route Handlers and `page.tsx` are unchanged in role, just leaner.
+- `prisma/` — schema and seed.
+- `legacy/` — historical CLI/Express versions.
+
+#### `app/page.tsx` — before and after
+
+```
+Before:  ~1000 lines  (types + hooks + components + JSX + state + effects)
+After:    ~85 lines   (imports, input state, form submit, JSX shell)
+```
+
+The delta went to `src/hooks/useAgentChat.ts` (chat logic), `src/components/*` (rendering), `src/types/*` (shared types), and `src/config/samplePrompts.ts` (the seeded prompts).
+
+> **Note on the historical Stage narratives above:** file paths in Stages 1–7 reflect the layout at the time each stage was written. Where those don't match the current file tree, the [file index](#file-index) at the bottom of this doc is authoritative.
+
+---
+
 ## Next.js port
 
 Everything below Stage 5 was ported to a single Next.js 15 (App Router) app. What changed and what didn't:
@@ -1121,9 +1320,11 @@ MUI theming happens in `app/layout.tsx` with `AppRouterCacheProvider` + `ThemePr
 
 **Layer 2 — Route Handlers (server-side).** Five endpoints. Four are boring data endpoints; one is the agent endpoint.
 
-*Data endpoints* — `app/api/weather/current/route.ts`, `/forecast`, `/api/flights`, `/api/hotels`. Each is ~20 lines: parse query, call `createXxxService().searchXxx(input)`, `NextResponse.json(result)`, `catch → apiErrorResponse(err)`.
+*Data endpoints* — `app/api/weather/current/route.ts`, `/forecast`, `/api/flights`, `/api/hotels`. Each is ~15 lines: parse query (via a factored `parseSearchXxxQuery` in `src/utils/queries/`), call `createXxxService().searchXxx(input)`, `NextResponse.json(result)`, `catch → apiErrorResponse(err)`.
 
-`apiErrorResponse` (`src/lib/apiErrorResponse.ts`) is one function all four share:
+*Booking endpoints* (Stage 8) — `app/api/booking/propose`, `/api/booking/[id]`, `/api/booking/[id]/confirm`, `/api/booking/[id]/cancel`. Same shape but POST-heavy; `[id]/confirm` is the only route deliberately unreachable from any agent tool.
+
+`apiErrorResponse` ([src/utils/apiErrorResponse.ts](src/utils/apiErrorResponse.ts)) is one function all of them share:
 
 ```
 ZodError                                   → 400 { error, issues }
@@ -1144,25 +1345,28 @@ TravelServiceError  INVALID_DATE_RANGE     → 400
 
 The `for await (const event of stream)` block does essentially what the CLI REPL did — but instead of `console.log`-ing tool calls and streaming to stdout, it sends SSE frames to the browser.
 
-**Layer 3 — Service + Repository (`src/lib`).** Unchanged from the pre-Next.js version. This is the payoff of Stage 2: the API framework is a swappable outer skin.
+**Layer 3 — Service + Repository (`src/lib/`).** The payoff of Stage 2 (API framework as swappable outer skin), regrouped by the post-Stage-8 domain-vs-glue split.
 
-- `{Weather,Flight,Hotel}Service` — Zod validation, business rules (cabin multipliers, night aggregation, amenity name lookup), typed errors.
-- `{Weather,Flight,Hotel}Repository` — Prisma queries + projection to plain types (no Prisma types leak upward).
-- `{Weather,Travel}ServiceError` — typed error codes for HTTP mapping.
-- `index.ts` — barrel + factory helpers + `is*Error` type guards + `PrismaClient` lazy singleton.
-- `queryParsing.ts` — `parseBool`, `parseList` (shared with the Route Handler layer).
-- `apiErrorResponse.ts` — the Next.js-specific error → response mapper (added during the port).
+- `services/` — `WeatherService`, `FlightService`, `HotelService`, `BookingService` (Zod validation, business rules, transactional inventory reservation). Sibling error classes: `WeatherServiceError`, `TravelServiceError`, `BookingServiceError`.
+- `repositories/` — `WeatherRepository`, `FlightRepository`, `HotelRepository`, `BookingRepository`. Prisma queries + projection to plain types (no Prisma types leak upward).
+- `index.ts` — barrel + factory helpers (`createXxxService(prisma?)`) + `is*ServiceError` type guards + `PrismaClient` lazy singleton.
+
+Everything else that used to live under `src/lib/` (query parsing, HTTP error mapping, MCP transport) moved to sibling folders in the post-Stage-8 restructure:
+
+- `src/utils/apiErrorResponse.ts` — the Next.js-specific service-error → response mapper.
+- `src/utils/parsers.ts` — `parseBool`, `parseList`. Used by the two query parsers.
+- `src/utils/queries/{searchFlights,searchHotels}Query.ts` — `NextRequest` → `SearchXxxInput`.
 
 **Layer 4 — MCP servers (Streamable HTTP Route Handlers).** `app/api/mcp/travel/route.ts` and `app/api/mcp/weather/route.ts`. Each:
 
-- Uses the shared `createMcpHttpHandler` from `src/lib/mcpHttpHandler.ts` to speak MCP JSON-RPC over `POST`.
-- Declares its tools as plain `McpToolSpec` objects with JSON Schema `inputSchema` and a `handler` that calls `callApi()` from `src/lib/mcpApiClient.ts`.
-- `callApi()` builds a URL against the shared `BASE` (default `http://localhost:3000`) and `fetch`es the appropriate data Route Handler under `/api/…`.
-- Returns `{ content: [{ type: 'text', text: responseBody }], isError: !r.ok }`.
+- Uses the shared `createMcpHttpHandler` from `src/mcp/mcpHttpHandler.ts` to speak MCP JSON-RPC over `POST`.
+- Builds one `createMcpApiClient(BASE)` from `src/mcp/mcpApiClient.ts` (BASE overridable per MCP via `TRAVEL_API_BASE` / `WEATHER_API_BASE`).
+- Composes its tool list by invoking factories from `src/mcp/tools/{travel,weather}/` — each factory takes just the API method it needs (`callApi` for GET-shaped tools, `postApi` for the mutating booking tools) and returns an `McpToolSpec`.
+- Each tool spec's handler calls the injected API method against a REST path (`/api/flights`, `/api/hotels`, `/api/booking/propose`, …). `callApi` returns `{ content: [{ type: 'text', text: responseBody }], isError: !r.ok }`.
 
 The design buys us three things: deployable to serverless (no `spawn`), inspectable via `npm run mcp:inspect` (enter the URL in the browser UI), and `curl`-able for hand-testing (send a `tools/list` JSON-RPC frame with `curl` and read the plain-JSON response).
 
-**Layer 5 — Database (Postgres via Prisma).** `schema.prisma` unchanged. `PrismaClient` singleton in `src/lib/index.ts`. Route Handlers, MCP handlers (indirectly), and the agent all use the same connection pool.
+**Layer 5 — Database (Postgres via Prisma).** `schema.prisma` gained Booking / FlightBooking / HotelBooking / Payment + `BookingStatus` / `PaymentStatus` enums in Stage 8, plus `seatsAvailable` on `FlightInstance` for CAS-based reservation. `PrismaClient` singleton in `src/lib/index.ts`. Route Handlers, MCP handlers (indirectly), and the agent all use the same connection pool.
 
 ### Trace of one request, end-to-end
 
@@ -1178,8 +1382,8 @@ User types **"I want a sunny weekend in Berlin under €600 total."** and hits s
    - `get_forecast({ city: "Berlin", days: 7 })`
    - `search_flights({ origin: "ATH", destination: "BER", departure_date: "2026-07-10", return_date: "2026-07-12" })`
    - `search_hotels({ city: "Berlin", checkin: "2026-07-10", checkout: "2026-07-12", max_price: 150 })`
-8. **Runner dispatch.** For each `function_call`, the Runner looks up which MCP registered that tool name and sends a `tools/call` JSON-RPC frame over stdin to the corresponding child.
-9. **Inside the child** (say `travel-mcp.ts` handling `search_flights`): builds `new URL('/api/flights', 'http://localhost:3000')`, sets query params, `fetch`es — loopback HTTP back into the same Next.js process.
+8. **Runner dispatch.** For each `function_call`, the Runner looks up which MCP registered that tool name and sends a `tools/call` JSON-RPC frame over HTTP `POST` to the corresponding MCP Route Handler (`/api/mcp/travel` or `/api/mcp/weather`).
+9. **Inside the MCP handler** (say the travel MCP handling `search_flights`): the factory-built spec's handler invokes `callApi('/api/flights', args)`, which builds `new URL('/api/flights', BASE)`, sets query params, `fetch`es — loopback HTTP back into the same Next.js process.
 10. **Loopback into Next.js.** `GET /api/flights?…` routes to `app/api/flights/route.ts::GET`.
 11. **Route Handler — flights.** `parseSearchFlightsQuery(req)` → coerces types. `flightService.searchFlights(input)` → Zod parses, `flightRepository.airportExists` × 2 in parallel, `flightRepository.findInstances(...)` (Prisma joins across FlightInstance → FlightDefinition → Airline + two Airport→City chains), maps rows, applies cabin multiplier, filters by `max_price`. `NextResponse.json({ outbound, inbound })`.
 12. **HTTP response back to child.** `fetch` resolves. Child wraps body: `{ content: [{ type: 'text', text: bodyText }], isError: !r.ok }`.
@@ -1266,13 +1470,33 @@ The legacy REPLs still work — the CLI travel-agent talks to the same MCP serve
 
 ```
 day-1/
-├─ app/                              (Next.js App Router — the running app)
-├─ src/lib/                          (services, repositories, error classes, helpers)
-├─ app/api/mcp/travel/route.ts, app/api/mcp/weather/route.ts   (MCPs as Streamable HTTP Route Handlers, Stage 7)
-├─ prisma/                            (schema + seed)
-├─ legacy/                            (Day 1–7 + CLI REPLs, historical)
-├─ openapi.yaml                       (contract for /api/weather/current, /forecast, /flights, /hotels)
-├─ next.config.mjs, next-env.d.ts    (Next.js scaffolding)
-├─ tsconfig.json                      (Next.js-compatible)
-└─ package.json                       (Next.js + MUI + Prisma + OpenAI Agents)
+├─ app/
+│  ├─ page.tsx, layout.tsx, theme.ts                     (chat UI shell)
+│  └─ api/
+│     ├─ agent/route.ts                                   (SSE stream of the agent's turn)
+│     ├─ weather/{current,forecast}/route.ts              (weather REST)
+│     ├─ flights/route.ts, hotels/route.ts                (travel REST)
+│     ├─ booking/{propose,[id],[id]/confirm,[id]/cancel}/route.ts  (booking REST, Stage 8)
+│     └─ mcp/{travel,weather}/route.ts                    (MCP as Streamable HTTP Route Handlers, Stage 7)
+├─ src/
+│  ├─ agents/         (build{Weather,Travel,Triage}Agent, buildAgentGraph)
+│  ├─ components/     (UI: MessageBubble(s), ToolCallView, BookingCard, FlightLegRow(s), HotelStayRow(s), SamplePrompts)
+│  ├─ config/         (samplePrompts.ts)
+│  ├─ hooks/          (useAgentChat)
+│  ├─ lib/
+│  │  ├─ index.ts     (barrel + factory helpers + PrismaClient singleton)
+│  │  ├─ repositories/ (Booking, Flight, Hotel, WeatherRepository)
+│  │  └─ services/    (Booking, Flight, Hotel, WeatherService + typed error classes)
+│  ├─ mcp/
+│  │  ├─ mcpHttpHandler.ts, mcpApiClient.ts
+│  │  └─ tools/{travel,weather}/                          (one tool spec factory per file)
+│  ├─ types/          (chat, booking, stream)
+│  └─ utils/
+│     ├─ apiErrorResponse.ts, parsers.ts, dates.ts, toolOutput.ts
+│     └─ queries/     (search{Flights,Hotels}Query)
+├─ prisma/            (schema + seed; Booking / FlightBooking / HotelBooking / Payment added Stage 8)
+├─ legacy/            (Day 1–7 + CLI REPLs, historical)
+├─ openapi.yaml       (contract for the REST endpoints)
+├─ next.config.mjs, next-env.d.ts, tsconfig.json
+└─ package.json       (Next.js + MUI + Prisma + OpenAI Agents)
 ```
