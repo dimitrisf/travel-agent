@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { apiErrorResponse } from '@/lib/apiErrorResponse';
+import { apiErrorResponse } from '@/utils/apiErrorResponse';
 import { createBookingService } from '@/lib';
 
 // runtime and dynamic settings for Next.js API route

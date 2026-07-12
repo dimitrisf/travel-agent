@@ -4,7 +4,7 @@ import {
   isTravelServiceError,
   isWeatherServiceError,
   isZodValidationError,
-} from './index';
+} from '@/lib';
 
 // This function takes an error object and returns a NextResponse with the appropriate HTTP status code and JSON body based on the type of error. It handles validation errors, service-specific errors, and unexpected errors.
 // The function uses type guards to determine the type of error and constructs a response accordingly. For validation errors, it returns a 400 status with details about the issues. For service-specific errors, it returns a 404 or 500 status based on the error code. For unexpected errors, it logs the error and returns a 500 status with a generic message.

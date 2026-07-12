@@ -5,7 +5,7 @@ import {
   bookingInclude,
   type BookingRepository,
   type BookingWithRelations,
-} from './BookingRepository';
+} from '../repositories/BookingRepository';
 import { BookingServiceError } from './BookingServiceError';
 
 // ───────────────────────────────────────────────

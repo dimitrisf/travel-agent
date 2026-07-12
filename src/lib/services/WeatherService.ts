@@ -3,7 +3,7 @@ import type {
   CurrentWeatherRow,
   ForecastRow,
   WeatherRepository,
-} from './WeatherRepository';
+} from '../repositories/WeatherRepository';
 import { WeatherServiceError } from './WeatherServiceError';
 
 const GetCurrentWeatherInput = z.object({

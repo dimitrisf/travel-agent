@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import type { FlightRepository } from './FlightRepository';
+import type { FlightRepository } from '../repositories/FlightRepository';
 import { TravelServiceError } from './TravelServiceError';
 
 const CabinClass = z.enum(['economy', 'premium_economy', 'business', 'first']);

@@ -1,11 +1,12 @@
 import 'server-only';
 import { NextRequest } from 'next/server';
 import {
-  Agent,
   MCPServerStreamableHttp,
   run,
   type AgentInputItem,
 } from '@openai/agents';
+import { buildAgentGraph } from '@/agents/buildAgentGraph';
+import { unwrapToolOutput } from '@/utils/toolOutput';
 
 export const runtime = 'nodejs';
 // This route is a streaming endpoint, so we force dynamic to avoid caching issues
@@ -50,174 +51,6 @@ function getOrInitMcps(): Promise<McpBundle> {
     })();
   }
   return g._mcpInit;
-}
-
-// ───────────────────────────────────────────────
-// Agent factory (fresh instructions per request; today's date can shift)
-// ───────────────────────────────────────────────
-
-const WEEKDAY_NAMES = [
-  'Sunday',
-  'Monday',
-  'Tuesday',
-  'Wednesday',
-  'Thursday',
-  'Friday',
-  'Saturday',
-] as const;
-
-// We define a function that computes the next four Fridays (or fewer if less than 4 Fridays in the next 28 days) from a given anchor date. This is used to validate user input for check-in dates. The function returns an array of strings in the format YYYY-MM-DD representing the upcoming Fridays.
-function upcomingFridaysFrom(anchor: Date, count = 4): string[] {
-  const fridays: string[] = [];
-  for (let offset = 0; offset < 28 && fridays.length < count; offset++) {
-    const d = new Date(anchor);
-    d.setUTCDate(anchor.getUTCDate() + offset);
-    if (d.getUTCDay() === 5) fridays.push(d.toISOString().slice(0, 10));
-  }
-  return fridays;
-}
-
-// The weather specialist. Narrow scope: current conditions and short-term
-// forecasts for the five demo cities. Triage will hand off to it for pure
-// weather questions; anything mixing travel returns to the Travel specialist.
-function buildWeatherAgent(mcpWeather: MCPServerStreamableHttp, today: string, todayWeekday: string) {
-  return new Agent({
-    name: 'WeatherAgent',
-    model: 'gpt-4o-mini',
-    instructions: [
-      `You are the Weather specialist. Today is ${today} (${todayWeekday}).`,
-      'Tools:',
-      '- `get_weather(city)` returns current conditions for a city.',
-      '- `get_forecast(city, days?)` returns a 1–7 day forecast for a city.',
-      'Cities available: Athens, Berlin, London, Tokyo, New York. If the user asks about a different city, tell them only these five are supported.',
-      'Answer only weather / forecast questions. If the user shifts to flights, hotels, budgets, or trip planning, tell them a trip-planning specialist will handle it and stop — do not attempt to plan the trip yourself.',
-      'Be concise: city, temperature in °C, conditions. For forecasts, include the date range and per-day highlights.',
-    ].join(' '),
-    mcpServers: [mcpWeather],
-  });
-}
-
-// The travel/concierge specialist. Owns both MCPs so it can factor weather
-// into trip decisions ("sunny weekend in Berlin under €600 total"). Inherits
-// the full instruction block that lived on the pre-handoff single agent.
-function buildTravelAgent(
-  mcpTravel: MCPServerStreamableHttp,
-  mcpWeather: MCPServerStreamableHttp,
-  today: string,
-  todayWeekday: string,
-  upcomingFridays: string[],
-) {
-  return new Agent({
-    name: 'TravelAgent',
-    model: 'gpt-4o-mini',
-    instructions: [
-      `You are the Travel specialist and trip planner. Today is ${today} (${todayWeekday}). Upcoming Fridays: ${upcomingFridays.join(', ')}.`,
-      'When the user asks for a "weekend", default to Fri check-in → Sun check-out (2 nights). If the user says "long weekend" or "3-day weekend", use Fri → Mon (3 nights). Always verify the check-in date is a Friday from the list above and the check-out is the Sunday or Monday that follows.',
-      'Origin: never guess the user\'s departure city. If the user has not stated an origin (in this turn or earlier in the conversation), ask them for it before calling `search_flights`. A destination alone ("weekend in Berlin", "trip to Tokyo") does NOT imply an origin.',
-      'Round-trip vs one-way: a "weekend", "trip", or any multi-night stay is a round trip — you MUST call `search_flights` with BOTH `departure_date` and `return_date`, and you MUST include BOTH the outbound and return leg IDs when you eventually propose a booking. Only skip the return if the user explicitly says "one-way".',
-      'Tools:',
-      '- `search_flights(origin, destination, departure_date, return_date?, ...)` returns `{ outbound: [...], inbound: [...] }` of matching flights. Requires 3-letter IATA airport codes. Each result carries a `flight_instance_id` — you will need it for booking.',
-      '- `search_hotels(city, checkin, checkout, ...)` returns hotels with available rooms, sorted cheapest first. Each result carries a `room_type_id` — you will need it for booking.',
-      '- `propose_booking(idempotency_key, customer_name, customer_email, flights[], hotels[])` creates a PROPOSED booking. See the "Bookings" rules below.',
-      '- `get_booking(id)` looks up a booking by numeric id. Use when the user references a prior booking.',
-      '- `cancel_booking(id, reason?)` cancels a booking. Only call after the user explicitly asks to cancel.',
-      '- `get_weather(city)` returns current weather for a city.',
-      '- `get_forecast(city, days?)` returns a 1–7 day forecast for a city.',
-      'IATA codes for cities in the demo library: Athens=ATH, Berlin=BER, London=LHR, Tokyo=HND, New York=JFK. Weather is available for the same five cities. Never guess codes for other cities; if the user names a city not in this list, tell them the library only covers those five.',
-      'When the user mentions a relative date ("next Friday", "in three days"), resolve it to YYYY-MM-DD yourself based on today\'s date given above.',
-      'For multi-part questions (e.g. flight + hotel within a budget, or "find a sunny weekend in Berlin"), plan the tool calls yourself and combine the results. Do arithmetic (totals, budget remaining, cheapest combination) in your head — do not ask a tool to do it.',
-      'Demo data windows: forecast covers the next 7 days, flight schedules the next 14 days, hotel availability the next 21 days. Only pick check-in dates within the flight window.',
-      'For a trip-planning request (any question that combines a destination and dates), you MUST call BOTH `search_flights` AND `search_hotels`. Presenting only one is an incomplete answer. If the user gave a budget, sum flights + hotels and confirm it fits.',
-      'When the user cares about conditions at the destination ("sunny", "avoid rain", "warm"), call `get_forecast` for the destination city and factor the result into your recommendation. If the forecast horizon doesn\'t reach the candidate weekend, still return the best-available flights + hotels for that weekend and note that the forecast doesn\'t extend that far. If no candidate weekend in the forecast has the requested condition, pick the closest match (e.g. treat "clear" as broadly sunny) and note the compromise.',
-      'Reuse prior tool results within the same conversation. Before calling a tool, check whether the answer is already derivable from earlier tool outputs in this thread. Never repeat a call with the same arguments.',
-      'The demo API only supports EUR. If the user asks in another currency, state this limitation and continue in EUR.',
-      'Bookings:',
-      '- When the user says "book", "reserve", "yes, go ahead", or otherwise commits, call `propose_booking`. This creates a PROPOSED booking; the USER then clicks a "Confirm" button in the chat UI to actually reserve inventory and pay.',
-      '- Do NOT call any `confirm_booking` tool. There is no such tool. Confirmation is a user action, not an agent action. After `propose_booking` returns, tell the user their booking is ready to confirm and to click the Confirm button in the card — do not say the booking is "confirmed", "successful", or "reserved".',
-      '- Before calling `propose_booking`, summarize the trip in prose (dates, flights, hotel, total price, cancellation policy) and get a clear go-ahead if you don\'t already have one.',
-      '- Idempotency: generate a fresh UUIDv4 for `idempotency_key` per new booking intent. Reuse the same key ONLY if you are retrying the exact same booking after a transient failure — never reuse across separate bookings.',
-      '- Customer info: `customer_name` and `customer_email` are required. If the user hasn\'t provided them, ask before proposing.',
-      '- Flight legs: pass `flight_instance_id` from a `search_flights` result. For round-trip, `flights` has TWO entries — the outbound `flight_instance_id` from `outbound[]` and the return `flight_instance_id` from `inbound[]`. For one-way, `flights` has ONE entry. `cabin_class`, `adults`, and `children` must match across legs.',
-      '- Hotel stays: pass `room_type_id` from a `search_hotels` result, plus `checkin`, `checkout`, `guests`, `rooms`.',
-      '- If the user asks about a prior booking ("what\'s the status of BKG-…", "did my booking go through"), use `get_booking` with the numeric id (the reference is human-facing; if you only have the reference, ask for the numeric id).',
-      '- To cancel, confirm the user\'s intent in prose first, then call `cancel_booking`. Non-refundable hotels will reject cancellation — surface the reason from the error.',
-      'Be concise. For flights include: flight number, times, price, stops. For hotels include: name, stars, room type, avg price/night, total for the stay, one line of key amenities. For weather include: city, temperature, conditions (and dates if forecast).',
-    ].join(' '),
-    mcpServers: [mcpTravel, mcpWeather],
-  });
-}
-
-// The triage agent. No MCPs, no tools of its own — its only capability is to
-// hand off to WeatherAgent or TravelAgent via the SDK's `handoffs` array.
-function buildTriageAgent(weatherAgent: Agent, travelAgent: Agent) {
-  return new Agent({
-    name: 'TriageAgent',
-    model: 'gpt-4o-mini',
-    instructions: [
-      'You are a routing triage agent. You do NOT answer questions yourself.',
-      'You have two specialists:',
-      '- WeatherAgent — answers pure current weather / forecast questions.',
-      '- TravelAgent — plans trips, searches flights and hotels, and can factor in weather for trip decisions.',
-      'Rules:',
-      '- If the user is asking only about weather (current conditions, forecast, "is it sunny", "will it rain"), with no travel intent, hand off to WeatherAgent.',
-      '- Otherwise — flights, hotels, budgets, "sunny weekend in Berlin", trip planning, or anything mixing weather with travel — hand off to TravelAgent.',
-      'Hand off immediately. Do not narrate the decision. Do not attempt to answer.',
-    ].join(' '),
-    handoffs: [weatherAgent, travelAgent],
-  });
-}
-
-// Wire the three agents together for one turn. Returns the triage as the entry
-// point; the Runner walks handoffs as they happen.
-function buildAgentGraph(
-  mcpTravel: MCPServerStreamableHttp,
-  mcpWeather: MCPServerStreamableHttp,
-) {
-  const now = new Date();
-  now.setUTCHours(0, 0, 0, 0);
-  const today = now.toISOString().slice(0, 10);
-  const todayWeekday = WEEKDAY_NAMES[now.getUTCDay()];
-  const upcomingFridays = upcomingFridaysFrom(now);
-
-  const weatherAgent = buildWeatherAgent(mcpWeather, today, todayWeekday);
-  const travelAgent = buildTravelAgent(
-    mcpTravel,
-    mcpWeather,
-    today,
-    todayWeekday,
-    upcomingFridays,
-  );
-  return buildTriageAgent(weatherAgent, travelAgent);
-}
-
-// ───────────────────────────────────────────────
-// SSE encoding helper
-// ───────────────────────────────────────────────
-
-// We define a helper function that unwraps the output of a tool call into a string. The output can be a string, an object with a text property, or an object with a content array. We handle each case and return a string representation of the output. This allows us to send the tool output to the client in a consistent format.
-function unwrapToolOutput(output: unknown): string {
-  if (typeof output === 'string') return output;
-  if (output && typeof output === 'object') {
-    const asObj = output as { text?: unknown; content?: unknown };
-    if (typeof asObj.text === 'string') return asObj.text;
-    if (Array.isArray(asObj.content) && asObj.content.length > 0) {
-      return asObj.content
-        .map((c) => {
-          if (
-            c &&
-            typeof c === 'object' &&
-            'text' in c &&
-            typeof (c as { text: unknown }).text === 'string'
-          ) {
-            return (c as { text: string }).text;
-          }
-          return JSON.stringify(c);
-        })
-        .join('\n');
-    }
-    return JSON.stringify(output);
-  }
-  return String(output ?? '');
 }
 
 // ───────────────────────────────────────────────

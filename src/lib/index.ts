@@ -1,73 +1,73 @@
 import { PrismaClient } from '@prisma/client';
 import { z } from 'zod';
-import { BookingRepository } from './BookingRepository';
-import { BookingService } from './BookingService';
-import { BookingServiceError } from './BookingServiceError';
-import { FlightRepository } from './FlightRepository';
-import { FlightService } from './FlightService';
-import { HotelRepository } from './HotelRepository';
-import { HotelService } from './HotelService';
-import { TravelServiceError } from './TravelServiceError';
-import { WeatherRepository } from './WeatherRepository';
-import { WeatherService } from './WeatherService';
-import { WeatherServiceError } from './WeatherServiceError';
+import { BookingRepository } from './repositories/BookingRepository';
+import { BookingService } from './services/BookingService';
+import { BookingServiceError } from './services/BookingServiceError';
+import { FlightRepository } from './repositories/FlightRepository';
+import { FlightService } from './services/FlightService';
+import { HotelRepository } from './repositories/HotelRepository';
+import { HotelService } from './services/HotelService';
+import { TravelServiceError } from './services/TravelServiceError';
+import { WeatherRepository } from './repositories/WeatherRepository';
+import { WeatherService } from './services/WeatherService';
+import { WeatherServiceError } from './services/WeatherServiceError';
 
 // ───── Weather ─────
-export { WeatherRepository } from './WeatherRepository';
+export { WeatherRepository } from './repositories/WeatherRepository';
 export type {
   CurrentWeatherRow,
   ForecastDayRow,
   ForecastRow,
-} from './WeatherRepository';
-export { WeatherService } from './WeatherService';
+} from './repositories/WeatherRepository';
+export { WeatherService } from './services/WeatherService';
 export type {
   CurrentWeatherResult,
   ForecastResult,
   GetCurrentWeatherInput,
   GetForecastInput,
-} from './WeatherService';
+} from './services/WeatherService';
 export {
   WeatherServiceError,
   type WeatherServiceErrorCode,
-} from './WeatherServiceError';
+} from './services/WeatherServiceError';
 
 // ───── Travel — flights ─────
-export { FlightRepository } from './FlightRepository';
-export type { FlightSearchOptions, FlightSearchRow } from './FlightRepository';
-export { FlightService } from './FlightService';
+export { FlightRepository } from './repositories/FlightRepository';
+export type {
+  FlightSearchOptions,
+  FlightSearchRow,
+} from './repositories/FlightRepository';
+export { FlightService } from './services/FlightService';
 export type {
   FlightResult,
   SearchFlightsInput,
   SearchFlightsResult,
-} from './FlightService';
+} from './services/FlightService';
 
 // ───── Travel — hotels ─────
-export { HotelRepository } from './HotelRepository';
-export type { HotelSearchOptions, HotelSearchRow } from './HotelRepository';
-export { HotelService } from './HotelService';
-export type { HotelResult, SearchHotelsInput } from './HotelService';
+export { HotelRepository } from './repositories/HotelRepository';
+export type {
+  HotelSearchOptions,
+  HotelSearchRow,
+} from './repositories/HotelRepository';
+export { HotelService } from './services/HotelService';
+export type { HotelResult, SearchHotelsInput } from './services/HotelService';
 
 // ───── Travel — shared error ─────
 export {
   TravelServiceError,
   type TravelServiceErrorCode,
-} from './TravelServiceError';
+} from './services/TravelServiceError';
 
 // ───── Bookings (Stage 8) ─────
-export { BookingRepository } from './BookingRepository';
-export type { BookingWithRelations } from './BookingRepository';
-export { BookingService } from './BookingService';
-export type { ProposeBookingInput } from './BookingService';
+export { BookingRepository } from './repositories/BookingRepository';
+export type { BookingWithRelations } from './repositories/BookingRepository';
+export { BookingService } from './services/BookingService';
+export type { ProposeBookingInput } from './services/BookingService';
 export {
   BookingServiceError,
   type BookingServiceErrorCode,
-} from './BookingServiceError';
-
-// ───── HTTP query-string parsing ─────
-export { parseBool, parseList } from './queryParsing';
-
-// ───── MCP → REST API helper ─────
-export { createMcpApiClient } from './mcpApiClient';
+} from './services/BookingServiceError';
 
 // ───── Helpers ─────
 let defaultPrisma: PrismaClient | undefined;

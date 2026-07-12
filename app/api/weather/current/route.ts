@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { apiErrorResponse } from '@/lib/apiErrorResponse';
+import { apiErrorResponse } from '@/utils/apiErrorResponse';
 import { createWeatherService } from '@/lib';
 
 const weatherService = createWeatherService();

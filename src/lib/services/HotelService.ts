@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import type { HotelRepository } from './HotelRepository';
+import type { HotelRepository } from '../repositories/HotelRepository';
 import { TravelServiceError } from './TravelServiceError';
 
 const IsoDate = z

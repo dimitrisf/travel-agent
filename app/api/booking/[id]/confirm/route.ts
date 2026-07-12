@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { apiErrorResponse } from '@/lib/apiErrorResponse';
+import { apiErrorResponse } from '@/utils/apiErrorResponse';
 import { createBookingService } from '@/lib';
 
 export const runtime = 'nodejs';
