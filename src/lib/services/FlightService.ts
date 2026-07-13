@@ -66,6 +66,8 @@ export interface FlightResult {
 
 export interface SearchFlightsResult {
   // Outbound flights from origin to destination
+  // The `outbound` and `inbound` arrays may be empty if no flights were found for that leg.
+  // Also, both arrays may contain multiple flights, and the order is not guaranteed. Consumers should sort or filter as needed. We may have multiple flights per leg due to different airlines, times, or other factors.
   outbound: FlightResult[];
   // Inbound flights from destination back to origin
   inbound: FlightResult[];
