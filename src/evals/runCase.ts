@@ -98,6 +98,29 @@ export async function runCase(
 
     finalText = (result.finalOutput as string | undefined) ?? '';
     lastAgent = result.lastAgent?.name ?? '(unknown)';
+
+    // Fold tool-level errors into `errored` so cases don't pass vacuously
+    // when the tool returned an error envelope (e.g. Neon idle → 500 →
+    // `{error, code}`). Without this, downstream assertions like "options
+    // equal min(requested, available)" collapse to 0 === 0 and mask the
+    // real failure. Only the standard `{error: string, code: string}` shape
+    // from apiErrorResponse counts — anything else stays a normal output.
+    const toolErrors = toolCalls
+      .filter(
+        (tc) =>
+          tc.parsedOutput != null &&
+          typeof tc.parsedOutput === 'object' &&
+          'error' in (tc.parsedOutput as object) &&
+          'code' in (tc.parsedOutput as object),
+      )
+      .map((tc) => {
+        const p = tc.parsedOutput as { error?: unknown; code?: unknown };
+        return `${tc.name} → ${String(p.code)}: ${String(p.error)}`;
+      });
+    if (toolErrors.length > 0) {
+      const toolErrPart = `tool errors: ${toolErrors.join('; ')}`;
+      errored = errored ? `${errored} | ${toolErrPart}` : toolErrPart;
+    }
   } catch (err) {
     // Guardrail trips are expected outcomes for some cases — surface them
     // as first-class output rather than errors so cases can assert on them.

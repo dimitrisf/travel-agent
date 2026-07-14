@@ -21,6 +21,12 @@ export function apiErrorResponse(err: unknown): NextResponse {
       err.code === 'CITY_NOT_FOUND' || err.code === 'NO_FORECAST_AVAILABLE'
         ? 404
         : 500;
+    // For INTERNAL_ERROR the underlying cause is buried in `.cause` — surface
+    // it in the server log so intermittent failures leave a stack trace
+    // behind (see also the booking branch below for the same pattern).
+    if (err.code === 'INTERNAL_ERROR') {
+      console.error('[weather] internal error:', err.message, err.cause ?? err);
+    }
     return NextResponse.json(
       { error: err.message, code: err.code },
       { status },
@@ -34,6 +40,9 @@ export function apiErrorResponse(err: unknown): NextResponse {
         : err.code === 'INVALID_DATE_RANGE'
           ? 400
           : 500;
+    if (err.code === 'INTERNAL_ERROR') {
+      console.error('[travel] internal error:', err.message, err.cause ?? err);
+    }
     return NextResponse.json(
       { error: err.message, code: err.code },
       { status },
