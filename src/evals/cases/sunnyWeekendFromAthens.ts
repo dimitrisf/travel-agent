@@ -1,4 +1,10 @@
 import type { Case, CaseOutput } from '../types';
+import {
+  finalAgent,
+  noErrorsOrGuardrails,
+  toolArgsMatch,
+  toolCalled,
+} from '../assertions';
 
 // Full trip-planning case with the origin already provided (so it's a
 // single-turn ask — multi-turn cases arrive in Phase 4). Verifies the
@@ -14,36 +20,16 @@ export const sunnyWeekendFromAthens: Case = {
     'Trip planning with explicit origin — expect all three search tools, round-trip flight query, and a summary with multiple prices.',
   user: 'I want a sunny weekend in Berlin from Athens under €600 total.',
   expect: (out) => [
-    {
-      description: 'no unexpected errors or guardrail trips',
-      passed: !out.errored && !out.guardrailTripped,
-      details: out.errored ?? out.guardrailTripped,
-    },
-    {
-      description: 'final agent was TravelAgent',
-      passed: out.lastAgent === 'TravelAgent',
-      details: `last agent: ${out.lastAgent}`,
-    },
-    {
-      description: 'called search_flights with return_date (round-trip)',
-      passed: out.toolCalls.some(
-        (t) =>
-          t.name === 'search_flights' &&
-          // The `return_date` property is expected to be present in the arguments of the search_flights tool call for a round-trip flight. This assertion checks that at least one of the tool calls to search_flights includes a return_date, indicating that the agent correctly handled the round-trip request.
-          !!(t.args as { return_date?: unknown })?.return_date,
-      ),
-      details: describeToolCalls(out, 'search_flights'),
-    },
-    {
-      description: 'called search_hotels',
-      passed: out.toolCalls.some((t) => t.name === 'search_hotels'),
-      details: describeToolCalls(out, 'search_hotels'),
-    },
-    {
-      description: 'called get_forecast (weather-relevant query)',
-      passed: out.toolCalls.some((t) => t.name === 'get_forecast'),
-      details: describeToolCalls(out, 'get_forecast'),
-    },
+    noErrorsOrGuardrails(out),
+    finalAgent(out, 'TravelAgent'),
+    toolArgsMatch(
+      out,
+      'search_flights',
+      (args) => !!(args as { return_date?: unknown })?.return_date,
+      'has return_date (round-trip)',
+    ),
+    toolCalled(out, 'search_hotels'),
+    toolCalled(out, 'get_forecast'),
     {
       description: 'final summary references at least four € figures',
       // A round-trip + one hotel option = outbound price + return price +
@@ -341,19 +327,4 @@ function pricesFrom(entries: Array<{ price?: number }> | undefined): number[] {
   return (entries ?? [])
     .map((e) => e.price)
     .filter((n): n is number => typeof n === 'number');
-}
-
-// Helper to summarize how many times a tool was called and what all the calls were.
-// E.g., if out has toolCalls = [{name: 'search_flights'}, {name: 'get_forecast'}, {name: 'search_hotels'}], then describeToolCalls(out, 'search_flights') returns:
-// "search_flights called 1× | all: search_flights, get_forecast, search_hotels"
-function describeToolCalls(
-  out: { toolCalls: Array<{ name: string }> },
-  name: string,
-): string {
-  // Count how many times the specified tool was called and list all tool calls.
-  const count = out.toolCalls.filter((t) => t.name === name).length;
-  const all = out.toolCalls.map((t) => t.name).join(', ') || '(none)';
-
-  // Return a string like "search_flights called 2× | all: search_flights, get_forecast, search_hotels"
-  return `${name} called ${count}× | all: ${all}`;
 }

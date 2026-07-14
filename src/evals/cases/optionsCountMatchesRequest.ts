@@ -1,4 +1,9 @@
 import type { Case } from '../types';
+import {
+  noErrorsOrGuardrails,
+  toolArgsMatch,
+  toolCalled,
+} from '../assertions';
 
 // Regression check for the options-count drift — during Stage 9 the agent
 // sometimes returned more (or fewer) options than the user explicitly
@@ -52,36 +57,16 @@ export const optionsCountMatchesRequest: Case = {
     const expectedNumbered = Math.min(requestedCount, availableOutbound);
 
     return [
-      {
-        description: 'no unexpected errors or guardrail trips',
-        passed: !out.errored && !out.guardrailTripped,
-        details: out.errored ?? out.guardrailTripped,
-      },
-      {
-        description: 'called search_flights',
-        passed: flightCalls.length > 0,
-        details: `search_flights calls: ${flightCalls.length}`,
-      },
-      {
-        description:
-          'search_flights was one-way (no return_date, per user request)',
-        // If the model treated this as round-trip anyway, direction handling
-        // is off — this is a related but distinct drift from the count check.
-        // E.g, if flightCalls = [{ name: 'search_flights', args: { return_date: '2026-07-20' } }],
-        // then the model ignored the "one way" part of the user request, so this check fails.
-        passed: flightCalls.every(
-          (c) => !(c.args as { return_date?: unknown })?.return_date,
-        ),
-        // E.g., if flightCalls = [{ name: 'search_flights', args: { return_date: '2026-07-20' } }], then the details string will be "return_date="2026-07-20"".
-        details: flightCalls
-          .map(
-            (c) =>
-              `return_date=${JSON.stringify(
-                (c.args as { return_date?: unknown })?.return_date ?? null,
-              )}`,
-          )
-          .join('; '),
-      },
+      noErrorsOrGuardrails(out),
+      toolCalled(out, 'search_flights'),
+      // If the model treated this as round-trip anyway, direction handling
+      // is off — a related but distinct drift from the count check.
+      toolArgsMatch(
+        out,
+        'search_flights',
+        (args) => !(args as { return_date?: unknown })?.return_date,
+        'no return_date (one-way per user request)',
+      ),
       {
         description:
           'numbered options equal min(requested, available) — catches over- and under-listing',

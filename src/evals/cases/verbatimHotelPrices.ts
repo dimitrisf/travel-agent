@@ -1,4 +1,5 @@
 import type { Case } from '../types';
+import { noErrorsOrGuardrails, toolCalled } from '../assertions';
 
 // Regression check for hotel-price hallucination — during Stage 9 the agent
 // once quoted "€452.2/night" for a hotel that had no such price in the tool
@@ -48,7 +49,7 @@ export const verbatimHotelPrices: Case = {
     // string returned by the tool (JSON with price_per_night as a number
     // literal), so substring matching against normalized number forms is
     // enough to check "does this number appear".
-
+    //
     // E.g., if hotelCalls = [ { name: 'search_hotels', output: '{"price_per_night":120.5}' }, { name: 'search_hotels', output: '{"price_per_night":150}' } ]
     // then toolBlob = '{"price_per_night":120.5}\n{"price_per_night":150}'
     const toolBlob = hotelCalls.map((t) => t.output ?? '').join('\n');
@@ -82,16 +83,8 @@ export const verbatimHotelPrices: Case = {
     );
 
     return [
-      {
-        description: 'no unexpected errors or guardrail trips',
-        passed: !out.errored && !out.guardrailTripped,
-        details: out.errored ?? out.guardrailTripped,
-      },
-      {
-        description: 'called search_hotels at least once',
-        passed: hotelCalls.length > 0,
-        details: `search_hotels calls: ${hotelCalls.length}`,
-      },
+      noErrorsOrGuardrails(out),
+      toolCalled(out, 'search_hotels'),
       {
         description: 'summary quotes at least one per-night price',
         // If the model didn't quote any per-night price, the verbatim check

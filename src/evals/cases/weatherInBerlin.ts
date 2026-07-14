@@ -1,4 +1,10 @@
 import type { Case } from '../types';
+import {
+  finalAgent,
+  finalMessageMatches,
+  noErrorsOrGuardrails,
+  toolCalled,
+} from '../assertions';
 
 // Simplest possible on-topic case. Verifies:
 //   - the off-topic guardrail lets weather queries through
@@ -13,29 +19,9 @@ export const weatherInBerlin: Case = {
     'Simple weather query — hand off to WeatherAgent, call a weather tool, mention Berlin.',
   user: 'What is the weather in Berlin?',
   expect: (out) => [
-    {
-      description: 'no unexpected errors or guardrail trips',
-      passed: !out.errored && !out.guardrailTripped,
-      details: out.errored ?? out.guardrailTripped,
-    },
-    {
-      description: 'called get_weather or get_forecast',
-      passed: out.toolCalls.some(
-        (t) => t.name === 'get_weather' || t.name === 'get_forecast',
-      ),
-      details: `tools called: ${
-        out.toolCalls.map((t) => t.name).join(', ') || '(none)'
-      }`,
-    },
-    {
-      description: 'final agent was WeatherAgent',
-      passed: out.lastAgent === 'WeatherAgent',
-      details: `last agent: ${out.lastAgent}`,
-    },
-    {
-      description: 'final message mentions Berlin',
-      passed: /berlin/i.test(out.finalText),
-      details: out.finalText.slice(0, 120),
-    },
+    noErrorsOrGuardrails(out),
+    toolCalled(out, ['get_weather', 'get_forecast']),
+    finalAgent(out, 'WeatherAgent'),
+    finalMessageMatches(out, /berlin/i, 'final message mentions Berlin'),
   ],
 };
