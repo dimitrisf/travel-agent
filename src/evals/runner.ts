@@ -134,8 +134,24 @@ async function main() {
 
   // Support `npm run evals -- --case name-pattern` to run one case (or a
   // substring match) in isolation. Handy while iterating on a single fix.
+  //
+  // Also honor `EVALS_CASE=name-pattern` as a fallback because npm on some
+  // Windows versions strips arbitrary flags between `--` and the script,
+  // even when they shouldn't be npm-owned (`--brief`, `--case ...` have
+  // both been observed to disappear on npm 10.9.2). Env vars survive.
   const filterArg = process.argv.indexOf('--case');
-  const filter = filterArg >= 0 ? process.argv[filterArg + 1] : undefined;
+  const filter =
+    filterArg >= 0
+      ? process.argv[filterArg + 1]
+      : process.env.EVALS_CASE || undefined;
+
+  // `--brief` (or `EVALS_BRIEF=1`) skips the agent-output dump for cases
+  // where every assertion passed. Failing cases still print their full
+  // context (that's when you actually need it). Default stays chatty
+  // because the extra info is usually helpful while iterating on a new
+  // case.
+  const brief =
+    process.argv.includes('--brief') || process.env.EVALS_BRIEF === '1';
 
   const selected = filter
     ? CASES.filter((c) => c.name.includes(filter))
@@ -150,35 +166,48 @@ async function main() {
   // got stripped by npm (see comment on `--full` below) — if you expected
   // one case and see three, the arg-forwarding was mangled.
   const filterInfo = filter ? ` (filter: "${filter}")` : ' (no filter)';
+  const modeInfo = brief ? ' [brief]' : '';
   process.stdout.write(
-    `Running ${selected.length} of ${CASES.length} case(s)${filterInfo}: ${selected.map((c) => c.name).join(', ')}\n`,
+    `Running ${selected.length} of ${CASES.length} case(s)${filterInfo}${modeInfo}: ${selected.map((c) => c.name).join(', ')}\n`,
   );
-
-  // We always dump the full agent output (final message + tool calls +
-  // last agent) after each case — pass or fail — so you can eyeball what
-  // the model actually said without needing to remember a flag. If this
-  // ever gets too noisy, add a `--brief` opt-out.
 
   let totalAsserts = 0;
   let failedAsserts = 0;
-  const failedCases: string[] = [];
+  // Track per-case failure counts so the end-of-run summary can say
+  // "name (2/5 failed)" instead of just listing names — that lets you
+  // triage which failure is worst without scrolling back.
+  const failedCases: Array<{ name: string; failed: number; total: number }> =
+    [];
 
   for (const c of selected) {
     process.stdout.write(`\n▶ ${c.name}\n  ${c.description}\n`);
+    // Wall-clock per case. Useful for spotting slow cases (Neon cold-start,
+    // big searches) without a separate profiler.
+    const t0 = Date.now();
     const out = await runCase(c, mcpTravel, mcpWeather);
+    const elapsedSec = ((Date.now() - t0) / 1000).toFixed(1);
     const results = c.expect(out);
-    let caseFailed = false;
+    let caseFailed = 0;
     for (const r of results) {
       totalAsserts++;
       const icon = r.passed ? '  ✓' : '  ✗';
       process.stdout.write(`${icon} ${r.description}\n`);
       if (!r.passed) {
         failedAsserts++;
-        caseFailed = true;
+        caseFailed++;
         if (r.details) process.stdout.write(`      ${r.details}\n`);
       }
     }
-    if (caseFailed) failedCases.push(c.name);
+    process.stdout.write(`  (${elapsedSec}s)\n`);
+    if (caseFailed > 0) {
+      failedCases.push({ name: c.name, failed: caseFailed, total: results.length });
+    }
+
+    // Skip the agent-output block on green passes when --brief is set.
+    // Failing cases always print it — that's the whole point of having it.
+    if (brief && caseFailed === 0) {
+      continue;
+    }
 
     process.stdout.write(`\n  ── agent output ──\n`);
     // Print each turn's user input so multi-turn cases show the whole
@@ -228,7 +257,14 @@ async function main() {
     `\n${totalAsserts - failedAsserts}/${totalAsserts} assertions passed across ${selected.length} case(s).\n`,
   );
   if (failedCases.length > 0) {
-    process.stdout.write(`Failed cases: ${failedCases.join(', ')}\n`);
+    // One line per failed case with its own pass/fail ratio, so the
+    // summary tells you where to look first when several cases fail.
+    process.stdout.write(`Failed cases:\n`);
+    for (const fc of failedCases) {
+      process.stdout.write(
+        `  - ${fc.name} (${fc.failed}/${fc.total} failed)\n`,
+      );
+    }
     process.exit(1);
   } else {
     process.stdout.write('All cases passed.\n');
