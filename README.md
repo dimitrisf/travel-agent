@@ -1204,6 +1204,16 @@ If any pattern hits, the guardrail trips with a friendly explanation of the actu
 
 **Scope note.** Text-only heuristic. The SDK's output-guardrail context doesn't expose tool-call history, so cross-referencing invented booking references against real `propose_booking` outputs isn't possible from here. Threading tool history through `RunContext.context` (needed for the fuller LLM-classifier + cross-reference version) is deferred as **Phase 3b**.
 
+#### Phase 4 — Prompt-injection input guardrail
+
+[src/guardrails/promptInjectionInputGuardrail.ts](src/guardrails/promptInjectionInputGuardrail.ts) — a second input guardrail on `TriageAgent`, attached alongside the off-topic one. Same shape (gpt-4o-mini classifier, single-token verdict, fail open on classifier errors), different purpose: catches inputs trying to override the assistant's own instructions, extract its system prompt, or hijack its persona.
+
+Distinction from off-topic: off-topic catches wrong-domain requests ("what pizza topping?"). Prompt-injection catches *on-topic-shaped* wording that's actually meant as a command against the assistant. The classifier prompt enumerates three families and gives SAFE examples that use suspicious tokens legitimately ("ignore my last request", "forget the hotel search"), so legit conversational updates don't false-positive.
+
+Both guardrails run; either can trip. When either fires, the same Phase 5 UI treatment (below) surfaces the friendly message.
+
+The eval harness has two paired cases for this: `promptInjectionBlocked` (a clear multi-vector injection — instruction-override + role-hijack + system-prompt-extraction — must trip) and `injectionLookalikeAllowed` (a legit weather query prefixed with "ignore my previous question" — must NOT trip). Together they guard against both false negatives (letting real injections through) and false positives (blocking legitimate conversational pivots).
+
 #### Phase 5 — UI for guardrail trips
 
 The Route Handler ([app/api/agent/route.ts](app/api/agent/route.ts)) catches `InputGuardrailTripwireTriggered` / `OutputGuardrailTripwireTriggered` separately from generic errors and emits a distinct `guardrail_blocked` SSE frame carrying `{ kind: 'input' | 'output'; message }`.
@@ -1215,11 +1225,12 @@ Client-side ([useAgentChat.ts](src/hooks/useAgentChat.ts)) sets `blockedBy: { ki
 ```
 src/guardrails/
 ├── offTopicInputGuardrail.ts               (Phase 2 — input, classifier-based)
+├── promptInjectionInputGuardrail.ts        (Phase 4 — input, classifier-based)
 ├── bookingTruthfulnessOutputGuardrail.ts   (Phase 3 — output, regex-based)
 └── passThroughOutputGuardrail.ts           (Phase 1 stub, still on WeatherAgent)
 
 src/utils/
-├── extractLatestUserText.ts                (walker used by the input guardrail)
+├── extractLatestUserText.ts                (walker used by both input guardrails)
 └── userFacingGuardrailErrorMessage.ts      (extracts outputInfo.message from a trip)
 ```
 
@@ -1257,7 +1268,7 @@ Case-specific inline logic (trip-total arithmetic in `sunnyWeekendFromAthens`, p
 
 #### Case set
 
-Eleven cases at Stage 10 close-out. What each guards against:
+Thirteen cases at close-out (11 from Stage 10, plus two added when Stage 9 Phase 4 shipped). What each guards against:
 
 - `weatherInBerlin` — structural sanity: guardrail lets weather through, hands off to WeatherAgent, calls a weather tool.
 - `hotelsInBerlin` — hotel-only search hits TravelAgent + `search_hotels`; no flight-search bleed.
@@ -1270,6 +1281,8 @@ Eleven cases at Stage 10 close-out. What each guards against:
 - `noBookingPrereqsBeforeOptions` — ambiguous `"yes"` doesn't trigger `propose_booking` when no options were shown.
 - `verbatimPriceAcrossTurns` — prices in a follow-up turn still trace to turn-1 tool output (no cross-turn hallucination).
 - `bookingProposalNoFinalityClaim` — a legitimate booking proposal doesn't trip the truthfulness guardrail and doesn't slip finality language past the second-layer regex check.
+- `promptInjectionBlocked` — a clear multi-vector injection attempt trips the prompt-injection guardrail before any specialist runs.
+- `injectionLookalikeAllowed` — a legit weather query with suspicious wording ("ignore my previous question") is NOT blocked; routes to WeatherAgent normally.
 
 #### Runner machinery
 
@@ -1309,7 +1322,7 @@ src/evals/
 ├── runCase.ts                               (per-case run + turn threading + tool-error folding)
 ├── types.ts                                 (Case, CaseOutput, AssertionResult + getTurns)
 ├── assertions.ts                            (shared assertion helpers)
-└── cases/                                   (11 case files, one per regression class)
+└── cases/                                   (13 case files, one per regression class)
 
 src/utils/
 ├── priceAppearsInBlob.ts                    (shared by both verbatim-price cases)
