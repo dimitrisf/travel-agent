@@ -4,11 +4,13 @@ import { runCase } from './runCase';
 import { getTurns } from './types';
 import { bookingProposalNoFinalityClaim } from './cases/bookingProposalNoFinalityClaim';
 import { hotelsInBerlin } from './cases/hotelsInBerlin';
+import { injectionLookalikeAllowed } from './cases/injectionLookalikeAllowed';
 import { noBookingPrereqsBeforeOptions } from './cases/noBookingPrereqsBeforeOptions';
 import { offTopicPizza } from './cases/offTopicPizza';
 import { onTopicFollowUpAllowed } from './cases/onTopicFollowUpAllowed';
 import { optionsCountMatchesRequest } from './cases/optionsCountMatchesRequest';
 import { originAskRequired } from './cases/originAskRequired';
+import { promptInjectionBlocked } from './cases/promptInjectionBlocked';
 import { sunnyWeekendFromAthens } from './cases/sunnyWeekendFromAthens';
 import { verbatimHotelPrices } from './cases/verbatimHotelPrices';
 import { verbatimPriceAcrossTurns } from './cases/verbatimPriceAcrossTurns';
@@ -16,7 +18,7 @@ import { weatherInBerlin } from './cases/weatherInBerlin';
 import type { Case } from './types';
 
 // Case set grows per phase. Single-turn cases first, then the multi-turn
-// regressions added in Phase 4, then the Stage-9-Phase-3 guardrail case.
+// regressions added in Stage 10 Phase 4, then the Stage-9 guardrail cases.
 const CASES: Case[] = [
   weatherInBerlin,
   hotelsInBerlin,
@@ -29,6 +31,8 @@ const CASES: Case[] = [
   noBookingPrereqsBeforeOptions,
   verbatimPriceAcrossTurns,
   bookingProposalNoFinalityClaim,
+  promptInjectionBlocked,
+  injectionLookalikeAllowed,
 ];
 
 // Render a one-line tool-output summary. If `parsed` is an array, show its
