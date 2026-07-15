@@ -1165,6 +1165,159 @@ After:    ~85 lines   (imports, input state, form submit, JSX shell)
 
 The delta went to `src/hooks/useAgentChat.ts` (chat logic), `src/components/*` (rendering), `src/types/*` (shared types), and `src/config/samplePrompts.ts` (the seeded prompts).
 
+---
+
+### Stage 9 — Guardrails
+
+Adds an input/output safety layer around the agent graph. Two flavours:
+
+- **Input guardrails** run on the entry agent (`TriageAgent`) before the model is invoked. They can short-circuit the whole turn.
+- **Output guardrails** run on the specialists (`TravelAgent`, `WeatherAgent`) after the model produces its final text. They can reject the response before it reaches the user.
+
+Built in phases so the SDK plumbing gets exercised in isolation before the real policy logic lands.
+
+#### Phase 1 — Plumbing
+
+Inert `passThroughOutputGuardrail` wired on both specialists to confirm the SDK contract: `outputGuardrails: [...]` on the Agent config, `execute({ agent, agentOutput, context })` returning `{ tripwireTriggered, outputInfo }`.
+
+Key SDK contract: **only the entry agent's input guardrails fire.** Specialists' input guardrails are dead code. That's why the off-topic guardrail lives on `TriageAgent`, not on the specialist that ends up handling the request.
+
+#### Phase 2 — Off-topic input guardrail
+
+[src/guardrails/offTopicInputGuardrail.ts](src/guardrails/offTopicInputGuardrail.ts) — a classifier that trips on non-travel input. Runs BEFORE the main agent turn, so an off-topic prompt never reaches the specialists' expensive model.
+
+Implementation is a small `client.responses.create` call to `gpt-4o-mini` returning a structured verdict (`ON_TOPIC` | `OFF_TOPIC` + reason). Extracts the user's latest turn via [src/utils/extractLatestUserText.ts](src/utils/extractLatestUserText.ts), which walks the input array to find the last user message.
+
+When it trips, the friendly `outputInfo.message` becomes user-facing text: *"I only handle travel planning, bookings, and weather questions. Ask me about flights, hotels, trips, or the forecast for one of the demo cities…"*.
+
+#### Phase 3 — Booking-truthfulness output guardrail
+
+[src/guardrails/bookingTruthfulnessOutputGuardrail.ts](src/guardrails/bookingTruthfulnessOutputGuardrail.ts) — attached to `TravelAgent`. Enforces the "agent proposes, user confirms" split from the `propose_booking` spec at the SDK layer, alongside the existing prompt rule.
+
+Text-only regex check with three named patterns:
+
+- **`subject-is-final`** — "your booking is confirmed", "the reservation has been processed", "your trip is finalized".
+- **`successfully-<verb>`** — "successfully booked", "successfully reserved".
+- **`first-person-booked`** — "I've booked you", "I have reserved the flight".
+
+If any pattern hits, the guardrail trips with a friendly explanation of the actual constraint: *"I can't confirm bookings on your behalf — reserving inventory happens when you click the Confirm button in the booking card…"*.
+
+**Scope note.** Text-only heuristic. The SDK's output-guardrail context doesn't expose tool-call history, so cross-referencing invented booking references against real `propose_booking` outputs isn't possible from here. Threading tool history through `RunContext.context` (needed for the fuller LLM-classifier + cross-reference version) is deferred as **Phase 3b**.
+
+#### Phase 5 — UI for guardrail trips
+
+The Route Handler ([app/api/agent/route.ts](app/api/agent/route.ts)) catches `InputGuardrailTripwireTriggered` / `OutputGuardrailTripwireTriggered` separately from generic errors and emits a distinct `guardrail_blocked` SSE frame carrying `{ kind: 'input' | 'output'; message }`.
+
+Client-side ([useAgentChat.ts](src/hooks/useAgentChat.ts)) sets `blockedBy: { kind }` on the affected `ChatMessage`. [MessageBubble.tsx](src/components/MessageBubble.tsx) renders blocked messages with a soft warning-tinted background/border and a `Blocked by input/output guardrail` chip — visually distinct from both normal replies (white paper) and errors (red-prefixed text). Genuine errors still route through the `error` frame with the previous styling; nothing changed for that path.
+
+#### File index
+
+```
+src/guardrails/
+├── offTopicInputGuardrail.ts               (Phase 2 — input, classifier-based)
+├── bookingTruthfulnessOutputGuardrail.ts   (Phase 3 — output, regex-based)
+└── passThroughOutputGuardrail.ts           (Phase 1 stub, still on WeatherAgent)
+
+src/utils/
+├── extractLatestUserText.ts                (walker used by the input guardrail)
+└── userFacingGuardrailErrorMessage.ts      (extracts outputInfo.message from a trip)
+```
+
+---
+
+### Stage 10 — Eval harness
+
+Deterministic regression testing for agent behaviour. Cases are TypeScript files; the runner walks them, invokes a fresh agent graph per case, and checks assertions against the observed tool calls / final text / guardrail state.
+
+The harness exists because Stage 9 turned into whack-a-mole. Every prompt tweak that fixed one behaviour risked breaking another, and manual browser testing didn't scale. Each observed drift becomes a fixed test: origin-guessing, round-trip arithmetic, verbatim-price quoting, options-count, off-topic misfires, booking finality claims, cross-turn hallucination. Regressions surface within seconds.
+
+#### Shape of a case
+
+Every case exports a `Case` object with:
+
+- `name` (kebab-case identifier for the `--case` filter)
+- `description` (one-liner for the log)
+- `user: string` (single-turn) OR `turns: string[]` (multi-turn)
+- `expect(out: CaseOutput): AssertionResult[]`
+
+`CaseOutput` aggregates: all tool calls (parsed args + parsed output), the final assistant text, the last agent, any guardrail trip, any thrown error.
+
+#### Assertion library
+
+Shared helpers under [src/evals/assertions.ts](src/evals/assertions.ts) so cases stay declarative:
+
+- `noErrorsOrGuardrails(out)` / `noThrownErrors(out)` — clean-run baselines
+- `guardrailTripped(out, { messageMatches? })` — for guardrail-expected cases
+- `finalAgent(out, name)` — assert routing
+- `toolCalled(out, name | names[])` / `toolNotCalled(out, name)` / `noToolCalls(out)`
+- `toolArgsMatch(out, name, matcher, describe)` — predicate over some call's args
+- `finalMessageMatches` / `finalMessageDoesNotMatch` — regex over the final text
+
+Case-specific inline logic (trip-total arithmetic in `sunnyWeekendFromAthens`, per-night-price verification in `verbatimHotelPrices`, `min(requested, available)` in `optionsCountMatchesRequest`) stays in the case file — the assertion library covers repeat patterns, not one-offs.
+
+#### Case set
+
+Eleven cases at Stage 10 close-out. What each guards against:
+
+- `weatherInBerlin` — structural sanity: guardrail lets weather through, hands off to WeatherAgent, calls a weather tool.
+- `hotelsInBerlin` — hotel-only search hits TravelAgent + `search_hotels`; no flight-search bleed.
+- `sunnyWeekendFromAthens` — round-trip arithmetic drift (trip total must trace to a real outbound + return + hotel combo from tool output).
+- `offTopicPizza` — off-topic guardrail actually trips on non-travel input.
+- `originAskRequired` — no `search_flights` when the user hasn't stated an origin (Stage 9 origin-guessing drift).
+- `verbatimHotelPrices` — every €NNN/night in the summary appears in a `search_hotels` output.
+- `optionsCountMatchesRequest` — user asks for N options → summary lists exactly `min(N, available)`.
+- `onTopicFollowUpAllowed` — off-topic guardrail doesn't misfire on short travel-context follow-ups (`"book it"`).
+- `noBookingPrereqsBeforeOptions` — ambiguous `"yes"` doesn't trigger `propose_booking` when no options were shown.
+- `verbatimPriceAcrossTurns` — prices in a follow-up turn still trace to turn-1 tool output (no cross-turn hallucination).
+- `bookingProposalNoFinalityClaim` — a legitimate booking proposal doesn't trip the truthfulness guardrail and doesn't slip finality language past the second-layer regex check.
+
+#### Runner machinery
+
+[src/evals/runCase.ts](src/evals/runCase.ts):
+
+- Loops turns, threading `result.history` into the next `run()` call (mirrors `/api/agent`'s continuation pattern).
+- Aggregates tool calls across turns with parsed args + output paired by `callId`.
+- Detects tool-error envelopes (`{error, code}` shape from `apiErrorResponse`) and folds them into `errored`. No more vacuous passes on tool failures.
+- Catches guardrail trips separately from unexpected errors so cases can assert on both distinctly.
+
+[src/evals/runner.ts](src/evals/runner.ts):
+
+- **DB pre-flight wake** — hits a lightweight endpoint with retry+backoff before any case runs, so free-tier Neon Scale-to-Zero doesn't blow up the first case. ~15s bounded retry budget.
+- **Tool-output summary** — each call in the log gets `→ {outbound: array[5], inbound: array[0]} raw preview…`. Spots "tool returned 5 but the summary listed 1" at a glance.
+- **Per-case timing** — `(N.Ns)` after each case for spotting slow ones.
+- **`--brief`** — skips the agent-output block on green cases; failing cases still dump full context.
+- **`--case <substring>`** — run only cases whose name includes the substring.
+- **End-of-run summary** — one line per failed case with its assertion ratio: `- verbatim-hotel-prices (2/4 failed)`.
+- **Env-var fallbacks** — `EVALS_BRIEF=1`, `EVALS_CASE=name` work around npm arg-stripping on some Windows versions.
+
+#### Run it
+
+```bash
+npm run evals                                            # full suite, chatty
+EVALS_BRIEF=1 npm run evals                              # green cases stay quiet
+EVALS_CASE=origin npm run evals                          # just the origin-ask case
+npx tsx src/evals/runner.ts --brief --case sunny         # if npm's stripping args
+```
+
+Requires `npm run dev` running on `:3000` for the MCP endpoints.
+
+#### File index
+
+```
+src/evals/
+├── runner.ts                                (entry — pre-flight wake + case loop + summary)
+├── runCase.ts                               (per-case run + turn threading + tool-error folding)
+├── types.ts                                 (Case, CaseOutput, AssertionResult + getTurns)
+├── assertions.ts                            (shared assertion helpers)
+└── cases/                                   (11 case files, one per regression class)
+
+src/utils/
+├── priceAppearsInBlob.ts                    (shared by both verbatim-price cases)
+└── samplePricesFromBlob.ts                  (shared debug-detail helper)
+```
+
+---
+
 > **Note on the historical Stage narratives above:** file paths in Stages 1–7 reflect the layout at the time each stage was written. Where those don't match the current file tree, the [file index](#file-index) at the bottom of this doc is authoritative.
 
 ---
