@@ -15,6 +15,7 @@ import { ToolCallView } from './ToolCallView';
 // MessageBubble displays a single chat message, either from the user or the agent. It shows the message text, and if the message is from the agent and has tool calls, it displays each tool call in an accordion that can be expanded to show the arguments and output.
 export function MessageBubble({ message }: { message: ChatMessage }) {
   const isUser = message.role === 'user';
+  const isBlocked = !!message.blockedBy;
   return (
     <Box
       sx={{
@@ -27,10 +28,18 @@ export function MessageBubble({ message }: { message: ChatMessage }) {
           elevation={0}
           sx={{
             p: 1.5,
-            bgcolor: isUser ? 'primary.main' : 'background.paper',
+            // Blocked messages get a warning-tinted background and border,
+            // distinct from both normal agent replies (paper) and errors
+            // (which the caller would style via text prefix). Signals
+            // "the system stepped in on purpose" without shouting failure.
+            bgcolor: isUser
+              ? 'primary.main'
+              : isBlocked
+                ? 'rgba(237, 108, 2, 0.08)'
+                : 'background.paper',
             color: isUser ? 'primary.contrastText' : 'text.primary',
             border: isUser ? 'none' : '1px solid',
-            borderColor: 'divider',
+            borderColor: isBlocked ? 'warning.main' : 'divider',
             whiteSpace: 'pre-wrap',
           }}
         >
@@ -45,6 +54,21 @@ export function MessageBubble({ message }: { message: ChatMessage }) {
               </Box>
             ) : null)}
         </Paper>
+        {/* Guardrail-blocked chip — surfaces the reason the message looks
+            different so it's not mistaken for a bug or a network hiccup. */}
+        {isBlocked && (
+          <Chip
+            label={
+              message.blockedBy?.kind === 'input'
+                ? 'Blocked by input guardrail'
+                : 'Blocked by output guardrail'
+            }
+            size="small"
+            color="warning"
+            variant="outlined"
+            sx={{ mt: 0.5 }}
+          />
+        )}
         {/* Handoff chips — one per agent switch during the turn (Triage → Weather / Travel). */}
         {!isUser && message.handoffs.length > 0 && (
           <Stack

@@ -12,5 +12,22 @@ export type StreamEvent =
   | { type: 'agent_updated'; agentName: string }
   // The 'done' event is emitted when the agent has finished processing the user's input and has sent a final response. The payload includes the full conversation history so far, which can be used to update the client-side history state.
   | { type: 'done'; history: AgentInputItem[] }
-  // The 'error' event is emitted when an error occurs during processing. The payload includes an error message, which can be displayed in the UI to inform the user of the issue.
-  | { type: 'error'; message: string };
+  // The 'error' event is emitted when a genuine failure occurs during
+  // processing (network, MCP, model call). The UI renders it with an
+  // error prefix. Guardrail trips do NOT come through this channel —
+  // they get their own 'guardrail_blocked' frame so the UI can render
+  // them as a policy notice rather than an error.
+  | { type: 'error'; message: string }
+  // The 'guardrail_blocked' event is emitted when a guardrail tripwire
+  // fires — the system deliberately blocked the agent, either before it
+  // ran (input guardrail on the entry agent) or after it produced its
+  // final text (output guardrail on a specialist). The payload's
+  // `message` is the friendly, user-facing text set by the guardrail's
+  // outputInfo. `kind` says which layer blocked, so the UI can hint at
+  // the reason if useful (input = "your input was blocked", output =
+  // "the agent's response was blocked").
+  | {
+      type: 'guardrail_blocked';
+      kind: 'input' | 'output';
+      message: string;
+    };

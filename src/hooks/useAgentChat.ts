@@ -294,6 +294,25 @@ export function useAgentChat() {
             : m,
         ),
       );
+    } else if (payload.type === 'guardrail_blocked') {
+      // A guardrail tripwire fired — replace whatever the agent had
+      // streamed so far (which may be nothing, for input trips, or
+      // partial text, for output trips) with the guardrail's friendly
+      // message. `blockedBy` triggers the softer chat bubble styling in
+      // MessageBubble; no "Error:" prefix because this is a policy
+      // notice, not a failure.
+      setMessages((prev) =>
+        prev.map((m) =>
+          m.id === agentMsgId
+            ? {
+                ...m,
+                text: payload.message,
+                blockedBy: { kind: payload.kind },
+                pending: false,
+              }
+            : m,
+        ),
+      );
     }
   }
 

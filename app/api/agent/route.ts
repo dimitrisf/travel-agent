@@ -1,7 +1,9 @@
 import 'server-only';
 import { NextRequest } from 'next/server';
 import {
+  InputGuardrailTripwireTriggered,
   MCPServerStreamableHttp,
+  OutputGuardrailTripwireTriggered,
   run,
   type AgentInputItem,
 } from '@openai/agents';
@@ -180,8 +182,30 @@ export async function POST(req: NextRequest) {
         await stream.completed;
         send({ type: 'done', history: stream.history });
       } catch (err) {
-        console.error('[api/agent] error:', err);
-        send({ type: 'error', message: userFacingGuardrailErrorMessage(err) });
+        // Split guardrail trips from actual errors so the UI can render
+        // them as a policy notice (soft styling, no "Error:" prefix)
+        // instead of a red failure. userFacingGuardrailErrorMessage
+        // handles both cases — same friendly text, just a different
+        // frame type carrying it.
+        if (err instanceof InputGuardrailTripwireTriggered) {
+          send({
+            type: 'guardrail_blocked',
+            kind: 'input',
+            message: userFacingGuardrailErrorMessage(err),
+          });
+        } else if (err instanceof OutputGuardrailTripwireTriggered) {
+          send({
+            type: 'guardrail_blocked',
+            kind: 'output',
+            message: userFacingGuardrailErrorMessage(err),
+          });
+        } else {
+          console.error('[api/agent] error:', err);
+          send({
+            type: 'error',
+            message: userFacingGuardrailErrorMessage(err),
+          });
+        }
       } finally {
         controller.close();
       }
