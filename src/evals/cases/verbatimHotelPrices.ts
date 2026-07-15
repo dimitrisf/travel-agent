@@ -1,5 +1,7 @@
 import type { Case } from '../types';
 import { noErrorsOrGuardrails, toolCalled } from '../assertions';
+import { priceAppearsInBlob } from '@/utils/priceAppearsInBlob';
+import { samplePricesFromBlob } from '@/utils/samplePricesFromBlob';
 
 // Regression check for hotel-price hallucination — during Stage 9 the agent
 // once quoted "€452.2/night" for a hotel that had no such price in the tool
@@ -14,33 +16,7 @@ export const verbatimHotelPrices: Case = {
     'Hotel per-night prices in the summary must appear in search_hotels output — no hallucinated prices.',
   user: 'Find me hotels in Berlin for July 17 to July 19, 2026, 2 guests.',
   expect: (out) => {
-    // E.g., if the agent quoted "€120.50/night" in its summary, there must be
-    // a raw number 120.5 somewhere in the search_hotels output. The agent may
-    // quote prices with markdown emphasis, but the tool outputs raw JSON
-    // numbers, so we normalize both to a canonical form for comparison.
-    const priceAppearsInBlob = (priceStr: string, blob: string): boolean => {
-      const n = Number(priceStr);
-
-      if (!Number.isFinite(n)) return false;
-
-      // Candidate string forms of the same number, so `120.50` matches `120.5`
-      // and vice versa. Word-boundary anchoring avoids matching `120.5` inside
-      // `1120.5` — critical because random hotel IDs could otherwise collide.
-      const candidates = new Set<string>([
-        priceStr,
-        String(n),
-        n.toFixed(0),
-        n.toFixed(1),
-        n.toFixed(2),
-      ]);
-
-      for (const c of candidates) {
-        // Escape decimal points for regex, then check word-boundary containment.
-        const escaped = c.replace(/\./g, '\\.');
-        if (new RegExp(`(?<!\\d)${escaped}(?!\\d)`).test(blob)) return true;
-      }
-      return false;
-    };
+    // Comments on the shared verifier live in @/utils/priceAppearsInBlob.
 
     // E.g., hotelCalls = [ { name: 'search_hotels', output: '{"price_per_night":120.5}' }, ... ]
     const hotelCalls = out.toolCalls.filter((t) => t.name === 'search_hotels');
@@ -106,12 +82,3 @@ export const verbatimHotelPrices: Case = {
   },
 };
 
-// Pull a handful of price-like numbers out of the tool blob for the
-// failure details, so debugging doesn't require re-running the case.
-// E.g., if blob = '{"price_per_night":120.5}\n{"price_per_night":150}', then returns ["120.5", "150"]
-function samplePricesFromBlob(blob: string): string[] {
-  const matches = [...blob.matchAll(/"price_per_night"\s*:\s*(\d+(?:\.\d+)?)/g)]
-    .map((m) => m[1])
-    .slice(0, 8);
-  return matches;
-}

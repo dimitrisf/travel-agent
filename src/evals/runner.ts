@@ -1,16 +1,21 @@
 import 'dotenv/config';
 import { MCPServerStreamableHttp } from '@openai/agents';
 import { runCase } from './runCase';
+import { getTurns } from './types';
 import { hotelsInBerlin } from './cases/hotelsInBerlin';
+import { noBookingPrereqsBeforeOptions } from './cases/noBookingPrereqsBeforeOptions';
 import { offTopicPizza } from './cases/offTopicPizza';
+import { onTopicFollowUpAllowed } from './cases/onTopicFollowUpAllowed';
 import { optionsCountMatchesRequest } from './cases/optionsCountMatchesRequest';
 import { originAskRequired } from './cases/originAskRequired';
 import { sunnyWeekendFromAthens } from './cases/sunnyWeekendFromAthens';
 import { verbatimHotelPrices } from './cases/verbatimHotelPrices';
+import { verbatimPriceAcrossTurns } from './cases/verbatimPriceAcrossTurns';
 import { weatherInBerlin } from './cases/weatherInBerlin';
 import type { Case } from './types';
 
-// Case set grows per phase. Multi-turn cases land in Phase 4.
+// Case set grows per phase. Single-turn cases first, then the multi-turn
+// regressions added in Phase 4.
 const CASES: Case[] = [
   weatherInBerlin,
   hotelsInBerlin,
@@ -19,6 +24,9 @@ const CASES: Case[] = [
   originAskRequired,
   verbatimHotelPrices,
   optionsCountMatchesRequest,
+  onTopicFollowUpAllowed,
+  noBookingPrereqsBeforeOptions,
+  verbatimPriceAcrossTurns,
 ];
 
 // Render a one-line tool-output summary. If `parsed` is an array, show its
@@ -126,9 +134,11 @@ async function main() {
   // substring match) in isolation. Handy while iterating on a single fix.
   const filterArg = process.argv.indexOf('--case');
   const filter = filterArg >= 0 ? process.argv[filterArg + 1] : undefined;
+
   const selected = filter
     ? CASES.filter((c) => c.name.includes(filter))
     : CASES;
+
   if (filter && selected.length === 0) {
     console.error(`No cases matched --case "${filter}".`);
     process.exit(1);
@@ -169,7 +179,16 @@ async function main() {
     if (caseFailed) failedCases.push(c.name);
 
     process.stdout.write(`\n  ── agent output ──\n`);
-    process.stdout.write(`  User: ${c.user}\n`);
+    // Print each turn's user input so multi-turn cases show the whole
+    // conversation flow. Single-turn cases still get "User: ..." (turn count 1).
+    const turns = getTurns(c);
+    if (turns.length === 1) {
+      process.stdout.write(`  User: ${turns[0]}\n`);
+    } else {
+      turns.forEach((t, i) => {
+        process.stdout.write(`  User (turn ${i + 1}/${turns.length}): ${t}\n`);
+      });
+    }
     process.stdout.write(`  Last agent: ${out.lastAgent}\n`);
     if (out.guardrailTripped) {
       process.stdout.write(`  Guardrail tripped: ${out.guardrailTripped}\n`);

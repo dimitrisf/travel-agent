@@ -5,13 +5,30 @@ export type Case = {
   name: string;
   // One-line explanation of what this case is checking.
   description: string;
-  // The user's message that starts the turn.
-  user: string;
+  // Single-turn convenience — exactly equivalent to `turns: [user]`. Set
+  // one of `user` or `turns`, not both. Prefer `turns` for multi-turn
+  // cases where the sequence matters (Phase 4).
+  user?: string;
+  // Sequence of user messages for multi-turn cases. Each entry becomes
+  // its own turn: the run is invoked once per entry, with the prior
+  // history threaded through. Aggregated output (all tool calls, final
+  // text/agent from the last turn) is what the case's `expect` sees.
+  turns?: string[];
   // Given the observed run output, return an array of assertion results.
   // Multiple assertions per case make failures self-diagnostic (you see
   // which specific properties held and which didn't).
   expect: (out: CaseOutput) => AssertionResult[];
 };
+
+// Normalize a Case's user / turns fields into an array. Throws if
+// neither is set — caller should have validated that.
+export function getTurns(c: Case): string[] {
+  if (c.turns && c.turns.length > 0) return c.turns;
+  if (c.user) return [c.user];
+  throw new Error(
+    `Case "${c.name}" has neither \`user\` nor \`turns\` set — nothing to run.`,
+  );
+}
 
 export type CaseOutput = {
   // Every tool the agent(s) invoked in order, with parsed args, the agent
