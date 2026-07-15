@@ -2,6 +2,7 @@ import 'dotenv/config';
 import { MCPServerStreamableHttp } from '@openai/agents';
 import { runCase } from './runCase';
 import { getTurns } from './types';
+import { bookingProposalNoFinalityClaim } from './cases/bookingProposalNoFinalityClaim';
 import { hotelsInBerlin } from './cases/hotelsInBerlin';
 import { noBookingPrereqsBeforeOptions } from './cases/noBookingPrereqsBeforeOptions';
 import { offTopicPizza } from './cases/offTopicPizza';
@@ -15,7 +16,7 @@ import { weatherInBerlin } from './cases/weatherInBerlin';
 import type { Case } from './types';
 
 // Case set grows per phase. Single-turn cases first, then the multi-turn
-// regressions added in Phase 4.
+// regressions added in Phase 4, then the Stage-9-Phase-3 guardrail case.
 const CASES: Case[] = [
   weatherInBerlin,
   hotelsInBerlin,
@@ -27,6 +28,7 @@ const CASES: Case[] = [
   onTopicFollowUpAllowed,
   noBookingPrereqsBeforeOptions,
   verbatimPriceAcrossTurns,
+  bookingProposalNoFinalityClaim,
 ];
 
 // Render a one-line tool-output summary. If `parsed` is an array, show its

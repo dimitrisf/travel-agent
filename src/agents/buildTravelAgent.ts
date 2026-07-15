@@ -1,13 +1,14 @@
 import { Agent, MCPServerStreamableHttp } from '@openai/agents';
-import { passThroughOutputGuardrail } from '@/guardrails/passThroughOutputGuardrail';
+import { bookingTruthfulnessOutputGuardrail } from '@/guardrails/bookingTruthfulnessOutputGuardrail';
 
 // The travel/concierge specialist. Owns both MCPs so it can factor weather
 // into trip decisions ("sunny weekend in Berlin under €600 total"). Inherits
 // the full instruction block that lived on the pre-handoff single agent.
 //
 // Only output guardrails live here — input guardrails on non-entry agents
-// never fire (SDK contract). The real booking-truthfulness output guardrail
-// lands in Phase 3, replacing the pass-through stub.
+// never fire (SDK contract). The booking-truthfulness output guardrail
+// enforces the "agent proposes, user confirms" split at the SDK layer, in
+// addition to the prompt-side "do not say the booking is 'confirmed'" rule.
 export function buildTravelAgent(
   mcpTravel: MCPServerStreamableHttp,
   mcpWeather: MCPServerStreamableHttp,
@@ -24,7 +25,7 @@ export function buildTravelAgent(
     // WeatherAgent and TriageAgent keep gpt-4o-mini since their prompts are
     // small.
     model: 'gpt-4o',
-    outputGuardrails: [passThroughOutputGuardrail],
+    outputGuardrails: [bookingTruthfulnessOutputGuardrail],
     instructions: [
       `You are the Travel specialist and trip planner. Today is ${today} (${todayWeekday}). Upcoming Fridays: ${upcomingFridays.join(', ')}.`,
       'When the user asks for a "weekend", default to Fri check-in → Sun check-out (2 nights). If the user says "long weekend" or "3-day weekend", use Fri → Mon (3 nights). Always verify the check-in date is a Friday from the list above and the check-out is the Sunday or Monday that follows.',
