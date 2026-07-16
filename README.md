@@ -1331,6 +1331,68 @@ src/utils/
 
 ---
 
+### Stage 11 — Booking-truthfulness cross-reference (in progress)
+
+Extends Stage 9 Phase 3's booking-truthfulness guardrail beyond the text-only regex layer. The regex catches finality-claim phrasings ("your booking is confirmed") but has no idea whether specific things the agent quotes — booking references, totals — actually match what `propose_booking` returned. This stage adds a deterministic cross-reference layer that reads real tool outputs and rejects claims that don't check out. A future phase will add a classifier layer for novel finality phrasings the regex misses.
+
+Both guardrails ship on `TravelAgent` and run in sequence — regex first (cheap, always available), cross-reference second (requires tool history to be threaded). Either can trip.
+
+#### The SDK-threading problem
+
+Output guardrails receive `agent`, `agentOutput`, and `RunContext<TContext>` — but not tool-call history. `RunContext.context` is user-supplied and mutable, so if we populate it during the run, guardrails can read it. The SDK exposes this hook via `agent.on('agent_tool_end', ...)` — fires after each tool resolves, with the RunContext, the tool, its result, and the tool call details.
+
+Threading pattern (all public SDK API, no subclassing or monkey-patching):
+
+```ts
+type AgentRunContext = { toolCallCollector: ToolCallRecord[] };
+
+// Once, at agent construction:
+agent.on('agent_tool_end', (context, tool, result, details) => {
+  context.context.toolCallCollector.push({ name: tool.name, args, result, parsedResult });
+});
+
+// At each run() call site:
+await run(agent, input, { context: { toolCallCollector: [...] } });
+
+// Inside the guardrail:
+const calls = context.context.toolCallCollector;
+```
+
+Prior turns' tool calls are recovered from client-sent history via a `rebuildCollectorFromHistory` walker over `AgentInputItem[]` — no server-side session state needed. In the eval harness, `runCase.ts` threads a single collector through the whole multi-turn loop so cross-turn references still cross-check.
+
+#### Phase 3 — Deterministic cross-reference layer
+
+[src/guardrails/bookingCrossReferenceOutputGuardrail.ts](src/guardrails/bookingCrossReferenceOutputGuardrail.ts) — three checks, evaluated in order; first match trips:
+
+- **(a) Fabricated reference.** Regex `/BKG-\d{4}-[A-Z0-9]{4,}/gi` on the agent's output. Every mentioned reference must appear as a `reference` field on some `propose_booking` result in the collector. Miss → trip with a message pointing the user at the actual booking card.
+- **(b) Wrong booking total.** Regex scoped to booking-adjacent phrasing (`booking total`, `trip total`, `grand total`, `total price`) — every quoted € figure must match a real `totalPriceEUR` within ±€1 (cent-rounding slack). Miss → trip with the claimed vs actual totals in the details.
+- **(c) Booking-mentioned-without-any-call.** If the agent talks about a booking in finality-adjacent language AND no `propose_booking` result exists in the collector → trip. Catches the "agent invented a booking existence" case.
+
+#### Fail-open policy
+
+If the collector isn't threaded through (some caller invokes `run()` without a context), the guardrail passes silently with a warning log — `[guardrail:booking_cross_reference] no tool-call collector in context; skipping`. Reasoning: the always-on regex guardrail is the primary check; this one is additive coverage. Blocking every response over a plumbing gap would be a worse UX than the small edge case of missing a claim. Same policy as the input guardrails' classifier-error branches.
+
+#### Deferred phases
+
+- **Phase 4** — LLM classifier layer as a third output guardrail. Feeds `{ agentOutput, toolHistorySummary }` into a small `gpt-4o-mini` call returning `BACKED` | `UNBACKED_FINALITY`. Catches novel phrasings the regex + cross-reference miss.
+- **Phase 5** — Adversarial eval cases (fabricated-reference, wrong-total, booking-without-call, novel-phrasing). Some will need synthetic-input direct-guardrail tests since the model won't naturally lie.
+- **Phase 6** — README consolidation for the whole stage.
+
+#### File index
+
+```
+src/agents/
+└── agentRunContext.ts                       (types, rebuildCollectorFromHistory,
+                                               attachToolCollectorHook)
+
+src/guardrails/
+└── bookingCrossReferenceOutputGuardrail.ts  (Phase 3 — deterministic checks)
+```
+
+Modified: `src/agents/buildTravelAgent.ts` (attach hook, add guardrail to list), `app/api/agent/route.ts` (rebuild collector from history, pass as context), `src/evals/runCase.ts` (shared context across turn loop).
+
+---
+
 > **Note on the historical Stage narratives above:** file paths in Stages 1–7 reflect the layout at the time each stage was written. Where those don't match the current file tree, the [file index](#file-index) at the bottom of this doc is authoritative.
 
 ---

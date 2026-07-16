@@ -2,7 +2,6 @@ import type { OutputGuardrail } from '@openai/agents';
 
 // Output guardrail enforcing the "agent proposes, user confirms" split
 // baked into the `propose_booking` tool spec:
-//
 //   "The booking is NOT paid or confirmed by this call — the user must
 //    click Confirm in the chat UI to actually reserve inventory."
 //
@@ -11,6 +10,7 @@ import type { OutputGuardrail } from '@openai/agents';
 // rule is a soft ask — this guardrail is the hard belt on the suspenders.
 // If the agent ever asserts booking finality in its final message, this
 // trips the tripwire and the SDK short-circuits the response.
+// In simple terms, this guardrail enforces that the agent must not claim to have confirmed or finalized a booking on the user's behalf. Results like "Your booking is confirmed" or "The reservation has been processed" will trigger this guardrail, and the user will be informed that they need to click the Confirm button in the booking card to actually reserve inventory.
 //
 // Scope note: this is a text-only heuristic. The Agents SDK's output
 // guardrail context doesn't expose tool-call history, so we can't

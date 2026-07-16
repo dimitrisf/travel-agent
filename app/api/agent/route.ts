@@ -8,6 +8,8 @@ import {
   type AgentInputItem,
 } from '@openai/agents';
 import { buildAgentGraph } from '@/agents/buildAgentGraph';
+import { rebuildCollectorFromHistory } from '@/agents/agentRunContext';
+import type { AgentRunContext } from '@/agents/agentRunContext';
 import { unwrapToolOutput } from '@/utils/toolOutput';
 import { userFacingGuardrailErrorMessage } from '@/utils/userFacingGuardrailErrorMessage';
 
@@ -84,14 +86,44 @@ export async function POST(req: NextRequest) {
   // Start at the triage agent; the Runner follows handoffs into the specialists.
   const agent = buildAgentGraph(mcpTravel, mcpWeather);
 
+  // Rebuild the tool-call collector from the client-sent history so this
+  // turn's guardrails can see what happened on prior turns (Stage 11).
+  // The collector then accumulates as new tools fire during this turn via
+  // the `agent_tool_end` hook attached inside `buildTravelAgent`.
+  const runCtx: AgentRunContext = {
+    // rebuildCollectorFromHistory only picks up paired function_call +
+    // function_call_result items — plain user/assistant messages are
+    // skipped. E.g., if history contains:
+    //   { role: 'user', content: 'Book that hotel' },
+    //   { type: 'function_call', callId: 'call_1',
+    //     name: 'propose_booking',
+    //     arguments: '{"customer_name":"Dimitris",...}' },
+    //   { type: 'function_call_result', callId: 'call_1',
+    //     output: { type: 'text',
+    //       text: '{"reference":"BKG-2026-A9F3K2","totalPriceEUR":471.6,...}' } }
+    // then the returned collector is:
+    //   [{
+    //     name: 'propose_booking',
+    //     args: { customer_name: 'Dimitris', ... },
+    //     result: '{"reference":"BKG-2026-A9F3K2","totalPriceEUR":471.6,...}',
+    //     parsedResult: { reference: 'BKG-2026-A9F3K2', totalPriceEUR: 471.6, ... }
+    //   }]
+    // A message-only history yields [] — nothing to cross-reference against.
+    toolCallCollector: rebuildCollectorFromHistory(history),
+  };
+
   // We run the agent with the user's input and the conversation history. We pass the stream: true option to enable streaming of the agent's output. The agent will process the input, call tools as needed, and generate a response in real-time.
   //
   // This agent (actually the triage agent) will hand off to the appropriate specialist (WeatherAgent or TravelAgent) based on the user's input. The agent's output is streamed back to the client as SSE events, allowing the client to display the response in real-time as it is generated.
   // We call the agent passed to the run() function the "entry agent" because it is the first agent that receives the user's input. The entry agent is responsible for routing the input to the appropriate specialist agent based on the user's intent. The entry agent's input guardrails are applied to the user's input before it is passed to the specialist agents.
+  // We pass the conversation history to the run() function so that the agent can maintain context across turns. The history is an array of AgentInputItem objects, which represent the messages exchanged between the user and the agent. The agent can use this history to generate more relevant responses based on the previous conversation.
+  // We also pass the runCtx object to the run() function, which contains the toolCallCollector. This collector is used to track the tools that have been called during the current turn, allowing the agent to enforce output guardrails based on the tools that have been used.
+  // Context note: the runCtx is not persisted across turns — it is only valid for the current turn. The toolCallCollector is rebuilt from the history at the start of each turn, and it accumulates new tool calls as they occur during the turn. This allows the agent to enforce output guardrails based on the tools that have been called during the current turn.
+  // More specifically, the toolCallCollector is used by the bookingCrossReferenceOutputGuardrail to check for booking-related claims in the agent's output. The guardrail uses the collector to determine if the agent has called the propose_booking tool and to cross-reference any booking references mentioned in the output against the actual results returned by the tool.
   const stream = await run(
     agent,
     [...history, { role: 'user', content: userInput }],
-    { stream: true },
+    { stream: true, context: runCtx },
   );
 
   const encoder = new TextEncoder();
@@ -221,4 +253,3 @@ export async function POST(req: NextRequest) {
     },
   });
 }
-

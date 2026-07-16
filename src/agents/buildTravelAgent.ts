@@ -1,5 +1,7 @@
 import { Agent, MCPServerStreamableHttp } from '@openai/agents';
+import { bookingCrossReferenceOutputGuardrail } from '@/guardrails/bookingCrossReferenceOutputGuardrail';
 import { bookingTruthfulnessOutputGuardrail } from '@/guardrails/bookingTruthfulnessOutputGuardrail';
+import { attachToolCollectorHook } from './agentRunContext';
 
 // The travel/concierge specialist. Owns both MCPs so it can factor weather
 // into trip decisions ("sunny weekend in Berlin under €600 total"). Inherits
@@ -16,7 +18,7 @@ export function buildTravelAgent(
   todayWeekday: string,
   upcomingFridays: string[],
 ) {
-  return new Agent({
+  const agent = new Agent({
     name: 'TravelAgent',
     // Bumped from gpt-4o-mini: the growing instruction set (origin rule,
     // round-trip rule, arithmetic rule, options-count rule, bookings section)
@@ -25,7 +27,15 @@ export function buildTravelAgent(
     // WeatherAgent and TriageAgent keep gpt-4o-mini since their prompts are
     // small.
     model: 'gpt-4o',
-    outputGuardrails: [bookingTruthfulnessOutputGuardrail],
+    // Two output guardrails run in sequence; either can trip. The regex
+    // one is fast and covers finality-claim phrasings. The cross-reference
+    // one (Stage 11) checks that booking-shaped claims match what
+    // propose_booking actually returned — requires the tool-collector hook
+    // wired below.
+    outputGuardrails: [
+      bookingTruthfulnessOutputGuardrail,
+      bookingCrossReferenceOutputGuardrail,
+    ],
     instructions: [
       `You are the Travel specialist and trip planner. Today is ${today} (${todayWeekday}). Upcoming Fridays: ${upcomingFridays.join(', ')}.`,
       'When the user asks for a "weekend", default to Fri check-in → Sun check-out (2 nights). If the user says "long weekend" or "3-day weekend", use Fri → Mon (3 nights). Always verify the check-in date is a Friday from the list above and the check-out is the Sunday or Monday that follows.',
@@ -64,4 +74,11 @@ export function buildTravelAgent(
     ].join(' '),
     mcpServers: [mcpTravel, mcpWeather],
   });
+  // Wire the SDK's `agent_tool_end` event to push each completed tool
+  // call into the RunContext's collector. The cross-reference guardrail
+  // above reads that collector to verify claims in the agent's output.
+  // Fresh listener per built agent — no leak, since agents are built per
+  // request/case.
+  attachToolCollectorHook(agent);
+  return agent;
 }

@@ -6,6 +6,7 @@ import {
   run,
 } from '@openai/agents';
 import { buildAgentGraph } from '../agents/buildAgentGraph';
+import { newAgentRunContext } from '../agents/agentRunContext';
 import { getTurns } from './types';
 import type { Case, CaseOutput } from './types';
 import { unwrapToolOutput } from '@/utils/toolOutput';
@@ -64,6 +65,13 @@ export async function runCase(
     // indexByCallId will eventually contain { '1' => 0, '2' => 1, '3' => 2 }.
     const indexByCallId = new Map<string, number>();
 
+    // Shared AgentRunContext threaded through every turn's run() call.
+    // Its `toolCallCollector` is populated by the `agent_tool_end` hook
+    // attached in buildTravelAgent, and consumed by the cross-reference
+    // output guardrail (Stage 11). Same instance every turn so the
+    // guardrail sees the full history, not just the current turn.
+    const runCtx = newAgentRunContext();
+
     // E.g, turns = ['What is the weather in Athens?', 'What about tomorrow?']
     for (const userText of turns) {
       // result is of type RunResult, which has `newItems`, `finalOutput`,
@@ -74,10 +82,11 @@ export async function runCase(
       //   lastAgent: { name: 'weather-agent', ... },
       //   history: [...],
       // }
-      const result = await run(agent, [
-        ...history,
-        { role: 'user', content: userText },
-      ]);
+      const result = await run(
+        agent,
+        [...history, { role: 'user', content: userText }],
+        { context: runCtx },
+      );
 
       // E.g, result.newItems = [
       //   { type: 'tool_call_item', rawItem: { name: 'get_weather', arguments: '{"city":"Athens"}', callId: '1' }, agent: { name: 'weather-agent', ... } },
