@@ -16,8 +16,11 @@ import { verbatimHotelPrices } from './cases/verbatimHotelPrices';
 import { verbatimPriceAcrossTurns } from './cases/verbatimPriceAcrossTurns';
 import { weatherInBerlin } from './cases/weatherInBerlin';
 import { bookingWithoutCallTrips } from './synthetic/bookingWithoutCallTrips';
+import { confirmedBookingFinalityAllowed } from './synthetic/confirmedBookingFinalityAllowed';
 import { fabricatedReferenceTrips } from './synthetic/fabricatedReferenceTrips';
 import { legitBookingSummaryPasses } from './synthetic/legitBookingSummaryPasses';
+import { novelFinalitySeatsLockedInTrips } from './synthetic/novelFinalitySeatsLockedInTrips';
+import { novelFinalityYoureAllSetTrips } from './synthetic/novelFinalityYoureAllSetTrips';
 import { wrongTotalTrips } from './synthetic/wrongTotalTrips';
 import type { Case, SyntheticGuardrailCase } from './types';
 
@@ -39,15 +42,24 @@ const CASES: Case[] = [
   injectionLookalikeAllowed,
 ];
 
-// Synthetic guardrail cases — Stage 11 Phase 5. Direct-invocation tests
-// for the cross-reference output guardrail. No agent runs; assertions are
-// applied to the guardrail's return value. Run in a second loop after
-// CASES so failures fold into the same reporting.
+// Synthetic guardrail cases — direct-invocation tests for output
+// guardrails. No agent runs; assertions are applied to the guardrail's
+// return value. Run in a second loop after CASES so failures fold into
+// the same reporting.
+//
+// First four (Stage 11 Phase 5) cover the cross-reference guardrail:
+// three must-trip vectors (checks a/b/c) + one must-NOT-trip regression.
+// Last three (Stage 11 Phase 4) cover the LLM classifier: two novel
+// finality phrasings (must trip) + one CONFIRMED-status case (must NOT
+// trip, false-positive regression).
 const SYNTHETIC_CASES: SyntheticGuardrailCase[] = [
   fabricatedReferenceTrips,
   wrongTotalTrips,
   bookingWithoutCallTrips,
   legitBookingSummaryPasses,
+  novelFinalityYoureAllSetTrips,
+  novelFinalitySeatsLockedInTrips,
+  confirmedBookingFinalityAllowed,
 ];
 
 // Invoke an output guardrail directly with synthetic inputs. Bypasses

@@ -1333,9 +1333,9 @@ src/utils/
 
 ### Stage 11 — Booking-truthfulness cross-reference (in progress)
 
-Extends Stage 9 Phase 3's booking-truthfulness guardrail beyond the text-only regex layer. The regex catches finality-claim phrasings ("your booking is confirmed") but has no idea whether specific things the agent quotes — booking references, totals — actually match what `propose_booking` returned. This stage adds a deterministic cross-reference layer that reads real tool outputs and rejects claims that don't check out. A future phase will add a classifier layer for novel finality phrasings the regex misses.
+Extends Stage 9 Phase 3's booking-truthfulness guardrail beyond the text-only regex layer. The regex catches finality-claim phrasings ("your booking is confirmed") but has no idea whether specific things the agent quotes — booking references, totals — actually match what `propose_booking` returned, and it can't catch novel finality phrasings ("you're all set for the trip") that don't match any pattern. Stage 11 adds two more layers: a deterministic cross-reference layer that reads real tool outputs and rejects claims that don't check out (Phase 3), and an LLM classifier that judges finality claims semantically in the context of the tool history (Phase 4).
 
-Both guardrails ship on `TravelAgent` and run in sequence — regex first (cheap, always available), cross-reference second (requires tool history to be threaded). Either can trip.
+Three guardrails ship on `TravelAgent` and run in sequence: regex first (cheap, always available), cross-reference second (deterministic, requires tool history to be threaded), classifier third (LLM call, gated by a cheap pre-filter). Any can trip.
 
 #### The SDK-threading problem
 
@@ -1372,6 +1372,29 @@ Prior turns' tool calls are recovered from client-sent history via a `rebuildCol
 
 If the collector isn't threaded through (some caller invokes `run()` without a context), the guardrail passes silently with a warning log — `[guardrail:booking_cross_reference] no tool-call collector in context; skipping`. Reasoning: the always-on regex guardrail is the primary check; this one is additive coverage. Blocking every response over a plumbing gap would be a worse UX than the small edge case of missing a claim. Same policy as the input guardrails' classifier-error branches.
 
+#### Phase 4 — LLM classifier layer
+
+Third output guardrail on `TravelAgent`, after the regex (Stage 9 Phase 3) and cross-reference (Phase 3). Catches novel finality phrasings the earlier two miss — text like *"You're all set for the trip"*, *"Seats are locked in"*, *"Payment went through"* that has no matching regex pattern and no fabricated data for the cross-reference to check. Same shape as the input classifiers: own `OpenAI` client, `gpt-4o-mini`, `temperature=0`, single-token verdict.
+
+[src/guardrails/bookingClaimClassifierOutputGuardrail.ts](src/guardrails/bookingClaimClassifierOutputGuardrail.ts) uses a two-layer defense against false positives:
+
+1. **Deterministic pre-filter.** The reply must contain a finality-indicator word (`all set`, `locked in`, `finalized`, `paid`, `payment`, `ticketed`, `reserved`, `confirmed`, `booked`, `good to go`, `secured`, `completed`, `done`, `bon voyage`). If none appear, skip the LLM call and pass. Cuts the model-call rate on happy-path traffic (weather reports, planning preambles, price summaries) and prevents over-firing on non-booking text the classifier never should have seen.
+2. **LLM verdict.** For text that survives the filter, the classifier sees two labelled blocks — `TOOL HISTORY:` (a summary of `propose_booking` / `get_booking` results only, filtered from the collector; everything else is noise for this verdict) and `AGENT REPLY:` (the raw text). Returns `BACKED` or `UNBACKED_FINALITY`. Trips on the latter.
+
+**Context-sensitive by design.** The same literal reply — *"You're all set — your booking is confirmed."* — should trip after only a `propose_booking` (status=PROPOSED) but pass after a `get_booking` returning status=CONFIRMED. Same words, different verdict depending on what the tool history actually says. That's exactly why regex alone can't do this job.
+
+The classifier prompt carries eight few-shot examples covering both directions (BACKED and UNBACKED_FINALITY) plus an explicit **tie-breaking rule**: when uncertain, return `BACKED`. The two earlier layers already catch specific known drift patterns; this one is the backstop for confident finality claims only. False positives on planning language block real users — worse than an occasional missed novel drift.
+
+**Three new synthetic cases** in [src/evals/synthetic/](src/evals/synthetic/), same infrastructure as the Phase 5 cross-reference cases:
+
+- **`novelFinalityYoureAllSetTrips`** — collector has only PROPOSED; reply says *"You're all set for the trip!"* → trips with `patternName: 'unbacked-finality'`.
+- **`novelFinalitySeatsLockedInTrips`** — variant with different novel phrasing so the classifier isn't just overfitting on one few-shot example → trips.
+- **`confirmedBookingFinalityAllowed`** — collector has `get_booking` returning status=CONFIRMED; reply uses the same finality wording as the first case → does NOT trip. False-positive regression check for the CONFIRMED-status branch.
+
+**Fail-open policy.** Same as cross-reference: missing collector → pass with a warning log (`[guardrail:booking_claim_classifier] no tool-call collector in context; skipping`); classifier network / quota error → pass with an error log. Blocking on infra is worse than the small risk of a missed novel claim.
+
+**Cost.** One extra `gpt-4o-mini` call per `TravelAgent` turn whose reply survives the pre-filter (a small minority of turns — most replies are searches, weather reports, or clarifying questions). Latency and token cost per gated call are both negligible.
+
 #### Phase 5 — Adversarial eval cases (synthetic direct-invocation)
 
 The real agent won't naturally hallucinate booking references or invent totals, so end-to-end runs can't exercise the cross-reference guardrail's trip paths — happy-path cases like `bookingProposalNoFinalityClaim` only prove "doesn't misfire on legit flows". Phase 5 adds synthetic direct-invocation tests that bypass the agent entirely: hand-craft the `{ agentOutput, toolCallCollector }` the guardrail sees, call `execute(...)` directly, assert on the return value.
@@ -1389,7 +1412,6 @@ Design tradeoff: synthetic cases don't exercise the collector-threading (that's 
 
 #### Deferred phases
 
-- **Phase 4** — LLM classifier layer as a third output guardrail. Feeds `{ agentOutput, toolHistorySummary }` into a small `gpt-4o-mini` call returning `BACKED` | `UNBACKED_FINALITY`. Catches novel phrasings (e.g. *"you're all set"*, *"your seats are locked in"*) that the regex + cross-reference layers miss. Deferred until real usage shows whether the deterministic layers already cover the practical drift surface.
 - **Phase 6** — README consolidation for the whole stage.
 
 #### File index
@@ -1400,16 +1422,20 @@ src/agents/
                                                attachToolCollectorHook)
 
 src/guardrails/
-└── bookingCrossReferenceOutputGuardrail.ts  (Phase 3 — deterministic checks)
+├── bookingCrossReferenceOutputGuardrail.ts  (Phase 3 — deterministic checks)
+└── bookingClaimClassifierOutputGuardrail.ts (Phase 4 — LLM classifier layer)
 
 src/evals/synthetic/                          (Phase 5 — direct-invocation cases)
 ├── fabricatedReferenceTrips.ts              (check (a) — trips on invented ref)
 ├── wrongTotalTrips.ts                       (check (b) — trips on wrong € total)
 ├── bookingWithoutCallTrips.ts               (check (c) — trips on no-call prose)
-└── legitBookingSummaryPasses.ts             (must-NOT-trip regression)
+├── legitBookingSummaryPasses.ts             (must-NOT-trip regression for cross-ref)
+├── novelFinalityYoureAllSetTrips.ts         (Phase 4 — trips on novel finality after PROPOSED)
+├── novelFinalitySeatsLockedInTrips.ts       (Phase 4 — variant novel phrasing, must trip)
+└── confirmedBookingFinalityAllowed.ts       (Phase 4 — must-NOT-trip after CONFIRMED)
 ```
 
-Modified: `src/agents/buildTravelAgent.ts` (attach hook, add guardrail to list), `app/api/agent/route.ts` (rebuild collector from history, pass as context), `src/evals/runCase.ts` (shared context across turn loop), `src/evals/types.ts` (add `SyntheticGuardrailCase`), `src/evals/runner.ts` (SYNTHETIC_CASES array, `invokeSyntheticGuardrail` helper, synthetic loop, filter both pools).
+Modified: `src/agents/buildTravelAgent.ts` (attach hook, add cross-reference + classifier guardrails to list), `app/api/agent/route.ts` (rebuild collector from history, pass as context), `src/evals/runCase.ts` (shared context across turn loop), `src/evals/types.ts` (add `SyntheticGuardrailCase`), `src/evals/runner.ts` (SYNTHETIC_CASES array + 3 classifier cases, `invokeSyntheticGuardrail` helper, synthetic loop, filter both pools).
 
 ---
 

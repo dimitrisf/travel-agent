@@ -1,4 +1,5 @@
 import { Agent, MCPServerStreamableHttp } from '@openai/agents';
+import { bookingClaimClassifierOutputGuardrail } from '@/guardrails/bookingClaimClassifierOutputGuardrail';
 import { bookingCrossReferenceOutputGuardrail } from '@/guardrails/bookingCrossReferenceOutputGuardrail';
 import { bookingTruthfulnessOutputGuardrail } from '@/guardrails/bookingTruthfulnessOutputGuardrail';
 import { attachToolCollectorHook } from './agentRunContext';
@@ -27,14 +28,19 @@ export function buildTravelAgent(
     // WeatherAgent and TriageAgent keep gpt-4o-mini since their prompts are
     // small.
     model: 'gpt-4o',
-    // Two output guardrails run in sequence; either can trip. The regex
-    // one is fast and covers finality-claim phrasings. The cross-reference
-    // one (Stage 11) checks that booking-shaped claims match what
-    // propose_booking actually returned — requires the tool-collector hook
-    // wired below.
+    // Three output guardrails run in sequence; any can trip.
+    //   1. Regex (fast, cheap) — known finality-claim phrasings.
+    //   2. Cross-reference (Stage 11 Phase 3) — booking-shaped claims must
+    //      match what propose_booking actually returned. Requires the
+    //      tool-collector hook wired below.
+    //   3. LLM classifier (Stage 11 Phase 4) — novel finality phrasings the
+    //      regex doesn't have a pattern for. Reads the same collector to
+    //      distinguish "you're all set" after propose_booking (drift) from
+    //      the same words after a CONFIRMED get_booking result (truthful).
     outputGuardrails: [
       bookingTruthfulnessOutputGuardrail,
       bookingCrossReferenceOutputGuardrail,
+      bookingClaimClassifierOutputGuardrail,
     ],
     instructions: [
       `You are the Travel specialist and trip planner. Today is ${today} (${todayWeekday}). Upcoming Fridays: ${upcomingFridays.join(', ')}.`,
