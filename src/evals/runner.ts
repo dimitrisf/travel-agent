@@ -15,7 +15,11 @@ import { sunnyWeekendFromAthens } from './cases/sunnyWeekendFromAthens';
 import { verbatimHotelPrices } from './cases/verbatimHotelPrices';
 import { verbatimPriceAcrossTurns } from './cases/verbatimPriceAcrossTurns';
 import { weatherInBerlin } from './cases/weatherInBerlin';
-import type { Case } from './types';
+import { bookingWithoutCallTrips } from './synthetic/bookingWithoutCallTrips';
+import { fabricatedReferenceTrips } from './synthetic/fabricatedReferenceTrips';
+import { legitBookingSummaryPasses } from './synthetic/legitBookingSummaryPasses';
+import { wrongTotalTrips } from './synthetic/wrongTotalTrips';
+import type { Case, SyntheticGuardrailCase } from './types';
 
 // Case set grows per phase. Single-turn cases first, then the multi-turn
 // regressions added in Stage 10 Phase 4, then the Stage-9 guardrail cases.
@@ -34,6 +38,31 @@ const CASES: Case[] = [
   promptInjectionBlocked,
   injectionLookalikeAllowed,
 ];
+
+// Synthetic guardrail cases — Stage 11 Phase 5. Direct-invocation tests
+// for the cross-reference output guardrail. No agent runs; assertions are
+// applied to the guardrail's return value. Run in a second loop after
+// CASES so failures fold into the same reporting.
+const SYNTHETIC_CASES: SyntheticGuardrailCase[] = [
+  fabricatedReferenceTrips,
+  wrongTotalTrips,
+  bookingWithoutCallTrips,
+  legitBookingSummaryPasses,
+];
+
+// Invoke an output guardrail directly with synthetic inputs. Bypasses
+// the agent entirely — the guardrail only reads `agentOutput` and
+// `context.context.toolCallCollector`, so we synthesize just those two
+// fields and cast the args object to satisfy the SDK's stricter typing.
+async function invokeSyntheticGuardrail(sc: SyntheticGuardrailCase) {
+  return sc.guardrail.execute({
+    agentOutput: sc.agentOutput,
+    context: {
+      context: { toolCallCollector: sc.toolCallCollector },
+    },
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  } as any);
+}
 
 // Render a one-line tool-output summary. If `parsed` is an array, show its
 // length. If it's an object, show any array-valued fields (e.g. "outbound:
@@ -144,6 +173,7 @@ async function main() {
   // even when they shouldn't be npm-owned (`--brief`, `--case ...` have
   // both been observed to disappear on npm 10.9.2). Env vars survive.
   const filterArg = process.argv.indexOf('--case');
+  // E.g., `npm run evals -- --case hotels` → filter="hotels"
   const filter =
     filterArg >= 0
       ? process.argv[filterArg + 1]
@@ -160,8 +190,15 @@ async function main() {
   const selected = filter
     ? CASES.filter((c) => c.name.includes(filter))
     : CASES;
+  // Filter synthetic cases up front too, so the "no matches" check below
+  // considers both pools. Without this, a filter like `synthetic` that
+  // matches zero regular cases but every synthetic case would exit early
+  // with "No cases matched" before the synthetic block runs.
+  const selectedSynth = filter
+    ? SYNTHETIC_CASES.filter((c) => c.name.includes(filter))
+    : SYNTHETIC_CASES;
 
-  if (filter && selected.length === 0) {
+  if (filter && selected.length === 0 && selectedSynth.length === 0) {
     console.error(`No cases matched --case "${filter}".`);
     process.exit(1);
   }
@@ -171,8 +208,12 @@ async function main() {
   // one case and see three, the arg-forwarding was mangled.
   const filterInfo = filter ? ` (filter: "${filter}")` : ' (no filter)';
   const modeInfo = brief ? ' [brief]' : '';
+  const synthSuffix =
+    selectedSynth.length > 0
+      ? ` + ${selectedSynth.length} synthetic (${selectedSynth.map((c) => c.name).join(', ')})`
+      : '';
   process.stdout.write(
-    `Running ${selected.length} of ${CASES.length} case(s)${filterInfo}${modeInfo}: ${selected.map((c) => c.name).join(', ')}\n`,
+    `Running ${selected.length} of ${CASES.length} case(s)${filterInfo}${modeInfo}: ${selected.map((c) => c.name).join(', ') || '(none)'}${synthSuffix}\n`,
   );
 
   let totalAsserts = 0;
@@ -204,7 +245,11 @@ async function main() {
     }
     process.stdout.write(`  (${elapsedSec}s)\n`);
     if (caseFailed > 0) {
-      failedCases.push({ name: c.name, failed: caseFailed, total: results.length });
+      failedCases.push({
+        name: c.name,
+        failed: caseFailed,
+        total: results.length,
+      });
     }
 
     // Skip the agent-output block on green passes when --brief is set.
@@ -257,9 +302,88 @@ async function main() {
     process.stdout.write(`  ── end agent output ──\n`);
   }
 
+  // Synthetic guardrail cases — Stage 11 Phase 5. `selectedSynth` was
+  // computed up front (alongside `selected`) so the "no matches" check
+  // could consider both pools; reused here. Same reporting shape as
+  // regular cases: ▶ header, ✓ / ✗ assertion lines, timing, failure
+  // rollup at the end. Skips the "agent output" block because there is
+  // no agent to dump.
+  if (selectedSynth.length > 0) {
+    process.stdout.write(
+      `\n── synthetic guardrail cases (${selectedSynth.length}) ──\n`,
+    );
+
+    for (const sc of selectedSynth) {
+      // E.g., sc = bookingWithoutCallTrips
+      process.stdout.write(`\n▶ ${sc.name}\n  ${sc.description}\n`);
+
+      const t0 = Date.now();
+      let result;
+      let executeError: string | undefined;
+
+      try {
+        result = await invokeSyntheticGuardrail(sc);
+      } catch (err) {
+        executeError = (err as Error)?.message ?? String(err);
+      }
+
+      const elapsedSec = ((Date.now() - t0) / 1000).toFixed(2);
+
+      // If the guardrail executed successfully, run the case's assertions on its output.
+      // If the guardrail threw, report that as a single failed assertion.
+
+      const assertions =
+        result !== undefined
+          ? sc.expect(result)
+          : // If the guardrail executed successfully, run the case's assertions on its output.
+            [
+              {
+                description: 'guardrail.execute did not throw',
+                passed: false,
+                details: `threw: ${executeError}`,
+              },
+            ];
+
+      let synthFailed = 0;
+      // Track the number of failed assertions for this synthetic case, so we can report it in the summary at the end.
+      // This is similar to how we track failed assertions for regular cases above.
+      // E.g., assertions = [
+      //   { description: 'tripwire triggered', passed: true },
+      //   { description: 'outputInfo.patternName is "booking-without-call"', passed: true }
+      // ], or
+      //   assertions = [
+      //     { description: 'tripwire triggered', passed: false, details: 'expected true, got false' },
+      //     { description: 'outputInfo.patternName is "booking-without-call"', passed: true }
+      //   ]
+      for (const a of assertions) {
+        // E.g, a = { description: 'tripwire triggered', passed: true }
+        // or a = { description: 'outputInfo.patternName is "booking-without-call"', passed: false, details: 'expected "booking-without-call", got "some-other-pattern"' }
+        totalAsserts++;
+        const icon = a.passed ? '  ✓' : '  ✗';
+        process.stdout.write(`${icon} ${a.description}\n`);
+
+        if (!a.passed) {
+          failedAsserts++;
+          synthFailed++;
+          if (a.details) process.stdout.write(`      ${a.details}\n`);
+        }
+      }
+
+      process.stdout.write(`  (${elapsedSec}s)\n`);
+      if (synthFailed > 0) {
+        failedCases.push({
+          name: sc.name,
+          failed: synthFailed,
+          total: assertions.length,
+        });
+      }
+    }
+  }
+
   process.stdout.write(
-    `\n${totalAsserts - failedAsserts}/${totalAsserts} assertions passed across ${selected.length} case(s).\n`,
+    `\n${totalAsserts - failedAsserts}/${totalAsserts} assertions passed across ${selected.length} case(s) + ${selectedSynth.length} synthetic.\n`,
   );
+
   if (failedCases.length > 0) {
     // One line per failed case with its own pass/fail ratio, so the
     // summary tells you where to look first when several cases fail.

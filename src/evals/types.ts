@@ -1,5 +1,8 @@
 // Shared shapes for the eval harness (Stage 10).
 
+import type { GuardrailFunctionOutput, OutputGuardrail } from '@openai/agents';
+import type { ToolCallRecord } from '../agents/agentRunContext';
+
 export type Case = {
   // Short kebab-case identifier used for filtering and log labels.
   name: string;
@@ -63,4 +66,34 @@ export type AssertionResult = {
   passed: boolean;
   // Optional context to print on failure (or always, for debugging).
   details?: string;
+};
+
+// Synthetic guardrail cases — direct-invocation tests for output guardrails.
+// Regular Cases run an entire agent turn and check its observable state;
+// synthetic cases skip the agent and call `guardrail.execute(...)` with a
+// hand-crafted agent output + tool-call collector. Necessary for adversarial
+// coverage since the real model won't naturally hallucinate on demand.
+//
+// Kept separate from Case (rather than a union) because the two shapes
+// share nothing — different inputs, different execute path, different
+// expect signature. Runner iterates SYNTHETIC_CASES in a second loop after
+// CASES with the same reporting.
+export type SyntheticGuardrailCase = {
+  name: string;
+  description: string;
+  // The guardrail to test. The runner will call `guardrail.execute(...)` with
+  // the provided `agentOutput` and `toolCallCollector`.
+  guardrail: OutputGuardrail;
+  // The agent output to feed into the guardrail. This is the same shape as
+  // the `agentOutput` property of CaseOutput, but the runner doesn't need to
+  // run an agent to produce it.
+  agentOutput: string;
+  // The tool calls the agent made while producing `agentOutput`. The runner
+  // will feed these into the guardrail's `toolCallCollector` so it can
+  // validate them.
+  toolCallCollector: ToolCallRecord[];
+  // Given the observed guardrail output, return an array of assertion results.
+  // Multiple assertions per case make failures self-diagnostic (you see
+  // which specific properties held and which didn't).
+  expect: (result: GuardrailFunctionOutput) => AssertionResult[];
 };

@@ -1372,10 +1372,24 @@ Prior turns' tool calls are recovered from client-sent history via a `rebuildCol
 
 If the collector isn't threaded through (some caller invokes `run()` without a context), the guardrail passes silently with a warning log — `[guardrail:booking_cross_reference] no tool-call collector in context; skipping`. Reasoning: the always-on regex guardrail is the primary check; this one is additive coverage. Blocking every response over a plumbing gap would be a worse UX than the small edge case of missing a claim. Same policy as the input guardrails' classifier-error branches.
 
+#### Phase 5 — Adversarial eval cases (synthetic direct-invocation)
+
+The real agent won't naturally hallucinate booking references or invent totals, so end-to-end runs can't exercise the cross-reference guardrail's trip paths — happy-path cases like `bookingProposalNoFinalityClaim` only prove "doesn't misfire on legit flows". Phase 5 adds synthetic direct-invocation tests that bypass the agent entirely: hand-craft the `{ agentOutput, toolCallCollector }` the guardrail sees, call `execute(...)` directly, assert on the return value.
+
+Four cases covering the guardrail's three trip paths + one must-NOT-trip regression:
+
+- **`fabricatedReferenceTrips`** — collector has real `BKG-2026-A9F3K2`; output claims `BKG-2026-ZZZZ99` → check (a) trips with `patternName: 'fabricated-reference'`.
+- **`wrongTotalTrips`** — collector says `totalPriceEUR: 471.6`; output claims `€580` in booking context → check (b) trips with `patternName: 'wrong-booking-total'`.
+- **`bookingWithoutCallTrips`** — empty collector; output uses booking prose → check (c) trips with `patternName: 'booking-without-call'`.
+- **`legitBookingSummaryPasses`** — collector matches output verbatim → no trip (regression check against false positives).
+
+New `SyntheticGuardrailCase` type in [src/evals/types.ts](src/evals/types.ts) — separate from `Case` (different inputs, different execute path, different expect signature). Runner iterates `SYNTHETIC_CASES` in a second loop after `CASES` with the same reporting shape (▶ header, ✓/✗ assertions, per-case timing, failure rollup). Filtered by the same `EVALS_CASE` / `--case` substring, so `EVALS_CASE=synthetic npm run evals` narrows to just these four; `EVALS_CASE=fabricated` narrows further to check (a). Direct-invocation cases run in ~0.00s (no model call, no MCP, no DB).
+
+Design tradeoff: synthetic cases don't exercise the collector-threading (that's covered by the happy-path E2E cases), but they nail down each individual trip path deterministically. The two categories complement each other — E2E proves the plumbing works end-to-end, synthetic proves the guardrail logic itself is correct.
+
 #### Deferred phases
 
-- **Phase 4** — LLM classifier layer as a third output guardrail. Feeds `{ agentOutput, toolHistorySummary }` into a small `gpt-4o-mini` call returning `BACKED` | `UNBACKED_FINALITY`. Catches novel phrasings the regex + cross-reference miss.
-- **Phase 5** — Adversarial eval cases (fabricated-reference, wrong-total, booking-without-call, novel-phrasing). Some will need synthetic-input direct-guardrail tests since the model won't naturally lie.
+- **Phase 4** — LLM classifier layer as a third output guardrail. Feeds `{ agentOutput, toolHistorySummary }` into a small `gpt-4o-mini` call returning `BACKED` | `UNBACKED_FINALITY`. Catches novel phrasings (e.g. *"you're all set"*, *"your seats are locked in"*) that the regex + cross-reference layers miss. Deferred until real usage shows whether the deterministic layers already cover the practical drift surface.
 - **Phase 6** — README consolidation for the whole stage.
 
 #### File index
@@ -1387,9 +1401,15 @@ src/agents/
 
 src/guardrails/
 └── bookingCrossReferenceOutputGuardrail.ts  (Phase 3 — deterministic checks)
+
+src/evals/synthetic/                          (Phase 5 — direct-invocation cases)
+├── fabricatedReferenceTrips.ts              (check (a) — trips on invented ref)
+├── wrongTotalTrips.ts                       (check (b) — trips on wrong € total)
+├── bookingWithoutCallTrips.ts               (check (c) — trips on no-call prose)
+└── legitBookingSummaryPasses.ts             (must-NOT-trip regression)
 ```
 
-Modified: `src/agents/buildTravelAgent.ts` (attach hook, add guardrail to list), `app/api/agent/route.ts` (rebuild collector from history, pass as context), `src/evals/runCase.ts` (shared context across turn loop).
+Modified: `src/agents/buildTravelAgent.ts` (attach hook, add guardrail to list), `app/api/agent/route.ts` (rebuild collector from history, pass as context), `src/evals/runCase.ts` (shared context across turn loop), `src/evals/types.ts` (add `SyntheticGuardrailCase`), `src/evals/runner.ts` (SYNTHETIC_CASES array, `invokeSyntheticGuardrail` helper, synthetic loop, filter both pools).
 
 ---
 
