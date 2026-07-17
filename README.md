@@ -1331,13 +1331,25 @@ src/utils/
 
 ---
 
-### Stage 11 — Booking-truthfulness cross-reference (in progress)
+### Stage 11 — Booking-truthfulness cross-reference
 
 Extends Stage 9 Phase 3's booking-truthfulness guardrail beyond the text-only regex layer. The regex catches finality-claim phrasings ("your booking is confirmed") but has no idea whether specific things the agent quotes — booking references, totals — actually match what `propose_booking` returned, and it can't catch novel finality phrasings ("you're all set for the trip") that don't match any pattern. Stage 11 adds two more layers: a deterministic cross-reference layer that reads real tool outputs and rejects claims that don't check out (Phase 3), and an LLM classifier that judges finality claims semantically in the context of the tool history (Phase 4).
 
 Three guardrails ship on `TravelAgent` and run in sequence: regex first (cheap, always available), cross-reference second (deterministic, requires tool history to be threaded), classifier third (LLM call, gated by a cheap pre-filter). Any can trip.
 
-#### The SDK-threading problem
+#### Defense in depth — at a glance
+
+| Layer | Catches | Mechanism | Cost per turn | Fail mode |
+| --- | --- | --- | --- | --- |
+| **1. Regex** (Stage 9 Phase 3) | Known finality-claim phrasings — *"your booking is confirmed"*, *"the reservation has been made"* | Static regex on `agentOutput` | ~0 | Always on |
+| **2. Cross-reference** (Phase 3) | Specific factual claims that don't match tool outputs — invented `BKG-…` references, wrong € totals, booking mentioned with no `propose_booking` call | Regex extraction + set/tolerance check against `toolCallCollector` | ~0 | Fail-open if collector missing |
+| **3. LLM classifier** (Phase 4) | Novel finality phrasings the regex misses — *"you're all set"*, *"seats are locked in"* | Pre-filter on finality-indicator words → `gpt-4o-mini` verdict (`BACKED` \| `UNBACKED_FINALITY`) with tool-history summary | ~1 `gpt-4o-mini` call on a minority of turns | Fail-open if collector missing OR classifier errors |
+
+The layers are **ordered by cost and specificity**: cheap regex first, then deterministic cross-reference, then the LLM as a semantic backstop. Any trip halts the chain, so the classifier's cost is minimized in practice — most drift is caught earlier. Each layer targets a different failure mode, and stacking them gives coverage no single layer could reach.
+
+#### Foundation — the SDK-threading problem
+
+Layers 2 and 3 both need access to the conversation's tool-call history. This subsection describes how that history reaches the guardrails; the phase sections below build on it.
 
 Output guardrails receive `agent`, `agentOutput`, and `RunContext<TContext>` — but not tool-call history. `RunContext.context` is user-supplied and mutable, so if we populate it during the run, guardrails can read it. The SDK exposes this hook via `agent.on('agent_tool_end', ...)` — fires after each tool resolves, with the RunContext, the tool, its result, and the tool call details.
 
@@ -1368,10 +1380,6 @@ Prior turns' tool calls are recovered from client-sent history via a `rebuildCol
 - **(b) Wrong booking total.** Regex scoped to booking-adjacent phrasing (`booking total`, `trip total`, `grand total`, `total price`) — every quoted € figure must match a real `totalPriceEUR` within ±€1 (cent-rounding slack). Miss → trip with the claimed vs actual totals in the details.
 - **(c) Booking-mentioned-without-any-call.** If the agent talks about a booking in finality-adjacent language AND no `propose_booking` result exists in the collector → trip. Catches the "agent invented a booking existence" case.
 
-#### Fail-open policy
-
-If the collector isn't threaded through (some caller invokes `run()` without a context), the guardrail passes silently with a warning log — `[guardrail:booking_cross_reference] no tool-call collector in context; skipping`. Reasoning: the always-on regex guardrail is the primary check; this one is additive coverage. Blocking every response over a plumbing gap would be a worse UX than the small edge case of missing a claim. Same policy as the input guardrails' classifier-error branches.
-
 #### Phase 4 — LLM classifier layer
 
 Third output guardrail on `TravelAgent`, after the regex (Stage 9 Phase 3) and cross-reference (Phase 3). Catches novel finality phrasings the earlier two miss — text like *"You're all set for the trip"*, *"Seats are locked in"*, *"Payment went through"* that has no matching regex pattern and no fabricated data for the cross-reference to check. Same shape as the input classifiers: own `OpenAI` client, `gpt-4o-mini`, `temperature=0`, single-token verdict.
@@ -1391,9 +1399,16 @@ The classifier prompt carries eight few-shot examples covering both directions (
 - **`novelFinalitySeatsLockedInTrips`** — variant with different novel phrasing so the classifier isn't just overfitting on one few-shot example → trips.
 - **`confirmedBookingFinalityAllowed`** — collector has `get_booking` returning status=CONFIRMED; reply uses the same finality wording as the first case → does NOT trip. False-positive regression check for the CONFIRMED-status branch.
 
-**Fail-open policy.** Same as cross-reference: missing collector → pass with a warning log (`[guardrail:booking_claim_classifier] no tool-call collector in context; skipping`); classifier network / quota error → pass with an error log. Blocking on infra is worse than the small risk of a missed novel claim.
-
 **Cost.** One extra `gpt-4o-mini` call per `TravelAgent` turn whose reply survives the pre-filter (a small minority of turns — most replies are searches, weather reports, or clarifying questions). Latency and token cost per gated call are both negligible.
+
+#### Stage-wide fail-open policy
+
+Both the cross-reference and classifier guardrails **fail open**: when a precondition can't be met, they pass silently with a log line instead of blocking the user. Applied identically to both layers:
+
+- **Missing collector** — the caller invoked `run()` without a `context`, so no tool history is available. Log: `[guardrail:<name>] no tool-call collector in context; skipping`. This can happen if a new call site is added without threading through the collector.
+- **Classifier error** (classifier layer only) — network / quota / model failure while calling `gpt-4o-mini`. Log: `[guardrail:booking_claim_classifier] classifier call failed: <err>`.
+
+Reasoning: the always-on regex guardrail is the primary check; layers 2 and 3 are additive coverage. Blocking every legit response over a plumbing or infra gap is a worse UX than the small edge case of missing one claim — the same policy the input guardrails apply when their classifiers hit an infra error.
 
 #### Phase 5 — Adversarial eval cases (synthetic direct-invocation)
 
@@ -1410,9 +1425,7 @@ New `SyntheticGuardrailCase` type in [src/evals/types.ts](src/evals/types.ts) �
 
 Design tradeoff: synthetic cases don't exercise the collector-threading (that's covered by the happy-path E2E cases), but they nail down each individual trip path deterministically. The two categories complement each other — E2E proves the plumbing works end-to-end, synthetic proves the guardrail logic itself is correct.
 
-#### Deferred phases
-
-- **Phase 6** — README consolidation for the whole stage.
+Phase 4 later reused this same harness for its own 3 classifier cases (`novelFinalityYoureAllSetTrips`, `novelFinalitySeatsLockedInTrips`, `confirmedBookingFinalityAllowed`) — see the Phase 4 subsection above. Total synthetic surface at close-out: 7 cases (4 cross-reference + 3 classifier).
 
 #### File index
 
