@@ -1227,7 +1227,7 @@ src/guardrails/
 ├── offTopicInputGuardrail.ts               (Phase 2 — input, classifier-based)
 ├── promptInjectionInputGuardrail.ts        (Phase 4 — input, classifier-based)
 ├── bookingTruthfulnessOutputGuardrail.ts   (Phase 3 — output, regex-based)
-└── passThroughOutputGuardrail.ts           (Phase 1 stub, still on WeatherAgent)
+└── passThroughOutputGuardrail.ts           (Phase 1 stub — replaced on WeatherAgent in Stage 12, file deleted post-ship)
 
 src/utils/
 ├── extractLatestUserText.ts                (walker used by both input guardrails)
@@ -1558,7 +1558,7 @@ src/evals/cases/                              (per-night extractor cleanup)
 
 Modified: `src/agents/buildTravelAgent.ts` (added forecast guardrail as 4th layer; post-ship: added strict `FORECAST BOUNDARY RULE`), `src/agents/buildWeatherAgent.ts` (replaced pass-through stub with forecast guardrail, attached tool-collector hook), `src/evals/runner.ts` (registered 3 new synthetic cases in `SYNTHETIC_CASES`), five eval fixtures (post-ship: relative-date fix — see [Cleanup: fixture-date drift](#cleanup-fixture-date-drift)), `src/guardrails/bookingClaimClassifierOutputGuardrail.ts` and `src/guardrails/forecastAttributionOutputGuardrail.ts` (post-ship: `EVALS_DEBUG=1`-gated trip diagnostics; forecast classifier only: model swap to `gpt-4o` and Examples 11-12 + `DECISION PROCEDURE`).
 
-Unused after Stage 12: [src/guardrails/passThroughOutputGuardrail.ts](src/guardrails/passThroughOutputGuardrail.ts). Left in place — no runtime consumers, but referenced in the Stage 9 Phase 1 narrative above as the original plumbing stub.
+Removed post-ship: `src/guardrails/passThroughOutputGuardrail.ts`. Originally the Stage-9-Phase-1 plumbing stub (see [Stage 9 Phase 1](#phase-1--plumbing) above) — replaced on `WeatherAgent` when the real forecast guardrail landed in Stage 12, then deleted in a follow-up cleanup once there were no runtime consumers. The Stage 9 Phase 1 narrative still describes what the stub was and why it existed.
 
 ---
 
