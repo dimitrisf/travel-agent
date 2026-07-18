@@ -1,17 +1,25 @@
 import { Agent, MCPServerStreamableHttp } from '@openai/agents';
-import { passThroughOutputGuardrail } from '@/guardrails/passThroughOutputGuardrail';
+import { forecastAttributionOutputGuardrail } from '@/guardrails/forecastAttributionOutputGuardrail';
+import { attachToolCollectorHook } from './agentRunContext';
 
 // The weather specialist. Narrow scope: current conditions and short-term
 // forecasts for the five demo cities. Triage will hand off to it for pure
 // weather questions; anything mixing travel returns to the Travel specialist.
 //
 // Only output guardrails live here — input guardrails on non-entry agents
-// never fire (SDK contract).
-export function buildWeatherAgent(mcpWeather: MCPServerStreamableHttp, today: string, todayWeekday: string) {
-  return new Agent({
+// never fire (SDK contract). The Stage 12 forecast-attribution guardrail
+// runs here (same one wired on TravelAgent) so weather claims made from
+// WeatherAgent are also cross-checked against get_forecast / get_weather
+// tool history.
+export function buildWeatherAgent(
+  mcpWeather: MCPServerStreamableHttp,
+  today: string,
+  todayWeekday: string,
+) {
+  const agent = new Agent({
     name: 'WeatherAgent',
     model: 'gpt-4o-mini',
-    outputGuardrails: [passThroughOutputGuardrail],
+    outputGuardrails: [forecastAttributionOutputGuardrail],
     instructions: [
       `You are the Weather specialist. Today is ${today} (${todayWeekday}).`,
       'Tools:',
@@ -23,4 +31,13 @@ export function buildWeatherAgent(mcpWeather: MCPServerStreamableHttp, today: st
     ].join(' '),
     mcpServers: [mcpWeather],
   });
+  // Wire the SDK's `agent_tool_end` event to push each completed tool
+  // call into the RunContext's collector. The forecast-attribution
+  // guardrail reads the collector to verify date claims against real
+  // get_forecast / get_weather outputs. Fresh listener per built agent
+  // — agents are built per request/case, no leak.
+  //
+  // Before this, only TravelAgent had attachToolCollectorHook. That was a latent gap from Stage 11: when WeatherAgent called get_forecast or get_weather, those calls weren't populating the collector because no hook was listening on WeatherAgent. Which means if a pure-weather turn made a bad claim, the collector would be empty when the guardrail read it, and Phase 4's fail-open would silently skip. Stage 12 closes that gap for both agents.
+  attachToolCollectorHook(agent);
+  return agent;
 }

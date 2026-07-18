@@ -38,12 +38,17 @@ export const verbatimHotelPrices: Case = {
     // "Total: €282") are agent arithmetic and out of scope for this check.
     // The model uses two shapes for per-night prices:
     //   inline:   "€120/night", "€120 per night"
-    //   labelled: "Price per Night: €120", "nightly rate: €120"
+    //   labelled: "Price per Night: €120", "nightly rate: €120",
+    //             "per night for the Standard Room at City Budget Inn is €94.30"
     // Bulleted markdown summaries lean heavily on the labelled shape — the
-    // inline-only pattern missed them and produced a vacuous pass.
+    // inline-only pattern missed them and produced a vacuous pass. The
+    // labelled pattern allows up to 60 non-€ chars between "per night" and
+    // the price, so prose-interlaced phrasings ("... is €X", "... at €X",
+    // "... amounts to €X") are picked up too.
+    // The pattern was designed for tight labelled phrasings — "Price per Night: €120", "nightly rate: €120". But the model sometimes writes prose in between the label and the price — "per night for the Standard Room at City Budget Inn is €94.30" — and the pattern silently missed it. Result: the extractor counted 0 prices in a reply that clearly quoted one, and the "at least one per-night price quoted" assertion failed vacuously. Not an agent bug, an eval-harness fragility.
     const perNightPatterns = [
       /€\s*(\d+(?:[.,]\d+)?)\s*(?:\/|per\s+)nights?\b/gi,
-      /(?:price\s+per\s+night|per\s+night|nightly(?:\s+rate)?)\s*[:\-–]?\s*€\s*(\d+(?:[.,]\d+)?)/gi,
+      /(?:price\s+per\s+night|per\s+night|nightly(?:\s+rate)?)[^€\n]{0,60}?€\s*(\d+(?:[.,]\d+)?)/gi,
     ];
 
     // E.g, if stripped = "Price per Night: €120.50 and €150.00 per night",
@@ -81,4 +86,3 @@ export const verbatimHotelPrices: Case = {
     ];
   },
 };
-

@@ -2,6 +2,7 @@ import { Agent, MCPServerStreamableHttp } from '@openai/agents';
 import { bookingClaimClassifierOutputGuardrail } from '@/guardrails/bookingClaimClassifierOutputGuardrail';
 import { bookingCrossReferenceOutputGuardrail } from '@/guardrails/bookingCrossReferenceOutputGuardrail';
 import { bookingTruthfulnessOutputGuardrail } from '@/guardrails/bookingTruthfulnessOutputGuardrail';
+import { forecastAttributionOutputGuardrail } from '@/guardrails/forecastAttributionOutputGuardrail';
 import { attachToolCollectorHook } from './agentRunContext';
 
 // The travel/concierge specialist. Owns both MCPs so it can factor weather
@@ -28,7 +29,7 @@ export function buildTravelAgent(
     // WeatherAgent and TriageAgent keep gpt-4o-mini since their prompts are
     // small.
     model: 'gpt-4o',
-    // Three output guardrails run in sequence; any can trip.
+    // Four output guardrails run in sequence; any can trip.
     //   1. Regex (fast, cheap) — known finality-claim phrasings.
     //   2. Cross-reference (Stage 11 Phase 3) — booking-shaped claims must
     //      match what propose_booking actually returned. Requires the
@@ -37,10 +38,14 @@ export function buildTravelAgent(
     //      regex doesn't have a pattern for. Reads the same collector to
     //      distinguish "you're all set" after propose_booking (drift) from
     //      the same words after a CONFIRMED get_booking result (truthful).
+    //   4. Forecast attribution (Stage 12) — weather claims about dates the
+    //      get_forecast tool never covered. Same classifier pattern as (3)
+    //      but reads get_forecast / get_weather records from the collector.
     outputGuardrails: [
       bookingTruthfulnessOutputGuardrail,
       bookingCrossReferenceOutputGuardrail,
       bookingClaimClassifierOutputGuardrail,
+      forecastAttributionOutputGuardrail,
     ],
     instructions: [
       `You are the Travel specialist and trip planner. Today is ${today} (${todayWeekday}). Upcoming Fridays: ${upcomingFridays.join(', ')}.`,

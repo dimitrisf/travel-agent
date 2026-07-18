@@ -1450,6 +1450,80 @@ src/evals/synthetic/                          (Phase 5 — direct-invocation cas
 
 Modified: `src/agents/buildTravelAgent.ts` (attach hook, add cross-reference + classifier guardrails to list), `app/api/agent/route.ts` (rebuild collector from history, pass as context), `src/evals/runCase.ts` (shared context across turn loop), `src/evals/types.ts` (add `SyntheticGuardrailCase`), `src/evals/runner.ts` (SYNTHETIC_CASES array + 3 classifier cases, `invokeSyntheticGuardrail` helper, synthetic loop, filter both pools).
 
+### Stage 12 — Forecast-attribution honesty
+
+Extends Stage 11's defense-in-depth pattern to a second class of drift: **weather claims about dates the tool history didn't cover**. The trigger was concrete — during Stage 11 development, `sunny-weekend-from-athens` occasionally produced text like *"Berlin looks sunny July 24-26"* when `get_forecast` had only returned July 17-23. None of the three booking-focused Stage 11 layers caught it; the drift is real but out of their scope.
+
+The fix is a fourth output guardrail on `TravelAgent` (and a first real one on `WeatherAgent`, replacing the Stage-9-Phase-1 pass-through stub): [src/guardrails/forecastAttributionOutputGuardrail.ts](src/guardrails/forecastAttributionOutputGuardrail.ts). Structurally identical to the Stage 11 Phase 4 booking classifier — pre-filter on domain-indicator words → `gpt-4o-mini` verdict on `{ toolHistorySummary, agentReply }` → `BACKED` | `UNBACKED_FORECAST`. Reuses the collector-threading foundation from Stage 11 (see [Foundation — the SDK-threading problem](#foundation--the-sdk-threading-problem)); no new machinery beyond a new guardrail file, a new pre-filter regex, and a new tool-history summarizer.
+
+#### The drift being caught
+
+Two failure modes trip the guardrail:
+
+1. **Out-of-range dates.** Reply asserts weather for a date `get_forecast` never returned. Original flake was July 24-26 when the tool covered July 17-23.
+2. **"Today" claims without `get_weather`.** Reply asserts current conditions (*"it's 22°C in Berlin right now"*) with no `get_weather` call in the collector.
+
+Vague or hedged talk (*"the weather should be pleasant"*, *"Berlin summers are usually mild"*), planning-intent language (*"let me plan a sunny weekend"*), and bare mentions of *"forecast"* / *"weather"* without a condition claim all pass through — the classifier prompt carves those out explicitly.
+
+#### Pre-filter, summarizer, prompt
+
+**Pre-filter.** The reply must contain at least one weather-condition word: `weather`, `forecast`, `temperature`, `sunny`, `sunshine`, `rain`/`rainy`/`rains`/`showers`, `cloud(s)`/`cloudy`, `overcast`, `clear`, `snow`/`snowy`, `storm`/`stormy`, `humid`/`humidity`, `chilly`, `mild`, `warm`, `hot`, `cold`, `cool`, `freezing`, `drizzle`, `thunderstorm`, `partly cloudy`, `degrees`, `°C`, `°F`. If none appear, skip the LLM call. Cuts the model-call rate on booking-only and flight-only replies (most `TravelAgent` traffic).
+
+**Tool-history summary.** Filter the collector to `get_forecast` and `get_weather` records; one line per call:
+
+```
+get_forecast(Berlin) → covered 2026-07-17 to 2026-07-23 (7 days)
+get_weather(Berlin)  → tempC=22, conditions=partly cloudy
+```
+
+Non-weather tools (flights, hotels, bookings) are dropped — they can't back or undermine a forecast claim. Empty collector renders as `(no forecast tool calls)`. Multiple calls for the same city produce multiple lines and the classifier reasons across them.
+
+**Classifier prompt.** 10 few-shot examples, balanced between `BACKED` and `UNBACKED_FORECAST`. Explicit definitions for attribution (specific date + weather claim), non-attribution (hedged / vague / planning intent / bare mentions), and a tie-breaking rule (when uncertain → `BACKED`). Two examples (9 and 10) were added after the initial eval run false-fired on the planning preamble *"Let me plan a sunny weekend in Berlin..."* — same false-positive pattern that hit the Phase 4 booking classifier and the same fix (add planning-intent carve-out to the prompt).
+
+#### Three synthetic cases
+
+Same infrastructure as Stage 11 Phase 5. Two must-trip vectors + one must-NOT-trip regression:
+
+- **`weatherClaimOutsideCoverageTrips`** — collector has `get_forecast(Berlin)` covering 2026-07-17 to 2026-07-23; reply claims *"Expect sunny skies on July 24 with a high of 27°C"* → trips with `patternName: 'unbacked-forecast'`.
+- **`todayClaimWithoutWeatherCallTrips`** — empty collector; reply says *"It's currently 22°C and partly cloudy in Berlin"* → trips.
+- **`weatherClaimWithinCoverageAllowed`** — same collector as case 1; reply mentions July 18 (in range) with matching conditions → does NOT trip. False-positive regression check.
+
+#### Wiring on both agents
+
+`TravelAgent` now runs four output guardrails (adding the forecast one after the three Stage-11 booking guardrails). `WeatherAgent` runs the forecast guardrail on its own — its Stage-9-Phase-1 `passThroughOutputGuardrail` stub was replaced. Both agents also attach the tool-collector hook; before Stage 12, only `TravelAgent` did, so `WeatherAgent`'s `get_forecast` / `get_weather` calls weren't populating the collector. That gap is now closed.
+
+Note that this means the four-layer defense-in-depth story from Stage 11 only applies fully to `TravelAgent`. `WeatherAgent` never emits booking claims, so it doesn't need the three booking guardrails — just the forecast one is the correct minimal wiring for it.
+
+#### Fail-open policy
+
+Same as Stage 11: missing collector → pass with warning log (`[guardrail:forecast_attribution] no tool-call collector in context; skipping`); classifier network / quota error → pass with error log. No new policy dimensions.
+
+#### Cleanup: `verbatim-price-across-turns` extractor
+
+Small orthogonal fix landed in the same stage. The per-night-price extractor in [src/evals/cases/verbatimPriceAcrossTurns.ts](src/evals/cases/verbatimPriceAcrossTurns.ts) and [src/evals/cases/verbatimHotelPrices.ts](src/evals/cases/verbatimHotelPrices.ts) previously matched only tight-join phrasings like `"Price per Night: €120"` — its regex allowed only `\s*[:\-–]?\s*` (whitespace / dash / colon) between the label and the `€`. The model sometimes writes prose-interlaced phrasings like *"per night for the Standard Room at City Budget Inn is €94.30"*, which slipped through and made the extractor count 0 prices → the "at least one per-night price quoted" assertion failed vacuously despite a real price appearing in the reply.
+
+Fix: replace the tight-join with `[^€\n]{0,60}?` (up to 60 non-€ chars, non-greedy) between the "per night" label and the `€`. Now catches labelled tight-join AND prose-interlaced forms. Applied to both files (identical bug in both).
+
+#### File index
+
+```
+src/guardrails/
+└── forecastAttributionOutputGuardrail.ts    (LLM classifier for weather claims)
+
+src/evals/synthetic/                          (extends the Stage 11 Phase 5 harness)
+├── weatherClaimOutsideCoverageTrips.ts       (must-trip: date beyond coverage)
+├── todayClaimWithoutWeatherCallTrips.ts      (must-trip: current conditions without get_weather)
+└── weatherClaimWithinCoverageAllowed.ts      (must-NOT-trip: in-range regression)
+
+src/evals/cases/                              (per-night extractor cleanup)
+├── verbatimHotelPrices.ts                    (labelled pattern relaxed to accept prose)
+└── verbatimPriceAcrossTurns.ts               (same fix)
+```
+
+Modified: `src/agents/buildTravelAgent.ts` (added forecast guardrail as 4th layer), `src/agents/buildWeatherAgent.ts` (replaced pass-through stub with forecast guardrail, attached tool-collector hook), `src/evals/runner.ts` (registered 3 new synthetic cases in `SYNTHETIC_CASES`).
+
+Unused after Stage 12: [src/guardrails/passThroughOutputGuardrail.ts](src/guardrails/passThroughOutputGuardrail.ts). Left in place — no runtime consumers, but referenced in the Stage 9 Phase 1 narrative above as the original plumbing stub.
+
 ---
 
 > **Note on the historical Stage narratives above:** file paths in Stages 1–7 reflect the layout at the time each stage was written. Where those don't match the current file tree, the [file index](#file-index) at the bottom of this doc is authoritative.
