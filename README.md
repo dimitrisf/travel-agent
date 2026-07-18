@@ -1454,7 +1454,7 @@ Modified: `src/agents/buildTravelAgent.ts` (attach hook, add cross-reference + c
 
 Extends Stage 11's defense-in-depth pattern to a second class of drift: **weather claims about dates the tool history didn't cover**. The trigger was concrete — during Stage 11 development, `sunny-weekend-from-athens` occasionally produced text like *"Berlin looks sunny July 24-26"* when `get_forecast` had only returned July 17-23. None of the three booking-focused Stage 11 layers caught it; the drift is real but out of their scope.
 
-The fix is a fourth output guardrail on `TravelAgent` (and a first real one on `WeatherAgent`, replacing the Stage-9-Phase-1 pass-through stub): [src/guardrails/forecastAttributionOutputGuardrail.ts](src/guardrails/forecastAttributionOutputGuardrail.ts). Structurally identical to the Stage 11 Phase 4 booking classifier — pre-filter on domain-indicator words → `gpt-4o-mini` verdict on `{ toolHistorySummary, agentReply }` → `BACKED` | `UNBACKED_FORECAST`. Reuses the collector-threading foundation from Stage 11 (see [Foundation — the SDK-threading problem](#foundation--the-sdk-threading-problem)); no new machinery beyond a new guardrail file, a new pre-filter regex, and a new tool-history summarizer.
+The fix is a fourth output guardrail on `TravelAgent` (and a first real one on `WeatherAgent`, replacing the Stage-9-Phase-1 pass-through stub): [src/guardrails/forecastAttributionOutputGuardrail.ts](src/guardrails/forecastAttributionOutputGuardrail.ts). Structurally identical to the Stage 11 Phase 4 booking classifier — pre-filter on domain-indicator words → `gpt-4o` verdict on `{ toolHistorySummary, agentReply }` → `BACKED` | `UNBACKED_FORECAST`. Reuses the collector-threading foundation from Stage 11 (see [Foundation — the SDK-threading problem](#foundation--the-sdk-threading-problem)); no new machinery beyond a new guardrail file, a new pre-filter regex, and a new tool-history summarizer. Model note: this classifier uses `gpt-4o` rather than the `gpt-4o-mini` used by the booking classifier — mini couldn't reliably follow the multi-step extract-and-verify task even after four prompt iterations (see [Post-ship hardening](#post-ship-hardening) below).
 
 #### The drift being caught
 
@@ -1478,7 +1478,7 @@ get_weather(Berlin)  → tempC=22, conditions=partly cloudy
 
 Non-weather tools (flights, hotels, bookings) are dropped — they can't back or undermine a forecast claim. Empty collector renders as `(no forecast tool calls)`. Multiple calls for the same city produce multiple lines and the classifier reasons across them.
 
-**Classifier prompt.** 10 few-shot examples, balanced between `BACKED` and `UNBACKED_FORECAST`. Explicit definitions for attribution (specific date + weather claim), non-attribution (hedged / vague / planning intent / bare mentions), and a tie-breaking rule (when uncertain → `BACKED`). Two examples (9 and 10) were added after the initial eval run false-fired on the planning preamble *"Let me plan a sunny weekend in Berlin..."* — same false-positive pattern that hit the Phase 4 booking classifier and the same fix (add planning-intent carve-out to the prompt).
+**Classifier prompt.** 12 few-shot examples, balanced between `BACKED` and `UNBACKED_FORECAST`. Explicit definitions for attribution (specific date + weather claim), non-attribution (hedged / vague / planning intent / bare mentions), and a tie-breaking rule (when uncertain → `BACKED`). Two examples (9 and 10) were added mid-flight after the initial eval run false-fired on the planning preamble *"Let me plan a sunny weekend in Berlin..."* — same false-positive pattern that hit the Phase 4 booking classifier and the same fix (add planning-intent carve-out to the prompt). Examples 11 and 12 plus an explicit `ATTRIBUTION REQUIRES EXPLICIT PAIRING` section and a mechanical `DECISION PROCEDURE` were added post-ship after the forecast-horizon-boundary drift surfaced (see [Post-ship hardening](#post-ship-hardening) below); those additions gave the classifier a concrete algorithm — extract every date-and-condition pairing, check each against coverage, trip only if any pairing is outside the covered range — rather than asking it to make a judgment call.
 
 #### Three synthetic cases
 
@@ -1494,15 +1494,51 @@ Same infrastructure as Stage 11 Phase 5. Two must-trip vectors + one must-NOT-tr
 
 Note that this means the four-layer defense-in-depth story from Stage 11 only applies fully to `TravelAgent`. `WeatherAgent` never emits booking claims, so it doesn't need the three booking guardrails — just the forecast one is the correct minimal wiring for it.
 
+#### Agent-side forecast boundary rule
+
+Complements the classifier at the *agent* layer. [buildTravelAgent.ts](src/agents/buildTravelAgent.ts) carries a `FORECAST BOUNDARY RULE (strict)` instruction that spells out — with concrete forbidden and required examples — what the agent should do when the requested weekend crosses the 7-day forecast horizon (e.g. today is 2026-07-18, weekend is 07-24 → 07-26, but the forecast only covers through 07-24):
+
+- **FORBIDDEN:** *"The forecast for July 24-26 is clear"* — a range claim spanning covered + non-covered days.
+- **REQUIRED:** *"July 24 (check-in) shows clear skies. Forecast horizon doesn't extend to July 25-26."* — explicit per-day statement + hedge on the uncovered days.
+
+The classifier is the safety net; the agent prompt is the primary defense. Without the agent rule, `gpt-4o` (TravelAgent) was inconsistently hedging when the horizon partially covered the trip window, forcing the classifier to trip on every regressed reply. With the rule, the agent produces well-hedged output most of the time and the classifier only fires on genuine drift.
+
 #### Fail-open policy
 
 Same as Stage 11: missing collector → pass with warning log (`[guardrail:forecast_attribution] no tool-call collector in context; skipping`); classifier network / quota error → pass with error log. No new policy dimensions.
+
+#### Debug logging (`EVALS_DEBUG=1`)
+
+Both LLM-classifier guardrails ([bookingClaimClassifierOutputGuardrail.ts](src/guardrails/bookingClaimClassifierOutputGuardrail.ts) and [forecastAttributionOutputGuardrail.ts](src/guardrails/forecastAttributionOutputGuardrail.ts)) emit a `console.warn` on trip that includes the verdict, the reply text, and the tool-history summary the classifier saw — but only when the `EVALS_DEBUG` env var is set to `1`. Off by default so production stdout stays clean; enable during eval iteration to triage trip-side false positives without having to re-instrument. Truncated to 1500 chars per field to keep log lines scannable.
+
+```powershell
+& { $env:EVALS_DEBUG='1'; npm run evals }   # verbose classifier trip diagnostics
+```
+
+Added during the Stage 12 post-ship debugging (below) when we needed to see what specific reply text the forecast classifier was tripping on — turned out to be the difference between iterating blind and iterating from data.
 
 #### Cleanup: `verbatim-price-across-turns` extractor
 
 Small orthogonal fix landed in the same stage. The per-night-price extractor in [src/evals/cases/verbatimPriceAcrossTurns.ts](src/evals/cases/verbatimPriceAcrossTurns.ts) and [src/evals/cases/verbatimHotelPrices.ts](src/evals/cases/verbatimHotelPrices.ts) previously matched only tight-join phrasings like `"Price per Night: €120"` — its regex allowed only `\s*[:\-–]?\s*` (whitespace / dash / colon) between the label and the `€`. The model sometimes writes prose-interlaced phrasings like *"per night for the Standard Room at City Budget Inn is €94.30"*, which slipped through and made the extractor count 0 prices → the "at least one per-night price quoted" assertion failed vacuously despite a real price appearing in the reply.
 
 Fix: replace the tight-join with `[^€\n]{0,60}?` (up to 60 non-€ chars, non-greedy) between the "per night" label and the `€`. Now catches labelled tight-join AND prose-interlaced forms. Applied to both files (identical bug in both).
+
+#### Cleanup: fixture-date drift
+
+Five eval fixtures hard-coded the query `"for July 17 to July 19, 2026, 2 guests"`. That worked when the wall clock was earlier than July 17, 2026 — the agent would search flights and hotels for those dates. Once the clock advanced past that window, the agent (correctly, per its "only search within the flight/hotel window" rule) refused to search past dates and offered *"the next Friday check-in date is 2026-07-24"* instead. The fixtures then failed because their assertions expected specific `search_hotels` / `propose_booking` calls that never fired.
+
+Fix: swap `"for July 17 to July 19, 2026"` for the relative `"for next weekend"` in all five fixtures — [hotelsInBerlin.ts](src/evals/cases/hotelsInBerlin.ts), [verbatimHotelPrices.ts](src/evals/cases/verbatimHotelPrices.ts), [onTopicFollowUpAllowed.ts](src/evals/cases/onTopicFollowUpAllowed.ts), [bookingProposalNoFinalityClaim.ts](src/evals/cases/bookingProposalNoFinalityClaim.ts), and [verbatimPriceAcrossTurns.ts](src/evals/cases/verbatimPriceAcrossTurns.ts). The agent's system prompt has built-in weekend semantics (*"default to Fri check-in → Sun check-out"*), so *"next weekend"* resolves to a valid future Fri-Sun within the demo window as the wall clock advances. Same pattern `sunny-weekend-from-athens` already used and why it never suffered this drift.
+
+#### Post-ship hardening
+
+Stage 12 shipped clean (all 73 assertions green on the commit-run), but the very next day's full-suite verification surfaced two related failures — one fixture drift (above) and one agent + classifier drift on `sunny-weekend-from-athens`. Both traced to time-sensitive interactions between the demo's data windows and the wall clock. The fix cascade produced four discrete changes:
+
+1. **Fixture-date fix** — see subsection above.
+2. **Agent-side `FORECAST BOUNDARY RULE`** — see [Agent-side forecast boundary rule](#agent-side-forecast-boundary-rule) above. The original soft instruction ("note that the forecast doesn't extend that far") was inconsistently followed by `gpt-4o` (TravelAgent) when the horizon partially covered the trip; the strict rule with concrete forbidden/required examples fixed that.
+3. **Classifier prompt additions** — Examples 11 and 12 plus explicit `ATTRIBUTION REQUIRES EXPLICIT PAIRING` and `DECISION PROCEDURE` sections. Even after the agent produced well-hedged replies, `gpt-4o-mini` (the classifier) kept over-inferring attribution from planning-echo headers and bare trip dates.
+4. **Classifier model swap** — `gpt-4o-mini` → `gpt-4o` on the forecast classifier only. Four prompt iterations couldn't overcome mini's ceiling on the multi-step extract-and-verify task; the capability jump to `gpt-4o` closed it in one run. Booking classifier stays on `gpt-4o-mini` (still passing evals; YAGNI on preemptive symmetry).
+
+Cost impact of the model swap is minor because the pre-filter still gates most turns (only weather-word turns hit the LLM) and each call is bounded at 16 output tokens. Debug logging gated behind `EVALS_DEBUG=1` (see [Debug logging](#debug-logging-evals_debug1) above) was the diagnostic tool that made this iteration tractable — without it we would have been guessing at what the classifier was seeing.
 
 #### File index
 
@@ -1520,7 +1556,7 @@ src/evals/cases/                              (per-night extractor cleanup)
 └── verbatimPriceAcrossTurns.ts               (same fix)
 ```
 
-Modified: `src/agents/buildTravelAgent.ts` (added forecast guardrail as 4th layer), `src/agents/buildWeatherAgent.ts` (replaced pass-through stub with forecast guardrail, attached tool-collector hook), `src/evals/runner.ts` (registered 3 new synthetic cases in `SYNTHETIC_CASES`).
+Modified: `src/agents/buildTravelAgent.ts` (added forecast guardrail as 4th layer; post-ship: added strict `FORECAST BOUNDARY RULE`), `src/agents/buildWeatherAgent.ts` (replaced pass-through stub with forecast guardrail, attached tool-collector hook), `src/evals/runner.ts` (registered 3 new synthetic cases in `SYNTHETIC_CASES`), five eval fixtures (post-ship: relative-date fix — see [Cleanup: fixture-date drift](#cleanup-fixture-date-drift)), `src/guardrails/bookingClaimClassifierOutputGuardrail.ts` and `src/guardrails/forecastAttributionOutputGuardrail.ts` (post-ship: `EVALS_DEBUG=1`-gated trip diagnostics; forecast classifier only: model swap to `gpt-4o` and Examples 11-12 + `DECISION PROCEDURE`).
 
 Unused after Stage 12: [src/guardrails/passThroughOutputGuardrail.ts](src/guardrails/passThroughOutputGuardrail.ts). Left in place — no runtime consumers, but referenced in the Stage 9 Phase 1 narrative above as the original plumbing stub.
 
