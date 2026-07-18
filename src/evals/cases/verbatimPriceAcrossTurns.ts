@@ -20,7 +20,7 @@ export const verbatimPriceAcrossTurns: Case = {
   description:
     'Multi-turn: hotel search then follow-up confirmation — per-night prices in the follow-up must match tool output.',
   turns: [
-    'Find me hotels in Berlin for July 17 to July 19, 2026, 2 guests.',
+    'Find me hotels in Berlin for next weekend, 2 guests.',
     'Great, let me book the first one — how much per night was it?',
   ],
   expect: (out) => {

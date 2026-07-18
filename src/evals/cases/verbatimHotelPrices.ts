@@ -14,7 +14,7 @@ export const verbatimHotelPrices: Case = {
   name: 'verbatim-hotel-prices',
   description:
     'Hotel per-night prices in the summary must appear in search_hotels output — no hallucinated prices.',
-  user: 'Find me hotels in Berlin for July 17 to July 19, 2026, 2 guests.',
+  user: 'Find me hotels in Berlin for next weekend, 2 guests.',
   expect: (out) => {
     // Comments on the shared verifier live in @/utils/priceAppearsInBlob.
 

@@ -19,7 +19,7 @@ export const hotelsInBerlin: Case = {
   name: 'hotels-in-berlin',
   description:
     'Hotel-only search — TravelAgent handoff, search_hotels called, hotel details in summary.',
-  user: 'Find me a hotel in Berlin for July 17 to July 19, 2026, 2 guests.',
+  user: 'Find me a hotel in Berlin for next weekend, 2 guests.',
   expect: (out) => [
     noErrorsOrGuardrails(out),
     finalAgent(out, 'TravelAgent'),

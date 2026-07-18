@@ -191,7 +191,15 @@ export const bookingClaimClassifierOutputGuardrail: OutputGuardrail = {
     }
 
     const isUnbacked = verdict.startsWith('UNBACKED_FINALITY');
-
+    if (isUnbacked && process.env.EVALS_DEBUG === '1') {
+      // Diagnostic log for triaging trip-side false positives during
+      // eval iteration. Off by default; enable via EVALS_DEBUG=1 so
+      // production stdout stays clean. Truncated to keep the log line
+      // scannable.
+      console.warn(
+        `[guardrail:booking_claim_classifier] TRIP verdict=${verdict}\n  reply: ${text.slice(0, 1500)}${text.length > 1500 ? '…' : ''}\n  toolHistory: ${summary.slice(0, 1500)}${summary.length > 1500 ? '…' : ''}`,
+      );
+    }
     return {
       tripwireTriggered: isUnbacked,
       outputInfo: {

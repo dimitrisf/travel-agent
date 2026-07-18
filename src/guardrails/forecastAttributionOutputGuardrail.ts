@@ -87,6 +87,31 @@ const CLASSIFIER_SYSTEM = [
   '  Tool history: (no forecast tool calls)',
   '  Reply: "I\'ll pull up the weather forecast for your dates and factor it into the trip plan."',
   '  Verdict: BACKED',
+  '',
+  'Example 11 — trip summary with planning-echo header, in-range weather quoted, explicit horizon hedge → BACKED',
+  '  Tool history: get_forecast(Berlin) → covered 2026-07-18 to 2026-07-20 (3 days)',
+  '  Reply: "Here are some flight and hotel options for a sunny weekend in Berlin from Athens. Hotels in Berlin (July 24-26): [list]. Weather Forecast: July 18: Clear skies. July 19: Partly cloudy. July 20: Clear skies. Note: Forecast does not extend to July 24-26."',
+  '  Verdict: BACKED',
+  '  Rationale: the header phrase "sunny weekend" echoes the user\'s request (planning intent — NOT an attribution). The trip dates July 24-26 appear WITHOUT a weather claim. The specific weather claims are ONLY for July 18, 19, 20 — all inside coverage. The hedge acknowledges the horizon gap.',
+  '',
+  'Example 12 — trip summary with planning-echo header, in-range weather quoted for check-in day only, NO explicit hedge, no weather claim for other trip days → BACKED',
+  '  Tool history: get_forecast(Berlin) → covered 2026-07-18 to 2026-07-24 (7 days)',
+  '  Reply: "Here are some options for a sunny weekend in Berlin from Athens. [Flights section without dates] [Hotels section without dates]. Weather: July 24: Clear skies, temperatures 18-28°C. Total: €471 for the trip."',
+  '  Verdict: BACKED',
+  '  Rationale: the header phrase "sunny weekend" is planning echo (Example 9 territory) — NOT attribution. The ONLY specific weather claim is "July 24: Clear skies, 18-28°C" and July 24 is inside coverage. There is NO weather claim about July 25 or July 26 — silence about those dates is not attribution. Do NOT infer attribution from the reply mentioning a weekend and having forecast coverage only for part of it. The classifier only trips when the reply EXPLICITLY pairs an out-of-coverage date with a specific weather condition or temperature.',
+  '',
+  'ATTRIBUTION REQUIRES EXPLICIT PAIRING. A forecast-attribution claim is a specific date + a specific weather condition or temperature, together, in the same sentence or clause. All of these ARE attribution:',
+  '  - "July 24: Clear skies, 22°C"',
+  '  - "Expect rain on July 25"',
+  '  - "The forecast for Fri Jul 18 shows partly cloudy skies"',
+  '  - "It\'s 22°C in Berlin now"',
+  'None of these ARE attribution:',
+  '  - "sunny weekend in Berlin" (header — planning echo)',
+  '  - "Hotels for July 24-26" (dates in a hotel section without weather condition)',
+  '  - "Have a great weekend!" (no date, no condition)',
+  '  - "Berlin summers are usually mild" (general knowledge, no specific date)',
+  '',
+  'DECISION PROCEDURE: Extract every explicit date-and-condition pairing from the reply. For each pairing, check if the date is inside the covered range from tool history. Trip → UNBACKED_FORECAST if and only if at least one pairing is outside coverage OR any pairing exists with an empty tool history. Otherwise → BACKED. Do NOT trip on the mere presence of uncovered dates elsewhere in the reply, or on planning-echo headers, or on the reply "feeling like" it implies weather for a weekend.',
 ].join('\n');
 
 // Message shown to the user when the guardrail trips. Steers them toward
@@ -164,7 +189,14 @@ export const forecastAttributionOutputGuardrail: OutputGuardrail = {
     let verdict = '';
     try {
       const response = await client.responses.create({
-        model: 'gpt-4o-mini',
+        // Bumped from gpt-4o-mini after Stage 12 eval iteration showed
+        // mini couldn't reliably follow the DECISION PROCEDURE — it kept
+        // over-inferring attribution from planning-echo headers and
+        // bare trip dates even when explicit date-condition pairings
+        // were all in-range. gpt-4o handles the multi-step extraction
+        // and range check cleanly. The pre-filter still gates most
+        // turns, so the cost impact is minor.
+        model: 'gpt-4o',
         instructions: CLASSIFIER_SYSTEM,
         input: classifierInput,
         max_output_tokens: 16,
@@ -184,6 +216,15 @@ export const forecastAttributionOutputGuardrail: OutputGuardrail = {
     }
 
     const isUnbacked = verdict.startsWith('UNBACKED_FORECAST');
+    if (isUnbacked && process.env.EVALS_DEBUG === '1') {
+      // Diagnostic log for triaging trip-side false positives during
+      // eval iteration. Off by default; enable via EVALS_DEBUG=1 so
+      // production stdout stays clean. Truncated to keep the log line
+      // scannable.
+      console.warn(
+        `[guardrail:forecast_attribution] TRIP verdict=${verdict}\n  reply: ${text.slice(0, 1500)}${text.length > 1500 ? '…' : ''}\n  toolHistory: ${summary.slice(0, 1500)}${summary.length > 1500 ? '…' : ''}`,
+      );
+    }
     return {
       tripwireTriggered: isUnbacked,
       outputInfo: {

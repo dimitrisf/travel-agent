@@ -17,7 +17,7 @@ export const onTopicFollowUpAllowed: Case = {
   description:
     'Multi-turn: establish a travel context, then send a short follow-up — guardrail must let it through.',
   turns: [
-    'Find me hotels in Berlin for July 17 to July 19, 2026, 2 guests.',
+    'Find me hotels in Berlin for next weekend, 2 guests.',
     'Book the first one.',
   ],
   expect: (out) => [
