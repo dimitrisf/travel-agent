@@ -1560,6 +1560,91 @@ Modified: `src/agents/buildTravelAgent.ts` (added forecast guardrail as 4th laye
 
 Removed post-ship: `src/guardrails/passThroughOutputGuardrail.ts`. Originally the Stage-9-Phase-1 plumbing stub (see [Stage 9 Phase 1](#phase-1--plumbing) above) — replaced on `WeatherAgent` when the real forecast guardrail landed in Stage 12, then deleted in a follow-up cleanup once there were no runtime consumers. The Stage 9 Phase 1 narrative still describes what the stub was and why it existed.
 
+### Stage 13 — Search-result fabrication
+
+Rounds out the guardrail suite with a **fifth** output layer on `TravelAgent`: catches specific search-result claims that don't appear in tool output. Drift target: agent quotes a flight number or hotel name that no `search_flights` / `search_hotels` result ever returned — either invented or referenced without a supporting tool call.
+
+Structurally like [Stage 11 Phase 3](#phase-3--deterministic-cross-reference-layer)'s cross-reference layer, not like Stage 12's classifier. Search results are structured data — flight numbers match a tight regex, hotel names appear as bolded proper nouns in bullet lists — so no LLM is needed. Extract candidate tokens from the reply, verify each against the collector's raw tool blob, trip on the first miss. Cheap, verifiable, no prompt-iteration risk.
+
+#### The drift being caught
+
+Two failure modes trip the guardrail:
+
+1. **Fabricated flight number.** Reply mentions a token matching the flight-number pattern (`\b[A-Z][A-Z0-9]\s?\d{3,4}\b` — 2-char IATA code + 3-4 digits, catching both letter-letter codes like `LH 1753` and letter-digit codes like `A3 824`) that doesn't appear in any `search_flights` tool output.
+2. **Fabricated hotel name.** Reply contains a markdown-bolded phrase matching the hotel-indicator vocabulary (`Hotel`, `Inn`, `Plaza`, `Resort`, `Suites`, `Palace`, `Lodge`, `Manor`, `Villa`, `Guesthouse`, `Hostel`, `B&B`) that doesn't overlap with any hotel name returned by `search_hotels`.
+
+Non-fabrication cases (all pass through):
+- Reply that mentions no search-shaped tokens at all.
+- Prices — deferred to a later stage; the existing `verbatimHotelPrices` and `verbatimPriceAcrossTurns` extractors cover them at eval time already.
+- Narrative claims about search results (*"multiple morning departures available"*) without naming specific tokens.
+
+#### Extraction and matching
+
+**Flight numbers.** Regex extraction + whitespace-stripped case-insensitive substring match. Handles cosmetic reformatting (`A3 824` in reply vs `a3824` in blob) via normalization on both sides. Small false-positive risk (rare non-airline tokens like fiscal-quarter labels `Q4 2026` matching the pattern) is accepted — the substring check against real tool output filters the vast majority.
+
+**Hotel names.** Two-part strategy:
+
+1. **Candidate extraction** — three filters on markdown-bolded phrases:
+   - Must contain a hotel-indicator word (excludes bold prices, `**Standard Room**`, `**Total**`, etc.).
+   - Must have 2+ word tokens after stripping non-word characters (excludes bare-indicator labels like `**Hotel:**`).
+   - Must not end in `:` (excludes section-header labels like `**Hotel Total:**`, `**Hotel Options:**` that match the first two filters but are labels, not names).
+2. **Bidirectional match** — candidate is legitimate if it contains a real hotel name from the blob OR is contained in one. This handles cases where the agent decorates a real name (`**With City Budget Inn:**` normalizes to `withcitybudgetinn`, which contains the real `citybudgetinn`, so it passes) while still tripping on genuinely fabricated names (`**Berlin Grand Palace Hotel**` contains no real name and is contained in none).
+
+Real hotel names are extracted from the raw JSON blob via a light regex on `"hotel":"…"` fields — a full parse isn't needed since we only care about the name values.
+
+Both matching strategies use normalized comparison (lowercase, whitespace-stripped) so cosmetic formatting differences don't trip the guardrail. All three of the hotel-name filters landed during Stage 13's eval iteration — each addressed a specific false-positive pattern the previous filter set had missed.
+
+#### Three synthetic cases
+
+Same infrastructure as [Stage 11 Phase 5](#phase-5--adversarial-eval-cases-synthetic-direct-invocation) / Stage 12. Two must-trip vectors + one must-NOT-trip regression:
+
+- **`fabricatedFlightNumberTrips`** — collector has flights A3 824 and A3 825; reply names A3 999 as the outbound → trips with `patternName: 'fabricated-flight-number'`, `matchedText: 'A3 999'`.
+- **`fabricatedHotelNameTrips`** — collector has "City Budget Inn" and "Hotel Berlin Central"; reply lists "Berlin Grand Palace Hotel" as a second option → trips with `patternName: 'fabricated-hotel-name'`. The reply also includes a legit hotel to prove the extractor iterates in order and reports the first mismatch.
+- **`legitSearchResultsAllowed`** — reply quotes real flight numbers and real hotel names verbatim (including decorated labels like `**With City Budget Inn:**` that exercise the bidirectional match) → does NOT trip. False-positive regression check.
+
+#### Wiring — `TravelAgent` only
+
+Added as the **fifth** output guardrail on `TravelAgent`, after the three booking guardrails ([Stage 11](#stage-11--booking-truthfulness-cross-reference)) and the forecast-attribution classifier ([Stage 12](#stage-12--forecast-attribution-honesty)). Not wired on `WeatherAgent` — it doesn't emit search-result claims. Reuses the tool-collector hook already attached to `TravelAgent`; no new infrastructure.
+
+The full `TravelAgent` output-guardrail chain now:
+
+1. Regex — known booking-finality phrasings (Stage 9 Phase 3).
+2. Cross-reference — booking data (Stage 11 Phase 3).
+3. LLM classifier — novel booking finality (Stage 11 Phase 4).
+4. LLM classifier — forecast attribution (Stage 12).
+5. Deterministic — search-result fabrication (Stage 13).
+
+Any layer can trip; the first trip halts the chain. Deterministic checks (layers 1, 2, 5) are cheapest, so LLM layers only see traffic that survived the fast checks — which naturally keeps model-call cost down.
+
+#### Agent-side origin-rule relaxation
+
+Folded into Stage 13 because it surfaced during eval verification. The original `TravelAgent` instruction *"If origin is missing, do NOT call `search_flights`, `search_hotels`, `get_forecast`, or any other tool"* blocked hotel-only queries — hotels genuinely don't need a flight origin. Result: model behavior became non-deterministic on prompts like *"Find me hotels in Berlin for next weekend"* — sometimes asked for origin (following the rule strictly), sometimes drifted and listed hotels without a tool call. The Stage 13 guardrail correctly caught the drift path, but the root cause was the ambiguous rule.
+
+Fix in [buildTravelAgent.ts](src/agents/buildTravelAgent.ts):
+
+- Origin is only required when the query needs flights (weekend trip, round-trip, "trip to X").
+- Hotel-only queries (*"find me a hotel in X"*, *"search hotels for these dates"*) can call `search_hotels` immediately without origin.
+- Explicit reference to the new guardrail: *"Do NOT list hotels in prose without first calling `search_hotels`; the search-result-fabrication guardrail will trip on hotel names that aren't in the tool output."* This makes the guardrail self-reinforcing at the prompt level — the agent is told about the safety net that will catch it if it shortcuts.
+
+#### Fail-open policy
+
+Same as [Stage 11](#stage-wide-fail-open-policy) / [Stage 12](#fail-open-policy): missing collector → pass with warning log (`[guardrail:search_result_fabrication] no tool-call collector in context; skipping`). No classifier-error branch because this guardrail has no LLM to fail.
+
+#### File index
+
+```
+src/guardrails/
+└── searchResultFabricationOutputGuardrail.ts   (deterministic cross-reference)
+
+src/evals/synthetic/                              (extends the Stage 11 Phase 5 harness)
+├── fabricatedFlightNumberTrips.ts               (must-trip: invented flight number)
+├── fabricatedHotelNameTrips.ts                  (must-trip: invented hotel name)
+└── legitSearchResultsAllowed.ts                 (must-NOT-trip: verbatim reply,
+                                                    exercises bidirectional match)
+```
+
+Modified: `src/agents/buildTravelAgent.ts` (added guardrail as 5th layer; relaxed origin-ask rule for hotel-only queries and added explicit no-drift-before-search-tool instruction that references the guardrail by name), `src/evals/runner.ts` (registered 3 new synthetic cases in `SYNTHETIC_CASES`).
+
 ---
 
 > **Note on the historical Stage narratives above:** file paths in Stages 1–7 reflect the layout at the time each stage was written. Where those don't match the current file tree, the [file index](#file-index) at the bottom of this doc is authoritative.

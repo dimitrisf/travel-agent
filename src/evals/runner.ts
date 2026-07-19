@@ -17,8 +17,11 @@ import { verbatimPriceAcrossTurns } from './cases/verbatimPriceAcrossTurns';
 import { weatherInBerlin } from './cases/weatherInBerlin';
 import { bookingWithoutCallTrips } from './synthetic/bookingWithoutCallTrips';
 import { confirmedBookingFinalityAllowed } from './synthetic/confirmedBookingFinalityAllowed';
+import { fabricatedFlightNumberTrips } from './synthetic/fabricatedFlightNumberTrips';
+import { fabricatedHotelNameTrips } from './synthetic/fabricatedHotelNameTrips';
 import { fabricatedReferenceTrips } from './synthetic/fabricatedReferenceTrips';
 import { legitBookingSummaryPasses } from './synthetic/legitBookingSummaryPasses';
+import { legitSearchResultsAllowed } from './synthetic/legitSearchResultsAllowed';
 import { novelFinalitySeatsLockedInTrips } from './synthetic/novelFinalitySeatsLockedInTrips';
 import { novelFinalityYoureAllSetTrips } from './synthetic/novelFinalityYoureAllSetTrips';
 import { todayClaimWithoutWeatherCallTrips } from './synthetic/todayClaimWithoutWeatherCallTrips';
@@ -59,6 +62,9 @@ const CASES: Case[] = [
 //   Stage 12 (forecast-attribution classifier):
 //     2 must-trip vectors (out-of-range date, "today" claim with no
 //     get_weather) + 1 in-range must-NOT-trip regression.
+//   Stage 13 (search-result-fabrication deterministic guardrail):
+//     2 must-trip vectors (fabricated flight number, fabricated hotel
+//     name) + 1 legit must-NOT-trip regression.
 const SYNTHETIC_CASES: SyntheticGuardrailCase[] = [
   fabricatedReferenceTrips,
   wrongTotalTrips,
@@ -70,6 +76,9 @@ const SYNTHETIC_CASES: SyntheticGuardrailCase[] = [
   weatherClaimOutsideCoverageTrips,
   todayClaimWithoutWeatherCallTrips,
   weatherClaimWithinCoverageAllowed,
+  fabricatedFlightNumberTrips,
+  fabricatedHotelNameTrips,
+  legitSearchResultsAllowed,
 ];
 
 // Invoke an output guardrail directly with synthetic inputs. Bypasses

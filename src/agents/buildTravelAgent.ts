@@ -3,6 +3,7 @@ import { bookingClaimClassifierOutputGuardrail } from '@/guardrails/bookingClaim
 import { bookingCrossReferenceOutputGuardrail } from '@/guardrails/bookingCrossReferenceOutputGuardrail';
 import { bookingTruthfulnessOutputGuardrail } from '@/guardrails/bookingTruthfulnessOutputGuardrail';
 import { forecastAttributionOutputGuardrail } from '@/guardrails/forecastAttributionOutputGuardrail';
+import { searchResultFabricationOutputGuardrail } from '@/guardrails/searchResultFabricationOutputGuardrail';
 import { attachToolCollectorHook } from './agentRunContext';
 
 // The travel/concierge specialist. Owns both MCPs so it can factor weather
@@ -29,7 +30,7 @@ export function buildTravelAgent(
     // WeatherAgent and TriageAgent keep gpt-4o-mini since their prompts are
     // small.
     model: 'gpt-4o',
-    // Four output guardrails run in sequence; any can trip.
+    // Five output guardrails run in sequence; any can trip.
     //   1. Regex (fast, cheap) — known finality-claim phrasings.
     //   2. Cross-reference (Stage 11 Phase 3) — booking-shaped claims must
     //      match what propose_booking actually returned. Requires the
@@ -41,16 +42,20 @@ export function buildTravelAgent(
     //   4. Forecast attribution (Stage 12) — weather claims about dates the
     //      get_forecast tool never covered. Same classifier pattern as (3)
     //      but reads get_forecast / get_weather records from the collector.
+    //   5. Search-result fabrication (Stage 13) — deterministic check that
+    //      flight numbers / hotel names quoted in the reply actually appear
+    //      in search_flights / search_hotels output. Same collector; no LLM.
     outputGuardrails: [
       bookingTruthfulnessOutputGuardrail,
       bookingCrossReferenceOutputGuardrail,
       bookingClaimClassifierOutputGuardrail,
       forecastAttributionOutputGuardrail,
+      searchResultFabricationOutputGuardrail,
     ],
     instructions: [
       `You are the Travel specialist and trip planner. Today is ${today} (${todayWeekday}). Upcoming Fridays: ${upcomingFridays.join(', ')}.`,
       'When the user asks for a "weekend", default to Fri check-in → Sun check-out (2 nights). If the user says "long weekend" or "3-day weekend", use Fri → Mon (3 nights). Always verify the check-in date is a Friday from the list above and the check-out is the Sunday or Monday that follows.',
-      'ORIGIN IS REQUIRED before any `search_flights` call. Check the current turn and earlier conversation for a stated departure city. A destination alone ("weekend in Berlin", "trip to Tokyo") does NOT imply an origin — never guess London, Athens, or anywhere else. If origin is missing, your ONLY action this turn is to ask a single question like "Where are you flying from?" — do NOT call `search_flights`, `search_hotels`, `get_forecast`, or any other tool. Wait for the user to answer, then proceed.',
+      'ORIGIN IS REQUIRED before any `search_flights` call. Check the current turn and earlier conversation for a stated departure city. A destination alone ("weekend in Berlin", "trip to Tokyo") does NOT imply an origin — never guess London, Athens, or anywhere else. If origin is missing AND the query needs flights (weekend trip, round-trip, "trip to X", any flight-adjacent language), your ONLY action this turn is to ask a single question like "Where are you flying from?" — do NOT call `search_flights`, `get_forecast`, or `search_hotels` for that trip. Wait for the user to answer, then proceed. HOWEVER, hotel-only queries ("find me a hotel in X", "search hotels in Berlin for these dates") DO NOT need origin — call `search_hotels` immediately without asking for origin. Do NOT list hotels in prose without first calling `search_hotels`; the search-result-fabrication guardrail will trip on hotel names that aren\'t in the tool output.',
       'Round-trip vs one-way: a "weekend", "trip", or any multi-night stay is a round trip — you MUST call `search_flights` with BOTH `departure_date` and `return_date`, and you MUST include BOTH the outbound and return leg IDs when you eventually propose a booking. Only skip the return if the user explicitly says "one-way". Never label a round-trip result as "one way" (or vice versa).',
       'ARITHMETIC RULE for round-trip totals: BEFORE writing any total that includes a flight, compute `flight_total = outbound_price + return_price`. Then use `flight_total` (NOT the outbound price alone) when summing with hotel prices. Show your work explicitly. CORRECT example (outbound €138, return €145, hotel €188.60): "Flight €138 + €145 = €283. Trip total: €283 + €188.60 = €471.60." INCORRECT: "Flight €138 + Hotel €188.60 = €326.60" — this quotes one leg and is a bug. Recheck every total before writing it.',
       'QUOTE PRICES VERBATIM. When re-referencing a price you already showed the user (or that came from a tool output), copy the EXACT number — never regenerate it, round it, or derive per-night from total (or vice versa). Both `price_per_night` and `total_price` come back from `search_hotels` directly; use whichever the user asked about, exactly as returned. If you find yourself writing a new price for the same option in a follow-up turn, stop and re-quote from your prior response instead.',
