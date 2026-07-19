@@ -1645,6 +1645,94 @@ src/evals/synthetic/                              (extends the Stage 11 Phase 5 
 
 Modified: `src/agents/buildTravelAgent.ts` (added guardrail as 5th layer; relaxed origin-ask rule for hotel-only queries and added explicit no-drift-before-search-tool instruction that references the guardrail by name), `src/evals/runner.ts` (registered 3 new synthetic cases in `SYNTHETIC_CASES`).
 
+### Stage 14 — Price fabrication
+
+Rounds out the deterministic guardrail suite with a **sixth** output layer on `TravelAgent`: catches specific per-night hotel prices and flight per-leg prices that don't appear in tool output. Structurally identical to Stage 13's search-result-fabrication guardrail — extract context-anchored price tokens, verify each against the collector's tool blob, trip on the first miss. Reuses [priceAppearsInBlob](src/utils/priceAppearsInBlob.ts) from `src/utils/`, already proven at eval time by `verbatimHotelPrices.ts` and `verbatimPriceAcrossTurns.ts`.
+
+Deterministic on purpose. Prices are structured tokens with well-understood context signals (per-night phrasings, flight-number adjacency, leg-label anchors). Same rationale as Stage 13.
+
+#### The drift being caught
+
+Two failure modes trip the guardrail:
+
+1. **Fabricated per-night hotel price.** Reply quotes a per-night price in `"€X/night"`, `"Price per Night: €X"`, or `"Price/Night: €X"` phrasing that doesn't appear in any `search_hotels` tool output.
+2. **Fabricated flight per-leg price.** Reply quotes a price adjacent to a flight number (either direction) or a leg label (*"Outbound"*, *"Return"*, *"Inbound"*, *"One-way"*) that doesn't appear in any `search_flights` tool output.
+
+Deliberately NOT caught:
+
+- **Trip totals from agent arithmetic** — the model regularly writes computed sums like *"Flight €138 + €145 = €283"* or *"Grand Total: €471.60"*. These aren't in the tool blob; treating them as fabrication would false-positive on legit arithmetic.
+- **User budget echoes** — *"under €600 total"* is the user's number, not tool-sourced.
+- **Booking totals** — already covered by [Stage 11 Phase 3 check (b)](#phase-3--deterministic-cross-reference-layer).
+
+#### Extraction and matching
+
+**Per-night hotel prices** — two patterns lifted verbatim from `verbatimHotelPrices.ts`:
+
+- **Inline:** `€120/night`, `€120 per night`.
+- **Labelled:** `Price per Night: €120`, `nightly rate: €120`, `Price/Night: €120` (slash form), `per night ... is €120` (prose-interlaced with up to 60 non-€ chars between the label and the price).
+
+Reusing the eval-time extractor guarantees behavioral consistency between the runtime guardrail and the eval-time assertion. Both were extended in the same Stage 14 cleanup to accept the "Price/Night" slash phrasing.
+
+**Flight per-leg prices** — three new patterns:
+
+1. **Flight-number-anchored, forward:** flight number → €NNN, e.g. `A3 824 for €138` or `A3 824 (€138)`.
+2. **Flight-number-anchored, reverse:** €NNN → flight number, e.g. `€138 for A3 824`.
+3. **Leg-label anchored:** `Outbound`, `Return`, `Inbound`, `One-way` → €NNN, e.g. `Outbound: €138`, `Return €145`.
+
+All three patterns include a **negative lookahead for `total`** between the anchor and the €. This is the critical false-positive filter — without it, phrases like *"Flight A3 824 total: €283"* would extract €283 (the computed sum) and trip on legit arithmetic. The lookahead window is 80 chars for flight-number patterns (long-ish contexts appear in bulleted lists) and 20 chars for leg-label patterns (tighter context).
+
+**Matching** — both check types use `priceAppearsInBlob`, which normalizes across integer/decimal formatting (`120` matches `120.5` matches `120.00`) and uses word-boundary anchors to avoid substring collisions (e.g. `120.5` shouldn't match inside `1120.5`).
+
+#### Three synthetic cases
+
+Same infrastructure as [Stage 11 Phase 5](#phase-5--adversarial-eval-cases-synthetic-direct-invocation), Stage 12, Stage 13. Two must-trip vectors + one must-NOT-trip regression:
+
+- **`fabricatedPerNightPriceTrips`** — collector has "City Budget Inn" at €94.30/night; reply quotes €120/night → trips with `patternName: 'fabricated-per-night-price'`, `matchedText: '€120'`.
+- **`fabricatedFlightPriceTrips`** — collector has A3 824 at €138; reply quotes *"A3 824 for €160"* → trips with `patternName: 'fabricated-flight-price'`, `matchedText: '€160'`.
+- **`legitPricesAllowed`** — the load-bearing regression check. Reply contains real per-night prices (€94.30), real per-leg prices (€138, €145), AND computed trip totals (€283 flight sum, €188.60 hotel total, €471.60 grand total). The context-aware patterns must extract only the real per-night and per-leg prices; the totals must be excluded by the `total` negative lookahead and the phrasing requirement. Must NOT trip.
+
+#### Wiring — `TravelAgent` only
+
+Added as the **sixth** output guardrail on `TravelAgent`, after the search-result-fabrication guardrail from Stage 13. Not wired on `WeatherAgent` — it doesn't emit prices. Reuses the tool-collector hook already attached to `TravelAgent`; no new infrastructure.
+
+Full `TravelAgent` chain as of Stage 14:
+
+1. Regex — known booking-finality phrasings (Stage 9 Phase 3).
+2. Cross-reference — booking data (Stage 11 Phase 3).
+3. LLM classifier — novel booking finality (Stage 11 Phase 4).
+4. LLM classifier — forecast attribution (Stage 12).
+5. Deterministic — search-result fabrication (Stage 13).
+6. Deterministic — price fabrication (Stage 14).
+
+Four out of six layers are deterministic (1, 2, 5, 6); two are LLM classifiers (3, 4). Any layer can trip; the first trip halts the chain. Deterministic checks are microseconds each; LLM checks only run if the earlier fast checks didn't trip — natural cost floor.
+
+#### Fail-open policy
+
+Same as [Stage 11](#stage-wide-fail-open-policy) / [Stage 12](#fail-open-policy) / [Stage 13](#fail-open-policy-3): missing collector → pass with warning log (`[guardrail:price_fabrication] no tool-call collector in context; skipping`). No LLM to fail.
+
+#### Cleanup: eval-harness extractor fragility
+
+Same class of bug as Stage 12's `verbatim-price-across-turns` cleanup — model-phrasing non-determinism exposed gaps in the case extractors that had been latent for a while. Three orthogonal fixes landed in Stage 14:
+
+- **[verbatimHotelPrices.ts](src/evals/cases/verbatimHotelPrices.ts) and [verbatimPriceAcrossTurns.ts](src/evals/cases/verbatimPriceAcrossTurns.ts)** — added `price\s*\/\s*night` alternative to the labelled per-night pattern. Catches `"Price/Night: €X"` (slash form) alongside the existing `"Price per Night: €X"` (word form). Same phrasing also picked up by the new Stage 14 runtime guardrail so the runtime and eval-time extractors stay aligned.
+- **[sunnyWeekendFromAthens.ts](src/evals/cases/sunnyWeekendFromAthens.ts)** — the arithmetic assertion's phrase pattern only matched *"trip total"*, *"grand total"*, *"trip cost"*, etc. — but the model sometimes writes just `"Total: €X"` as the trailing label of a per-option block. Added a third pattern `\bTotal\s*:` to pick these up. The lenient "≥1 candidate matches a valid combo" logic tolerates the incidental extraction of subtotal labels (*"Hotel Total: €188.60"*) since those simply fail to match any combo.
+
+Not a Stage 14 code issue — the runtime guardrail worked correctly on first eval run. The phrasing gaps surfaced during the same eval verification, and folding these two fixes in avoids a separate commit for what's really the same class of "regex-fragility exposed by model non-determinism" work.
+
+#### File index
+
+```
+src/guardrails/
+└── priceFabricationOutputGuardrail.ts       (deterministic cross-reference)
+
+src/evals/synthetic/                          (extends the Stage 11 Phase 5 harness)
+├── fabricatedPerNightPriceTrips.ts          (must-trip: invented per-night price)
+├── fabricatedFlightPriceTrips.ts            (must-trip: invented flight price)
+└── legitPricesAllowed.ts                    (must-NOT-trip: real prices + totals)
+```
+
+Modified: `src/agents/buildTravelAgent.ts` (added guardrail as 6th layer), `src/evals/runner.ts` (registered 3 new synthetic cases), `src/evals/cases/verbatimHotelPrices.ts` and `src/evals/cases/verbatimPriceAcrossTurns.ts` (extended per-night pattern with "Price/Night" slash form), `src/evals/cases/sunnyWeekendFromAthens.ts` (added plain "Total:" pattern to the arithmetic assertion's candidate extractor).
+
 ---
 
 > **Note on the historical Stage narratives above:** file paths in Stages 1–7 reflect the layout at the time each stage was written. Where those don't match the current file tree, the [file index](#file-index) at the bottom of this doc is authoritative.

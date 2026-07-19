@@ -271,6 +271,21 @@ function tripTotalArithmeticCheck(out: CaseOutput): {
     if (!Number.isNaN(n)) push(n, pm.index, pm[0].length);
   }
 
+  // (c) Plain "Total: €X" label. The model sometimes just writes "Total:"
+  // as the last line of a per-option summary block instead of a longer
+  // phrase like "Trip Total". This picks up subtotal labels too (e.g.
+  // "Hotel Total: €188.60") but the lenient check tolerates that —
+  // subtotals fail to match a valid combo and get ignored, while real
+  // trip totals do match. Only harm is a slightly noisier candidate list
+  // on failure.
+  const plainTotalPattern =
+    /\bTotal\s*:[^€\d\n]{0,20}€\s*([\d,]+(?:\.\d+)?)/gi;
+  let tm: RegExpExecArray | null;
+  while ((tm = plainTotalPattern.exec(out.finalText)) !== null) {
+    const n = parseFloat(tm[1].replace(/,/g, ''));
+    if (!Number.isNaN(n)) push(n, tm.index, tm[0].length);
+  }
+
   if (candidates.length === 0) {
     // No candidates found at all — the summary doesn't contain any "= €X"
     // equations or trip-total phrases. Dump the tail so we can see what

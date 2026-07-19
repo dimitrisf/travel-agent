@@ -29,14 +29,15 @@ export const verbatimPriceAcrossTurns: Case = {
     const toolBlob = hotelCalls.map((t) => t.output ?? '').join('\n');
 
     // Same two-shape matching as verbatimHotelPrices — inline
-    // ("€120/night") and labelled ("Price per Night: €120", plus
-    // prose-interlaced "per night for the Standard Room at City Budget Inn
-    // is €94.30"). The labelled pattern allows up to 60 non-€ chars between
-    // "per night" and the price to pick up follow-up phrasings.
+    // ("€120/night") and labelled ("Price per Night: €120", "Price/Night:
+    // €120" slash form, plus prose-interlaced "per night for the Standard
+    // Room at City Budget Inn is €94.30"). The labelled pattern allows up
+    // to 60 non-€ chars between "per night" and the price to pick up
+    // follow-up phrasings.
     const stripped = out.finalText.replace(/[*_`]/g, '');
     const perNightPatterns = [
       /€\s*(\d+(?:[.,]\d+)?)\s*(?:\/|per\s+)nights?\b/gi,
-      /(?:price\s+per\s+night|per\s+night|nightly(?:\s+rate)?)[^€\n]{0,60}?€\s*(\d+(?:[.,]\d+)?)/gi,
+      /(?:price\s+per\s+night|per\s+night|nightly(?:\s+rate)?|price\s*\/\s*night)[^€\n]{0,60}?€\s*(\d+(?:[.,]\d+)?)/gi,
     ];
 
     const claimed = perNightPatterns.flatMap((p) =>

@@ -3,6 +3,7 @@ import { bookingClaimClassifierOutputGuardrail } from '@/guardrails/bookingClaim
 import { bookingCrossReferenceOutputGuardrail } from '@/guardrails/bookingCrossReferenceOutputGuardrail';
 import { bookingTruthfulnessOutputGuardrail } from '@/guardrails/bookingTruthfulnessOutputGuardrail';
 import { forecastAttributionOutputGuardrail } from '@/guardrails/forecastAttributionOutputGuardrail';
+import { priceFabricationOutputGuardrail } from '@/guardrails/priceFabricationOutputGuardrail';
 import { searchResultFabricationOutputGuardrail } from '@/guardrails/searchResultFabricationOutputGuardrail';
 import { attachToolCollectorHook } from './agentRunContext';
 
@@ -30,7 +31,7 @@ export function buildTravelAgent(
     // WeatherAgent and TriageAgent keep gpt-4o-mini since their prompts are
     // small.
     model: 'gpt-4o',
-    // Five output guardrails run in sequence; any can trip.
+    // Six output guardrails run in sequence; any can trip.
     //   1. Regex (fast, cheap) — known finality-claim phrasings.
     //   2. Cross-reference (Stage 11 Phase 3) — booking-shaped claims must
     //      match what propose_booking actually returned. Requires the
@@ -45,12 +46,17 @@ export function buildTravelAgent(
     //   5. Search-result fabrication (Stage 13) — deterministic check that
     //      flight numbers / hotel names quoted in the reply actually appear
     //      in search_flights / search_hotels output. Same collector; no LLM.
+    //   6. Price fabrication (Stage 14) — deterministic check that per-night
+    //      hotel prices and flight per-leg prices quoted in the reply
+    //      actually appear in the corresponding tool blob. Context-aware
+    //      extraction to avoid tripping on agent-computed trip totals.
     outputGuardrails: [
       bookingTruthfulnessOutputGuardrail,
       bookingCrossReferenceOutputGuardrail,
       bookingClaimClassifierOutputGuardrail,
       forecastAttributionOutputGuardrail,
       searchResultFabricationOutputGuardrail,
+      priceFabricationOutputGuardrail,
     ],
     instructions: [
       `You are the Travel specialist and trip planner. Today is ${today} (${todayWeekday}). Upcoming Fridays: ${upcomingFridays.join(', ')}.`,

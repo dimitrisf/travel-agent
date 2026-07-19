@@ -18,9 +18,12 @@ import { weatherInBerlin } from './cases/weatherInBerlin';
 import { bookingWithoutCallTrips } from './synthetic/bookingWithoutCallTrips';
 import { confirmedBookingFinalityAllowed } from './synthetic/confirmedBookingFinalityAllowed';
 import { fabricatedFlightNumberTrips } from './synthetic/fabricatedFlightNumberTrips';
+import { fabricatedFlightPriceTrips } from './synthetic/fabricatedFlightPriceTrips';
 import { fabricatedHotelNameTrips } from './synthetic/fabricatedHotelNameTrips';
+import { fabricatedPerNightPriceTrips } from './synthetic/fabricatedPerNightPriceTrips';
 import { fabricatedReferenceTrips } from './synthetic/fabricatedReferenceTrips';
 import { legitBookingSummaryPasses } from './synthetic/legitBookingSummaryPasses';
+import { legitPricesAllowed } from './synthetic/legitPricesAllowed';
 import { legitSearchResultsAllowed } from './synthetic/legitSearchResultsAllowed';
 import { novelFinalitySeatsLockedInTrips } from './synthetic/novelFinalitySeatsLockedInTrips';
 import { novelFinalityYoureAllSetTrips } from './synthetic/novelFinalityYoureAllSetTrips';
@@ -65,6 +68,9 @@ const CASES: Case[] = [
 //   Stage 13 (search-result-fabrication deterministic guardrail):
 //     2 must-trip vectors (fabricated flight number, fabricated hotel
 //     name) + 1 legit must-NOT-trip regression.
+//   Stage 14 (price-fabrication deterministic guardrail):
+//     2 must-trip vectors (per-night hotel price, flight per-leg price)
+//     + 1 legit must-NOT-trip regression (real prices + computed totals).
 const SYNTHETIC_CASES: SyntheticGuardrailCase[] = [
   fabricatedReferenceTrips,
   wrongTotalTrips,
@@ -79,6 +85,9 @@ const SYNTHETIC_CASES: SyntheticGuardrailCase[] = [
   fabricatedFlightNumberTrips,
   fabricatedHotelNameTrips,
   legitSearchResultsAllowed,
+  fabricatedPerNightPriceTrips,
+  fabricatedFlightPriceTrips,
+  legitPricesAllowed,
 ];
 
 // Invoke an output guardrail directly with synthetic inputs. Bypasses
