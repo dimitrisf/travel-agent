@@ -1787,6 +1787,59 @@ Modified: `src/evals/runner.ts` (registered 2 new cases in the `CASES` array).
 
 ---
 
+### Stage 16 — `get_booking` lookup coverage
+
+Follow-up to Stage 15 in the same shape: another feature with prompt-level guidance but no eval coverage. `get_booking` is documented in the `TravelAgent` prompt (*"if the user asks about a prior booking, use `get_booking` with the numeric id"*) but no case actually exercised it. Stage 16 closes the gap with two real eval cases. **Not a guardrail stage** — no new guardrail files, no new synthetic cases.
+
+Pre-Stage-16 surface (all in place before this stage):
+
+- **`get_booking` MCP tool** — takes numeric `id`, returns full booking (`id`, `reference`, `status`, line items).
+- **`BookingCard` UI** — already renders any booking payload, including one fetched via `get_booking`.
+- **TravelAgent prompt** — one line at [buildTravelAgent.ts:93](src/agents/buildTravelAgent.ts#L93) covering when to look up a booking and the reference-vs-numeric-id distinction.
+
+What Stage 16 added: two eval cases + a small prompt tightening driven by the second case's first eval run.
+
+#### Two eval cases
+
+- **`getBookingByNumericIdHappyPath`** — 3-turn: search → propose → ask status. Assertions: `propose_booking` runs on turn 2 (setup anchor, seeds a real numeric id in the model's context), `get_booking` runs on turn 3 (the actual test), and the final message reports the status. The numeric id is not hard-coded — the case relies on the model reading it from the turn-2 `propose_booking` result and passing it to turn 3's `get_booking`, so the case stays robust across DB seed changes.
+- **`getBookingRequiresNumericIdNotReference`** — 1-turn: user asks `"what's the status of my booking BKG-1234?"`. Assertions: `get_booking` NOT called (no guessing `1234` as the numeric id), and the final message asks for the numeric id. Regression check for the reference-vs-id distinction in the agent prompt.
+
+#### Real drift found and fixed (prompt tightening)
+
+The second case failed on its first run — the model extracted `1234` from `BKG-1234` and called `get_booking(1234)`, which 404'd with `BOOKING_NOT_FOUND`. The pre-Stage-16 prompt line said:
+
+> *"use `get_booking` with the numeric id (the reference is human-facing; if you only have the reference, ask for the numeric id)"*
+
+That parenthetical is too gentle — the model read it as "the reference is human-facing, and its digits are the id". Rewrote the rule with three explicit statements ([buildTravelAgent.ts:93](src/agents/buildTravelAgent.ts#L93)):
+
+1. The `BKG-…` reference is human-facing only — **its digit portion is NOT the numeric id**.
+2. `get_booking` will 404 if you pass the reference's digits.
+3. If the user gave only the reference, ask them for the numeric id **before** calling the tool.
+
+Case passed on the re-run. This is the same pattern as Stage 13's hotel-only origin-rule relaxation — a coverage stage surfaces real drift, we harden the prompt, and the new case regression-checks it going forward.
+
+#### No new guardrail work
+
+Considered a deterministic input-side check: intercept `get_booking(id)` when the immediately-preceding user message contained only a `BKG-…` reference. Deferred (YAGNI). Reasoning:
+
+- The prompt tightening above should hold under normal drift — same class of fix as the Stage 13 prompt relaxation, which has been stable since.
+- The failure mode (calling `get_booking` with the wrong id) is **self-correcting** at the app layer — the tool returns a 404 with a clear error code, and the model recovers gracefully by asking the user for the correct id (as observed on the first eval run).
+- No fabrication drift observed — the model didn't invent a status; it truthfully reported the 404 to the user.
+
+If real drift shows up later despite the tightened prompt, the fix would be a small pre-tool-call hook, not a full guardrail file.
+
+#### File index
+
+```
+src/evals/cases/
+├── getBookingByNumericIdHappyPath.ts               (3-turn: search → propose → status lookup)
+└── getBookingRequiresNumericIdNotReference.ts      (1-turn: user gives only BKG-… reference)
+```
+
+Modified: `src/evals/runner.ts` (registered 2 new cases), `src/agents/buildTravelAgent.ts` (line 93 rule tightened to explicitly forbid digit-extraction from the reference).
+
+---
+
 > **Note on the historical Stage narratives above:** file paths in Stages 1–7 reflect the layout at the time each stage was written. Where those don't match the current file tree, the [file index](#file-index) at the bottom of this doc is authoritative.
 
 ---

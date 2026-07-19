@@ -5,6 +5,8 @@ import { getTurns } from './types';
 import { bookingProposalNoFinalityClaim } from './cases/bookingProposalNoFinalityClaim';
 import { cancelProposedBookingHappyPath } from './cases/cancelProposedBookingHappyPath';
 import { cancelWithoutBookingContext } from './cases/cancelWithoutBookingContext';
+import { getBookingByNumericIdHappyPath } from './cases/getBookingByNumericIdHappyPath';
+import { getBookingRequiresNumericIdNotReference } from './cases/getBookingRequiresNumericIdNotReference';
 import { hotelsInBerlin } from './cases/hotelsInBerlin';
 import { injectionLookalikeAllowed } from './cases/injectionLookalikeAllowed';
 import { noBookingPrereqsBeforeOptions } from './cases/noBookingPrereqsBeforeOptions';
@@ -51,6 +53,8 @@ const CASES: Case[] = [
   bookingProposalNoFinalityClaim,
   cancelProposedBookingHappyPath,
   cancelWithoutBookingContext,
+  getBookingByNumericIdHappyPath,
+  getBookingRequiresNumericIdNotReference,
   promptInjectionBlocked,
   injectionLookalikeAllowed,
 ];
