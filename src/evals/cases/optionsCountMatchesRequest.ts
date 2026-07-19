@@ -27,19 +27,22 @@ export const optionsCountMatchesRequest: Case = {
       (t) => t.name === 'search_flights',
     );
 
-    // Count numbered list items at the start of a line — the common shape
-    // for option summaries is `1. **AirlineName**\n   - detail...`. Trailing
-    // items inside a single option (like "1) morning" as a stops label)
-    // won't start a line, so this stays targeted.
+    // Count option enumerations at the start of a line. The model uses two
+    // common shapes interchangeably:
+    //   (a) Markdown numbered list: `1. **AirlineName**\n   - detail...`
+    //   (b) "Option N" heading/label: `### Option 1`, `**Option 1**`,
+    //       `Option 1:`
+    // Both communicate the same count to the user, so the assertion accepts
+    // either. Trailing items inside a single option (like "1) morning" as a
+    // stops label) won't start a line, so this stays targeted.
     // E.g., if out.finalText is:
-    // 1. **Airline A**
-    //    - departs 10:00, arrives 12:00
-    // 2. **Airline B**
-    //    - departs 11:00, arrives 13:00
-    // 3. **Airline C**
-    //    - departs 12:00, arrives 14:00
-    // then numberedCount will be 3.
-    const numberedItemPattern = /^\s*\d+\.\s/gm;
+    //   ### Option 1
+    //   - Flight Number: A3 600
+    //   ### Option 2
+    //   - Flight Number: A3 601
+    // then numberedCount will be 2.
+    const numberedItemPattern =
+      /^\s*(?:#+\s+|[*_]+\s*)?(?:\d+\.\s|Option\s+\d+\b)/gim;
     const numberedCount = (out.finalText.match(numberedItemPattern) ?? [])
       .length;
 
