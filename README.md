@@ -1733,6 +1733,58 @@ src/evals/synthetic/                          (extends the Stage 11 Phase 5 harn
 
 Modified: `src/agents/buildTravelAgent.ts` (added guardrail as 6th layer), `src/evals/runner.ts` (registered 3 new synthetic cases), `src/evals/cases/verbatimHotelPrices.ts` and `src/evals/cases/verbatimPriceAcrossTurns.ts` (extended per-night pattern with "Price/Night" slash form), `src/evals/cases/sunnyWeekendFromAthens.ts` (added plain "Total:" pattern to the arithmetic assertion's candidate extractor).
 
+### Stage 15 — Cancellation flow coverage
+
+The booking arc had `propose_booking` covered by evals (Stage 8) and the Confirm UI action covered by manual testing, but no eval touched the cancel path. Stage 15 closes that gap with two real eval cases. **Not a guardrail stage** — no new guardrail files, no new synthetic cases. Pure test coverage on an existing feature.
+
+Pre-Stage-15 surface (all in place before this stage):
+
+- **`cancel_booking` MCP tool** — wired to `/api/booking/:id/cancel`.
+- **`BookingStatus` enum** — includes `CANCELLED` and `FAILED`.
+- **`BookingCard` UI** — renders CANCELLED state, shows `cancellationReason` when present, Cancel button in both PROPOSED and PAID modes.
+- **TravelAgent prompt** — mentions the cancel flow, non-refundable rejection, and the numeric-id-vs-reference distinction.
+
+What Stage 15 added: eval cases only.
+
+#### Two eval cases
+
+- **`cancelProposedBookingHappyPath`** — 4-turn: search → propose → cancel intent → confirm cancel. Assertions: `propose_booking` runs on turn 2 (the setup), `cancel_booking` runs somewhere in turns 3-4 (the actual test), and the final message truthfully mentions the cancellation.
+- **`cancelWithoutBookingContext`** — 1-turn: user asks to cancel with no prior conversation. Assertions: `cancel_booking` NOT called (no numeric id to pass); agent asks for the booking id or reference. Regression check for the "reference is human-facing; ask for the numeric id" rule in the agent prompt.
+
+#### A dropped case, and why (design finding worth preserving)
+
+Originally scoped a third case, `cancelBookingRequiresIntentConfirmation`: after proposing a booking, the user sends a single-word `"cancel"`; the agent should ask for confirmation before executing. Dropped during eval iteration because the model's actual behavior conflicted with the aspirational test in a way that was **arguably correct**.
+
+What happened: `gpt-4o` read the surrounding context (a booking had just been proposed one turn ago), interpreted `"cancel"` as sufficiently clear intent, called `cancel_booking` immediately with the correct id, and reported the cancellation truthfully. No drift, no unsafe state.
+
+The reason to keep this documented rather than pretend the case was never scoped:
+
+- **PROPOSED bookings** are cheap to cancel — no money moved, no inventory reserved, user can re-propose in seconds. The "confirm before destructive action" UX principle doesn't really apply.
+- **CONFIRMED / PAID bookings** are where confirmation matters — non-refundable hotels reject cancellation, refunds can take days. But the eval harness has no way to reach CONFIRMED/PAID from an agent flow (Confirm is a UI click; there's no exposed payment step).
+
+So the case was testing a "confirm first" behavior in the ONE scenario where it's least justified. The prompt line *"confirm the user's intent in prose first, then call cancel_booking"* is aspirational for PROPOSED bookings; it doesn't reflect a genuine safety need. Dropped, and left as a note here for the next reader who wonders whether the missing case was an oversight (it wasn't).
+
+**Future work.** When the harness can simulate the Confirm UI click, or the schema grows a tool exposing the CONFIRMED transition, a `cancelConfirmedBookingRequiresIntent` case becomes both testable and meaningful — cancelling a CONFIRMED booking IS destructive (non-refundable hotels reject, refunds are asynchronous), so the confirmation behavior actually matters there.
+
+#### No new guardrail work
+
+Considered a "cancellation fabrication" guardrail — agent claims *"your booking has been cancelled"* without calling `cancel_booking`. Deferred (YAGNI). Reasoning:
+
+- The existing [Stage 11 Phase 3](#phase-3--deterministic-cross-reference-layer) cross-reference check (c) `booking-without-call` already fires on similar drift (booking talked about with an empty `propose_booking` collector). Cancellation-drift, if observed, would be caught by extending that check's finality-adjacent regex, not by writing a new guardrail file.
+- No cancellation-drift observed during eval iteration — the happy-path case's model behavior was truthful.
+
+If real cancellation-drift shows up later, the fix is a small extension to the existing pattern.
+
+#### File index
+
+```
+src/evals/cases/
+├── cancelProposedBookingHappyPath.ts       (4-turn: search → propose → cancel → confirm)
+└── cancelWithoutBookingContext.ts          (1-turn: cancel with no prior booking context)
+```
+
+Modified: `src/evals/runner.ts` (registered 2 new cases in the `CASES` array).
+
 ---
 
 > **Note on the historical Stage narratives above:** file paths in Stages 1–7 reflect the layout at the time each stage was written. Where those don't match the current file tree, the [file index](#file-index) at the bottom of this doc is authoritative.

@@ -3,6 +3,8 @@ import { MCPServerStreamableHttp } from '@openai/agents';
 import { runCase } from './runCase';
 import { getTurns } from './types';
 import { bookingProposalNoFinalityClaim } from './cases/bookingProposalNoFinalityClaim';
+import { cancelProposedBookingHappyPath } from './cases/cancelProposedBookingHappyPath';
+import { cancelWithoutBookingContext } from './cases/cancelWithoutBookingContext';
 import { hotelsInBerlin } from './cases/hotelsInBerlin';
 import { injectionLookalikeAllowed } from './cases/injectionLookalikeAllowed';
 import { noBookingPrereqsBeforeOptions } from './cases/noBookingPrereqsBeforeOptions';
@@ -47,6 +49,8 @@ const CASES: Case[] = [
   noBookingPrereqsBeforeOptions,
   verbatimPriceAcrossTurns,
   bookingProposalNoFinalityClaim,
+  cancelProposedBookingHappyPath,
+  cancelWithoutBookingContext,
   promptInjectionBlocked,
   injectionLookalikeAllowed,
 ];
