@@ -3,6 +3,8 @@ import { AppRouterCacheProvider } from '@mui/material-nextjs/v15-appRouter';
 import { ThemeProvider } from '@mui/material/styles';
 import CssBaseline from '@mui/material/CssBaseline';
 import theme from './theme';
+import { AuthProvider } from './providers';
+import { Header } from '@/components/Header';
 
 export const metadata: Metadata = {
   title: 'Travel Assistant',
@@ -20,7 +22,10 @@ export default function RootLayout({
         <AppRouterCacheProvider options={{ enableCssLayer: true }}>
           <ThemeProvider theme={theme}>
             <CssBaseline />
-            {children}
+            <AuthProvider>
+              <Header />
+              {children}
+            </AuthProvider>
           </ThemeProvider>
         </AppRouterCacheProvider>
       </body>

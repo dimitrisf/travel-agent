@@ -77,27 +77,29 @@ let defaultPrisma: PrismaClient | undefined;
 // If you are using this library in a serverless environment, you should call this function once at the top level of your application (e.g. in your API route handler) and reuse the returned PrismaClient instance for all service constructors. This will help avoid exhausting database connections.
 // If you are using this library in a long-running process (e.g. a server), you can also call this function once at the top level of your application and reuse the returned PrismaClient instance for all service constructors. This will help avoid exhausting database connections.
 // ??= means "assign if undefined". So if defaultPrisma is already defined, it will not be reassigned. This is useful for serverless environments where the module may be reloaded multiple times, but we want to reuse the same PrismaClient instance across invocations.
-function sharedPrisma(): PrismaClient {
+// Exported for use by the NextAuth Prisma adapter (Stage 17) so the auth
+// tables share the same connection pool as the rest of the app.
+export function getSharedPrisma(): PrismaClient {
   return (defaultPrisma ??= new PrismaClient());
 }
 
 export function createWeatherService(prisma?: PrismaClient): WeatherService {
-  const client = prisma ?? sharedPrisma();
+  const client = prisma ?? getSharedPrisma();
   return new WeatherService(new WeatherRepository(client));
 }
 
 export function createFlightService(prisma?: PrismaClient): FlightService {
-  const client = prisma ?? sharedPrisma();
+  const client = prisma ?? getSharedPrisma();
   return new FlightService(new FlightRepository(client));
 }
 
 export function createHotelService(prisma?: PrismaClient): HotelService {
-  const client = prisma ?? sharedPrisma();
+  const client = prisma ?? getSharedPrisma();
   return new HotelService(new HotelRepository(client));
 }
 
 export function createBookingService(prisma?: PrismaClient): BookingService {
-  const client = prisma ?? sharedPrisma();
+  const client = prisma ?? getSharedPrisma();
   return new BookingService(client, new BookingRepository(client));
 }
 

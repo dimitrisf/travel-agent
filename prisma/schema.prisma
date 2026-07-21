@@ -118,7 +118,7 @@ model FlightInstance {
   gate               String?
   seatsAvailable     Int              @default(180)
 
-  flightBookings     FlightBooking[]
+  flightBookings FlightBooking[]
 
   @@unique([flightDefinitionId, departureDatetime])
   @@index([departureDatetime])
@@ -213,27 +213,27 @@ model CancellationPolicy {
 //                        be retried safely — a repeat call with the same key
 //                        returns the existing row instead of creating a new one.
 model Booking {
-  id                 Int             @id @default(autoincrement())
-  reference          String          @unique
-  idempotencyKey     String          @unique
-  status             BookingStatus   @default(PROPOSED)
+  id             Int           @id @default(autoincrement())
+  reference      String        @unique
+  idempotencyKey String        @unique
+  status         BookingStatus @default(PROPOSED)
 
   // Denormalized customer info — replaced by userId FK once Stage 11 lands.
-  customerName       String
-  customerEmail      String
+  customerName  String
+  customerEmail String
 
-  totalPriceEUR      Float
-  currency           String          @default("EUR")
+  totalPriceEUR Float
+  currency      String @default("EUR")
 
-  createdAt          DateTime        @default(now())
-  updatedAt          DateTime        @updatedAt
+  createdAt          DateTime  @default(now())
+  updatedAt          DateTime  @updatedAt
   confirmedAt        DateTime?
   cancelledAt        DateTime?
   cancellationReason String?
 
-  flightBookings     FlightBooking[]
-  hotelBookings      HotelBooking[]
-  payments           Payment[]
+  flightBookings FlightBooking[]
+  hotelBookings  HotelBooking[]
+  payments       Payment[]
 
   @@index([status, createdAt])
 }
@@ -250,21 +250,21 @@ enum BookingStatus {
 // has one. `pricePerSeatEUR` is frozen at booking time so past bookings never
 // change if the pricing rules do.
 model FlightBooking {
-  id               Int            @id @default(autoincrement())
-  bookingId        Int
-  booking          Booking        @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+  id        Int     @id @default(autoincrement())
+  bookingId Int
+  booking   Booking @relation(fields: [bookingId], references: [id], onDelete: Cascade)
 
   flightInstanceId Int
   flightInstance   FlightInstance @relation(fields: [flightInstanceId], references: [id])
 
-  cabinClass       String
-  adults           Int            @default(1)
-  children         Int            @default(0)
-  seats            Int
-  pricePerSeatEUR  Float
-  totalPriceEUR    Float
+  cabinClass      String
+  adults          Int    @default(1)
+  children        Int    @default(0)
+  seats           Int
+  pricePerSeatEUR Float
+  totalPriceEUR   Float
 
-  createdAt        DateTime       @default(now())
+  createdAt DateTime @default(now())
 
   @@index([bookingId])
   @@index([flightInstanceId])
@@ -273,12 +273,12 @@ model FlightBooking {
 // One row per hotel stay. Nights is stored explicitly for convenience even
 // though it's derivable from (checkoutDate - checkinDate).
 model HotelBooking {
-  id            Int      @id @default(autoincrement())
-  bookingId     Int
-  booking       Booking  @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+  id        Int     @id @default(autoincrement())
+  bookingId Int
+  booking   Booking @relation(fields: [bookingId], references: [id], onDelete: Cascade)
 
-  roomTypeId    Int
-  roomType      RoomType @relation(fields: [roomTypeId], references: [id])
+  roomTypeId Int
+  roomType   RoomType @relation(fields: [roomTypeId], references: [id])
 
   checkinDate   DateTime @db.Date
   checkoutDate  DateTime @db.Date
@@ -287,7 +287,7 @@ model HotelBooking {
   rooms         Int      @default(1)
   totalPriceEUR Float
 
-  createdAt     DateTime @default(now())
+  createdAt DateTime @default(now())
 
   @@index([bookingId])
   @@index([roomTypeId, checkinDate])
@@ -297,9 +297,9 @@ model HotelBooking {
 // When real Stripe integration lands, provider becomes "stripe" and providerRef
 // holds the PaymentIntent ID; this table's shape is already ready.
 model Payment {
-  id          Int           @id @default(autoincrement())
-  bookingId   Int
-  booking     Booking       @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+  id        Int     @id @default(autoincrement())
+  bookingId Int
+  booking   Booking @relation(fields: [bookingId], references: [id], onDelete: Cascade)
 
   amount      Float
   currency    String        @default("EUR")
@@ -307,7 +307,7 @@ model Payment {
   provider    String        @default("stub")
   providerRef String?
 
-  createdAt   DateTime      @default(now())
+  createdAt   DateTime  @default(now())
   completedAt DateTime?
 
   @@index([bookingId, status])
@@ -318,4 +318,75 @@ enum PaymentStatus {
   SUCCEEDED
   FAILED
   REFUNDED
+}
+
+// ───────────────────────────────────────────────
+// Auth (Stage 17 Phase 1)
+// ───────────────────────────────────────────────
+// Tables owned by Auth.js (NextAuth v5) via @auth/prisma-adapter. Shapes come
+// straight from the official adapter reference — do not rename columns or
+// change types, or the adapter will silently break at runtime (adapter reads
+// via Prisma's typed API but expects these exact field names).
+//
+// Session strategy is "database" (not JWT): a Session row is written per
+// active login and read on every request that calls auth(). Costs one DB
+// round-trip per request; buys the ability to invalidate a session server-
+// side (delete the row) and to see who's currently logged in.
+//
+// User.id uses cuid — NextAuth's convention. All app-side FKs to User must
+// therefore also be String, not Int (relevant for Booking.userId in Phase 2).
+
+model User {
+  id            String    @id @default(cuid())
+  name          String?
+  email         String    @unique
+  emailVerified DateTime?
+  image         String?
+  accounts      Account[]
+  sessions      Session[]
+}
+
+// Account is one row per OAuth provider per user. A user can have multiple
+// accounts (e.g., Google + GitHub). The adapter uses the provider + providerAccountId composite as the primary key, so that a user cannot have two accounts with the same provider.
+model Account {
+  userId            String
+  type              String
+  provider          String
+  providerAccountId String
+  refresh_token     String?
+  access_token      String?
+  expires_at        Int?
+  token_type        String?
+  scope             String?
+  id_token          String?
+  session_state     String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([provider, providerAccountId])
+}
+
+// Session is one row per active login. The adapter reads this table on every request to determine if the session is valid. The sessionToken is a random string that is stored in a cookie on the client and used to look up the session in the database. The expires field is a timestamp that indicates when the session will expire. The adapter automatically deletes expired sessions from the database.
+model Session {
+  sessionToken String   @unique
+  userId       String
+  expires      DateTime
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+// VerificationToken is required by the Prisma adapter even when only OAuth
+// providers are configured — the adapter's code paths reference it. Kept as
+// an empty table for now; magic-link support (if ever added) uses it.
+model VerificationToken {
+  identifier String
+  token      String
+  expires    DateTime
+
+  @@id([identifier, token])
 }
