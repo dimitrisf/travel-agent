@@ -18,7 +18,7 @@ export function makeProposeBookingToolSpec(
     name: 'propose_booking',
     title: 'Propose Booking',
     description:
-      'Create a PROPOSED booking for a trip. The booking is NOT paid or confirmed by this call — the user must click "Confirm" in the chat UI to actually reserve inventory. Before calling this tool, always summarize the trip in prose and get the user\'s go-ahead. The tool is idempotent on `idempotency_key`: reuse the same key for retries within one booking intent, generate a fresh UUID for each new booking. For a round-trip, include TWO entries in `flights`: outbound + return.',
+      'Create a PROPOSED booking for a trip. The booking is NOT paid or confirmed by this call — the user must click "Confirm" in the chat UI to actually reserve inventory. Before calling this tool, always summarize the trip in prose and get the user\'s go-ahead. The tool is idempotent on `idempotency_key`: reuse the same key for retries within one booking intent, generate a fresh UUID for each new booking. For a round-trip, include TWO entries in `flights`: outbound + return. Customer identity is derived server-side from the authenticated session — do NOT ask the user for their name or email, do NOT try to pass those fields. Anonymous callers can propose freely; the booking gets an owner only when someone signs in and clicks Confirm.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -26,14 +26,6 @@ export function makeProposeBookingToolSpec(
           type: 'string',
           description:
             'A UUID you generate. Same key on retries → same booking (no duplicate). Fresh UUID for each new booking intent.',
-        },
-        customer_name: {
-          type: 'string',
-          description: 'Full name of the customer.',
-        },
-        customer_email: {
-          type: 'string',
-          description: 'Contact email for the booking confirmation.',
         },
         flights: {
           type: 'array',
@@ -98,7 +90,7 @@ export function makeProposeBookingToolSpec(
           },
         },
       },
-      required: ['idempotency_key', 'customer_name', 'customer_email'],
+      required: ['idempotency_key'],
     },
     handler: async (args) => postApi('/api/booking/propose', args),
   };

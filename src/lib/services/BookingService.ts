@@ -48,14 +48,23 @@ const HotelStayInput = z.object({
   rooms: z.number().int().min(1).default(1),
 });
 
-// Booking proposal: customer info + flights + hotels. At least one flight or hotel is required.
-// It refers to a Booking, which is a collection of FlightBookings and HotelBookings. The Booking also has a total price and currency.
+// Booking proposal: flights + hotels + optional ownership context. At least
+// one flight or hotel is required.
+//
+// Ownership context (Stage 17 Phase 2) is populated by the route handler
+// from the authenticated session — the agent no longer supplies customer
+// info via tool args. Anonymous callers omit these; the row gets an owner
+// only when someone signs in and clicks Confirm.
 const ProposeBookingInput = z
   .object({
     // Idempotency key: unique per booking attempt. If a booking with the same key already exists, it will be returned instead of creating a new one.
     idempotency_key: z.string().min(1),
-    customer_name: z.string().trim().min(1),
-    customer_email: z.string().trim().email(),
+    // Session-derived. Route handler fills these from the current user (if
+    // signed in). Never trust these from the agent — the tool spec doesn't
+    // expose them.
+    user_id: z.string().optional(),
+    customer_name: z.string().trim().min(1).optional(),
+    customer_email: z.string().trim().email().optional(),
     flights: z.array(FlightLegInput).default([]),
     hotels: z.array(HotelStayInput).default([]),
   })
@@ -244,14 +253,15 @@ export class BookingService {
 
         const totalPriceEUR = round1(flightTotal + hotelTotal);
 
-        // Now that we have all the flight and hotel rows and the total price, we can create the Booking row. This will be linked to the FlightBooking and HotelBooking rows we created above. The Booking will have a reference, idempotency key, customer info, total price, currency, and status set to PROPOSED (default value set in the Prisma schema).
+        // Now that we have all the flight and hotel rows and the total price, we can create the Booking row. userId + customerName/Email are OPTIONAL — anon PROPOSED rows carry null values and get filled when someone signs in and confirms.
         const created = await tx.booking.create({
           data: {
             // Generate a random 8-character alphanumeric reference for the booking. This will be used as a human-readable identifier for the booking. It is not guaranteed to be unique, but the idempotency key ensures that retries do not create duplicate bookings.
             reference: generateReference(),
             idempotencyKey: parsed.idempotency_key,
-            customerName: parsed.customer_name,
-            customerEmail: parsed.customer_email,
+            userId: parsed.user_id ?? null,
+            customerName: parsed.customer_name ?? null,
+            customerEmail: parsed.customer_email ?? null,
             totalPriceEUR,
             currency: 'EUR',
             // As part of this transaction, we create the FlightBooking and HotelBooking rows for the booking. These rows will be linked to the Booking we are creating here. The FlightBooking and HotelBooking rows will have foreign keys to the FlightInstance and RoomType, respectively.
@@ -273,8 +283,18 @@ export class BookingService {
   // Confirm: reserve inventory and mark PAID. Wrapped in one transaction so
   // any failure (insufficient seats, insufficient rooms) rolls back and leaves
   // the booking in its original PROPOSED state.
-  // id is the booking id. This method will check that the booking is in PROPOSED state, and if so, it will attempt to reserve the flight seats and hotel rooms. If any reservation fails, it will throw a BookingServiceError and roll back the transaction, leaving the booking in its original PROPOSED state. If all reservations succeed, it will mark the booking as PAID and return the updated BookingWithRelations.
-  async confirmBooking(id: number): Promise<BookingWithRelations> {
+  //
+  // Ownership (Stage 17 Phase 2): the caller MUST pass the authenticated
+  // user — Confirm is the point at which anon proposals get claimed. If the
+  // booking already has an owner and it isn't this user, we 404 (same shape
+  // as "doesn't exist") to avoid leaking existence to other tenants.
+  // Otherwise the transaction fills `userId`, `customerName`, and
+  // `customerEmail` from the session identity.
+  // The input is the booking ID and the current user object, which includes the user ID, name, and email. The current user comes from the session. The output is the updated BookingWithRelations, which includes all related data.
+  async confirmBooking(
+    id: number,
+    currentUser: { id: string; name: string | null; email: string },
+  ): Promise<BookingWithRelations> {
     try {
       return await this.prisma.$transaction(async (tx) => {
         // Fetch the booking by id, including all related data. If the booking does not exist, throw a BookingServiceError with code 'BOOKING_NOT_FOUND'. If the booking is not in PROPOSED state, throw a BookingServiceError with code 'INVALID_STATE'. This ensures that only PROPOSED bookings can be confirmed.
@@ -288,6 +308,19 @@ export class BookingService {
             'BOOKING_NOT_FOUND',
           );
         }
+
+        // Cross-tenant guard. 404 (not 403) so a scan of ids can't discover
+        // which ones exist under another user's account.
+        // If the booking has a userId and it does not match the current user's ID, throw a BookingServiceError with code 'BOOKING_NOT_FOUND'. This prevents users from confirming bookings that belong to other users.
+        // A booking may have a non-null userId if it was proposed while the user was signed in. In that case, only the owner can confirm it. If the booking has a null userId, it means it was proposed anonymously, and any user can confirm it.
+        if (booking.userId && booking.userId !== currentUser.id) {
+          throw new BookingServiceError(
+            `Booking ${id} not found.`,
+            'BOOKING_NOT_FOUND',
+          );
+        }
+
+        // Check that the booking is in PROPOSED state. If it is not, throw a BookingServiceError with code 'INVALID_STATE'. This ensures that only PROPOSED bookings can be confirmed. A booking may be in PAID or CONFIRMED state if it has already been confirmed, or in CANCELLED state if it has been cancelled. In any of those cases, we do not allow confirming the booking again.
         if (booking.status !== 'PROPOSED') {
           throw new BookingServiceError(
             `Booking ${id} is in state ${booking.status}; only PROPOSED bookings can be confirmed.`,
@@ -391,12 +424,23 @@ export class BookingService {
           },
         });
 
-        // Finally, mark the booking as PAID and set confirmedAt to the current date. This indicates that the booking has been successfully confirmed and all inventory has been reserved. We return the updated BookingWithRelations, which includes all related data.
+        // Finally, mark the booking as PAID and set confirmedAt. Also claim
+        // ownership (Stage 17 Phase 2): fill in userId + customerName/Email
+        // from the session identity. If the booking was already owned by
+        // this user (they proposed while signed in), the assignments are
+        // idempotent. If any of these were already set on the row (e.g.,
+        // signed-in propose), we don't overwrite — nullish-coalesce from
+        // the existing value.
         return tx.booking.update({
           where: { id: booking.id },
           data: {
             status: 'PAID',
             confirmedAt: new Date(),
+            // Claim ownership: if the booking already has a userId, we don't overwrite it. If it is null, we set it to the current user's ID. The same applies to customerName and customerEmail. This ensures that the booking is associated with the correct user and that we have the necessary contact information for the customer.
+            userId: booking.userId ?? currentUser.id,
+            customerName:
+              booking.customerName ?? currentUser.name ?? currentUser.email,
+            customerEmail: booking.customerEmail ?? currentUser.email,
           },
           include: bookingInclude,
         });
@@ -410,10 +454,18 @@ export class BookingService {
   // Cancel: restore inventory (if any was reserved) and mark CANCELLED. Enforces
   // per-hotel CancellationPolicy for PAID bookings — if any hotel leg is
   // non-refundable, the whole cancel fails.
+  //
+  // Ownership (Stage 17 Phase 2): `currentUserId` is null for anon callers;
+  // set for signed-in ones. Rules:
+  //   - booking.userId IS NULL → allowed for any caller (anon PROPOSED discard)
+  //   - booking.userId === currentUserId → allowed for owner
+  //   - otherwise → 404 (cross-tenant, treat as not-found)
   async cancelBooking(
     id: number,
-    reason?: string,
+    opts?: { currentUserId?: string | null; reason?: string },
   ): Promise<BookingWithRelations> {
+    const currentUserId = opts?.currentUserId ?? null;
+    const reason = opts?.reason;
     try {
       return await this.prisma.$transaction(async (tx) => {
         const booking = await tx.booking.findUnique({
@@ -435,6 +487,13 @@ export class BookingService {
           },
         });
         if (!booking) {
+          throw new BookingServiceError(
+            `Booking ${id} not found.`,
+            'BOOKING_NOT_FOUND',
+          );
+        }
+        // Cross-tenant guard. 404 (not 403) so id-scanning can't enumerate.
+        if (booking.userId && booking.userId !== currentUserId) {
           throw new BookingServiceError(
             `Booking ${id} not found.`,
             'BOOKING_NOT_FOUND',
@@ -510,32 +569,53 @@ export class BookingService {
     }
   }
 
-  async getBooking(id: number): Promise<BookingWithRelations> {
+  // Ownership rules match cancelBooking: anon proposals are readable by
+  // anyone with the id; owned rows are only readable by the owner. Cross-
+  // tenant reads return not-found (same shape as truly missing).
+  async getBooking(
+    id: number,
+    opts?: { currentUserId?: string | null },
+  ): Promise<BookingWithRelations> {
+    const currentUserId = opts?.currentUserId ?? null;
     let booking: BookingWithRelations | null;
+
     try {
       booking = await this.repo.findById(id);
     } catch (err) {
       throw internal('Database error while fetching booking.', err);
     }
-    if (!booking) {
+
+    // Cross-tenant guard. 404 (not 403) so a scan of ids can't enumerate.
+    // If the booking has a userId and it does not match the current user's ID, throw a BookingServiceError with code 'BOOKING_NOT_FOUND'. This prevents users from accessing bookings that belong to other users. A booking may have a non-null userId if it was proposed while the user was signed in. In that case, only the owner can access it. If the booking has a null userId, it means it was proposed anonymously, and any user can access it.
+    if (!booking || (booking.userId && booking.userId !== currentUserId)) {
       throw new BookingServiceError(
         `Booking ${id} not found.`,
         'BOOKING_NOT_FOUND',
       );
     }
+
     return booking;
   }
 
+  // Ownership rules match getBooking: anon proposals are readable by
+  // anyone with the reference; owned rows are only readable by the owner. Cross-
+  // tenant reads return not-found (same shape as truly missing).
   async getBookingByReference(
     reference: string,
+    opts?: { currentUserId?: string | null },
   ): Promise<BookingWithRelations> {
+    const currentUserId = opts?.currentUserId ?? null;
     let booking: BookingWithRelations | null;
+
     try {
       booking = await this.repo.findByReference(reference);
     } catch (err) {
       throw internal('Database error while fetching booking.', err);
     }
-    if (!booking) {
+
+    // Cross-tenant guard. 404 (not 403) so a scan of references can't enumerate.
+    // If the booking has a userId and it does not match the current user's ID, throw a BookingServiceError with code 'BOOKING_NOT_FOUND'. This prevents users from accessing bookings that belong to other users. A booking may have a non-null userId if it was proposed while the user was signed in. In that case, only the owner can access it. If the booking has a null userId, it means it was proposed anonymously, and any user can access it.
+    if (!booking || (booking.userId && booking.userId !== currentUserId)) {
       throw new BookingServiceError(
         `Booking with reference "${reference}" not found.`,
         'BOOKING_NOT_FOUND',

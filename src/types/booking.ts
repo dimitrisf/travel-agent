@@ -11,8 +11,10 @@ export type BookingLike = {
   id: number;
   reference: string;
   status: BookingStatus;
-  customerName: string;
-  customerEmail: string;
+  // Nullable as of Stage 17 Phase 2 — anon PROPOSED bookings have no customer
+  // identity until someone signs in and confirms them.
+  customerName: string | null;
+  customerEmail: string | null;
   totalPriceEUR: number;
   currency: string;
   cancellationReason: string | null;

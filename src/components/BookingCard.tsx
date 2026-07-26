@@ -22,6 +22,7 @@ import { statusChipColor } from '@/utils/booking';
 import { formatEUR } from '@/utils/format';
 import { FlightLegRows } from './FlightLegRows';
 import { HotelStayRows } from './HotelStayRows';
+import { useCurrentUser, signInWithGoogle } from '@/lib/auth/client';
 
 // A booking rendered as a rich MUI Card with flights, hotels, total, and
 // action buttons. The card owns its own state for the current booking
@@ -39,7 +40,24 @@ export function BookingCard({
   const [busy, setBusy] = useState<'confirm' | 'cancel' | null>(null);
   const [error, setError] = useState<string | null>(null);
 
+  // Auth-aware behavior (Stage 17 Phase 2). Anonymous users can propose and
+  // discard PROPOSED bookings, but Confirm is gated: clicking it while
+  // signed out kicks off the Google OAuth flow with a callbackUrl back to
+  // this page. After sign-in, the user re-triggers Confirm.
+  const currentUser = useCurrentUser();
+
+  // Call the booking action API endpoint with the booking id and action (confirm or cancel). The API returns the updated booking data, which we use to update the booking state. If the API returns an error, we throw an error to be caught in the catch block.
   async function callBookingAction(action: 'confirm' | 'cancel') {
+    if (action === 'confirm' && !currentUser) {
+      // Kick off OAuth. Encode the pending booking id in the callback URL
+      // so PostSignInConfirmHandler can auto-complete the confirmation
+      // after sign-in — otherwise the chat state (and the BookingCard) is
+      // gone and the user would have to re-do the whole flow to confirm.
+      const callbackUrl = `/?confirm=${booking.id}`;
+      void signInWithGoogle(callbackUrl);
+      return;
+    }
+
     setBusy(action);
     setError(null);
     try {
@@ -85,7 +103,12 @@ export function BookingCard({
             />
           </Stack>
         }
-        subheader={`${booking.customerName} · ${booking.customerEmail}`}
+        // The subheader shows the customer name and email if available. If both are present, they are separated by a dot. If neither is present, it shows a placeholder message indicating that the guest identity is set at Confirm time.
+        subheader={
+          booking.customerName || booking.customerEmail
+            ? `${booking.customerName ?? ''}${booking.customerName && booking.customerEmail ? ' · ' : ''}${booking.customerEmail ?? ''}`
+            : 'Guest identity is set at Confirm'
+        }
         sx={{ pb: 1 }}
       />
       <CardContent sx={{ pt: 0, pb: 1 }}>

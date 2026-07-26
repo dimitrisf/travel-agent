@@ -1840,6 +1840,130 @@ Modified: `src/evals/runner.ts` (registered 2 new cases), `src/agents/buildTrave
 
 ---
 
+### Stage 17 — Auth + session persistence
+
+Roadmap item from the very beginning ("multi-user; audit trail; DB-backed conversations; save/resume URLs"), split into four phases so each ships as a coherent commit boundary rather than one monolithic PR. Phases 1 and 2 have landed; Phases 3 and 4 are planned.
+
+Design shape (locked in before Phase 1 started):
+
+- **Auth provider**: NextAuth v5 + Google OAuth only (no magic-link, no Clerk). Database session strategy — a `Session` row per active login rather than JWT — buys the ability to invalidate sessions server-side and see who's currently logged in.
+- **Anonymous mode**: yes, tab-scoped. Anon users can chat, search, propose bookings freely; sign-in is gated at the point of real commitment (the Confirm button, not the propose call).
+- **Sharing model** (Phase 4): private-per-user by default with an explicit Share toggle for link-view. Same as ChatGPT.
+- **Abstraction helper**: every session read/write goes through a thin internal API (`getCurrentUser`, `requireUser`, `useCurrentUser`, `signInWithGoogle`, `signOutCurrent`) so a future swap to `better-auth` (or anything else) only touches the auth module, not every call site. This is a conditional bet — the swap is *plausible*, not *planned*.
+
+#### Phase 1 — Auth infrastructure
+
+What ships: sign-in works end-to-end. Header, session available server + client, DB tables. Nothing else in the app changes.
+
+- New Prisma models: `User` / `Account` / `Session` / `VerificationToken` (Auth.js v5 adapter shapes; do not rename columns). `User.id` is a cuid — all future FKs to `User` must be `String`, not `Int`.
+- New files under `src/lib/auth/`:
+  - `config.ts` — `NextAuthConfig` (Google provider, Prisma adapter using the shared `getSharedPrisma()` client, `session: { strategy: 'database' }`, and a `session` callback that copies `user.id` onto `session.user` so `getCurrentUser` can read it without a second DB round-trip).
+  - `index.ts` — single `NextAuth(authConfig)` call; exports `handlers`, `auth`, `signIn`, `signOut`.
+  - `session.ts` (server) — `CurrentUser` domain type, `getCurrentUser()`, `requireUser()` (redirects to `/api/auth/signin`).
+  - `client.ts` (client) — `useCurrentUser()`, `signInWithGoogle(callbackUrl?)`, `signOutCurrent(callbackUrl?)`.
+- `src/types/next-auth.d.ts` — module augmentation adding `id` to `session.user` so the config's callback and `getCurrentUser` typecheck cleanly.
+- `app/api/auth/[...nextauth]/route.ts` — mounts `handlers.GET` and `handlers.POST` (the initial attempt at `export { GET, POST } from '@/lib/auth'` was wrong; `handlers` is an object containing `.GET` / `.POST`, so it needs to be destructured).
+- `app/providers.tsx` — client-only `AuthProvider` wrapping `SessionProvider`, since the layout is a server component.
+- `src/components/Header.tsx` — MUI `AppBar` with a `Sign in` button (Google icon) when signed out, an avatar + dropdown (email, `Sign out`) when signed in.
+- `.env.example` extended with `AUTH_SECRET`, `AUTH_GOOGLE_ID`, `AUTH_GOOGLE_SECRET`. `AUTH_SECRET` generated with `node -e "console.log(require('crypto').randomBytes(32).toString('base64'))"`.
+- `src/lib/index.ts` — renamed the private `sharedPrisma()` helper to `getSharedPrisma()` and exported it, so the auth adapter can share the app's connection pool rather than opening a second one.
+
+Explicitly out of scope for Phase 1: no booking gate, no user scoping on bookings, no changes to the agent or the chat UI beyond the header. The auth surface is ready; Phase 2 is what makes it *do* anything user-visible.
+
+#### Phase 2 — Booking gate + user scoping
+
+What ships: Confirm requires sign-in; bookings gain an owner; cross-tenant access is blocked. The anon → OAuth → auto-confirm loop works end-to-end via a small landing-page component.
+
+**Ownership model.**
+
+| State | `Booking.userId` | Who can view / cancel |
+|---|---|---|
+| `PROPOSED` (anon) | `NULL` | Anyone with the id (the id is the only credential — acceptable for a demo since PROPOSED reserves nothing and moves no money) |
+| `PROPOSED` (signed-in proposer) | set | Only the owner |
+| Any state past `PROPOSED` | always set | Only the owner |
+
+The "past-PROPOSED always has an owner" invariant is enforced in application code (`BookingService.confirmBooking`), not a Postgres `CHECK` constraint — the demo trade-off is to keep the migration simple and let application logic handle it.
+
+**Cancellation is loose (Stage 15 carryover, explicitly kept.)** `cancel_booking` still works on PROPOSED and CONFIRMED/PAID alike — "cancel" is used broadly to mean "discard, regardless of state." Considered restricting it to CONFIRMED/PAID only (a `discard_proposal` split), decided against for Phase 2: (a) Stage 15 already committed to this design and passing eval cases depend on it; (b) the distinction is subtle for a demo; (c) if we want the cleaner semantics later, it belongs in its own stage after Phase 4 wraps.
+
+**Schema changes** (`prisma/schema.prisma`):
+
+- `Booking.userId String?` — nullable FK to `User`, `onDelete: SetNull` (GDPR-friendly — deleting a user leaves their historical bookings intact for legal/audit).
+- `Booking.customerName` / `customerEmail` now nullable — anon PROPOSED rows have no known customer identity until Confirm claims them.
+- `User.bookings Booking[]` — reverse relation.
+- `@@index([userId])` on `Booking` for fast per-user lookups.
+
+**Why `customerName` / `customerEmail` weren't dropped in favor of a `User` join.** A booking is a historical snapshot of "who booked what, when" — not a live view of the user's current profile. If a user later changes their email (job change) or name (marriage, legal change), past bookings should still reflect what was on the reservation at the time it was made. Real airlines and hotel PMSs denormalize passenger identity into the booking record for exactly this reason. The fields are also what survives if the User is later deleted via `onDelete: SetNull`.
+
+**Service** (`src/lib/services/BookingService.ts`):
+
+- `ProposeBookingInput` schema — `user_id` / `customer_name` / `customer_email` are now all `.optional()` on the Zod side. The propose route is the only place that populates them (server-derived from the session).
+- `confirmBooking(id, currentUser)` — signature change. `currentUser` is required. Cross-tenant guard (returns `BOOKING_NOT_FOUND`, not `FORBIDDEN`, so id-scanning can't enumerate other users' bookings). On update, fills `userId` / `customerName` / `customerEmail` using nullish-coalesce so signed-in-propose rows that already have those set don't get overwritten.
+- `cancelBooking(id, { currentUserId, reason })` and `getBooking(id, { currentUserId })` and `getBookingByReference(reference, { currentUserId })` — same ownership guard folded directly into the null/mismatch check.
+
+**API routes:**
+
+| Route | Change |
+|---|---|
+| `POST /api/booking/propose` | Reads `getCurrentUser()`. If signed in, overrides `user_id` / `customer_name` / `customer_email` from the session (agent can't spoof). If anon, strips those fields to null. |
+| `POST /api/booking/[id]/confirm` | Requires session (401 with `code: 'UNAUTHORIZED'` otherwise). Passes `{ id, name, email }` to the service. |
+| `POST /api/booking/[id]/cancel` | Reads optional session; passes `currentUserId` for the ownership guard. |
+| `GET /api/booking/[id]` | Same as cancel — optional session, ownership guard in the service. |
+
+**Agent-facing changes** (`src/mcp/tools/travel/proposeBookingToolSpec.ts`, `src/agents/buildTravelAgent.ts`):
+
+- `propose_booking` tool spec — `customer_name` and `customer_email` deleted from both `inputSchema.properties` and the `required` list. Description sentence added forbidding the agent from asking or passing them.
+- Prompt bullet on customer info flipped from "ask for name/email before proposing" to "don't ask; the app derives from session at Confirm; if the user offers name/email unprompted, just acknowledge."
+- New prompt bullet: "prior-booking access requires sign-in — if `get_booking` / `cancel_booking` on a past booking returns not-found and the user hasn't signed in, remind them to click Sign in at the top-right."
+
+**Prompt hygiene fixes bundled in** (two latent bugs surfaced during Phase 2 review):
+
+- The old Bookings rule required BOTH a flight AND a hotel option to be on screen before `propose_booking` — but the service accepts `flights.length + hotels.length > 0` (hotel-only, flight-only, combined all supported). Every eval case that touched bookings was hotel-only and passed only because gpt-4o is flexible enough to ignore the literal rule. Rewrote rule 0 / (a) / (b) to scope the pre-propose search requirement to what the user actually asked for.
+- Rule (c) listed `"confirm"` as a `propose_booking` trigger verb — but `"Confirm"` is literally the button label on the BookingCard. Users saying "confirm" after a proposal exists mean "I want to click the button," not "propose again." Removed `"confirm"` from the trigger list; added disambiguation ("if a proposal is on screen, point at the Confirm button; don't call `propose_booking` again"). Kept `"book"` and `"reserve"` — those genuinely map to the "prepare a proposal" step (analogous to clicking Reserve on Booking.com / Airbnb before checkout).
+
+**UI** (`src/components/BookingCard.tsx`, `src/components/PostSignInConfirmHandler.tsx`):
+
+- BookingCard's Confirm click now pre-flights auth. If `!currentUser`, calls `signInWithGoogle('/?confirm=<id>')` and returns before the POST. The `?confirm=<id>` query param on the callback URL is what the landing page reads to resume.
+- Subheader shows `"Guest identity is set at Confirm"` for anon PROPOSED rows (nulls on name/email); `"<name> · <email>"` once claimed.
+- **New**: `PostSignInConfirmHandler` — mounted at the top of `app/page.tsx`. Reads `?confirm=<id>` from `useSearchParams`, waits for `useCurrentUser` to resolve to a signed-in identity (handles the race where auth state hasn't populated on first render), POSTs `/api/booking/<id>/confirm`, shows an MUI Snackbar with the result, and strips the query param via `history.replaceState` so a refresh doesn't re-trigger. Uses a `useRef` guard against React strict-mode double-invoke.
+
+**Why the auto-confirm handler is load-bearing.** Without it, the anon → OAuth → confirm loop is broken end-to-end: the user clicks Confirm signed out → OAuth redirect → returns to `/` signed in with no chat state → the BookingCard is gone, no button to click, the DB row stays PROPOSED forever. Discovered during the first Phase 2 smoke test — the user's booking row stayed PROPOSED after a successful sign-in, and adding `PostSignInConfirmHandler` was the fix. The chat state itself still doesn't survive the redirect (that's Phase 3's persistence work), but the confirmation intent does.
+
+**Eval status.** All existing eval cases green — the harness never signs in, so it exercises the anon paths, and those are behavior-identical to before Phase 2 (propose still works without customer fields, cancel of anon PROPOSED still allowed, `get_booking` of an anon in-conversation PROPOSED still works).
+
+#### Phases 3 and 4 (planned, not shipped)
+
+- **Phase 3 — Conversation persistence.** DB-backed conversations, `/c/[id]` resume URLs. Fixes the "chat state lost on OAuth redirect" pain point exposed in Phase 2.
+- **Phase 4 — Sharing.** Private-per-user by default, explicit Share toggle grants link-view. Read-only for non-owners.
+
+#### File index
+
+```
+src/lib/auth/
+├── config.ts                          (NextAuthConfig — Google provider, Prisma adapter, database sessions)
+├── index.ts                           (NextAuth() call — exports handlers, auth, signIn, signOut)
+├── session.ts                         (server: CurrentUser, getCurrentUser, requireUser)
+└── client.ts                          (client: useCurrentUser, signInWithGoogle, signOutCurrent)
+
+src/types/next-auth.d.ts               (module augmentation — adds id to session.user)
+
+src/components/
+├── Header.tsx                         (Phase 1 — MUI AppBar, sign-in button / user avatar menu)
+└── PostSignInConfirmHandler.tsx       (Phase 2 — auto-completes booking confirm after OAuth redirect)
+
+app/
+├── providers.tsx                      (Phase 1 — client AuthProvider wrapping SessionProvider)
+└── api/auth/[...nextauth]/route.ts    (Phase 1 — mounts handlers.GET / handlers.POST)
+
+prisma/migrations/
+├── 20260721193613_stage_17_auth_tables/                   (Phase 1 — User, Account, Session, VerificationToken)
+└── 20260722192414_stage_17_phase_2_booking_ownership/     (Phase 2 — Booking.userId FK, nullable customer fields)
+```
+
+Modified across both phases: `prisma/schema.prisma`, `src/lib/index.ts`, `src/lib/services/BookingService.ts`, `src/types/booking.ts`, `src/components/BookingCard.tsx`, `src/agents/buildTravelAgent.ts`, `src/mcp/tools/travel/proposeBookingToolSpec.ts`, `app/layout.tsx`, `app/page.tsx`, `app/api/booking/propose/route.ts`, `app/api/booking/[id]/route.ts`, `app/api/booking/[id]/confirm/route.ts`, `app/api/booking/[id]/cancel/route.ts`, `.env.example`, `package.json` (+ `package-lock.json`).
+
+---
+
 > **Note on the historical Stage narratives above:** file paths in Stages 1–7 reflect the layout at the time each stage was written. Where those don't match the current file tree, the [file index](#file-index) at the bottom of this doc is authoritative.
 
 ---

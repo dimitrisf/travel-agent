@@ -10,6 +10,7 @@ import IconButton from '@mui/material/IconButton';
 import CircularProgress from '@mui/material/CircularProgress';
 import SendIcon from '@mui/icons-material/Send';
 import { MessageBubbles } from '@/components/MessageBubbles';
+import { PostSignInConfirmHandler } from '@/components/PostSignInConfirmHandler';
 import { SamplePrompts } from '@/components/SamplePrompts';
 import { useAgentChat } from '@/hooks/useAgentChat';
 
@@ -38,6 +39,7 @@ export default function Home() {
         flexDirection: 'column',
       }}
     >
+      <PostSignInConfirmHandler />
       <Typography variant="h4" gutterBottom>
         Travel Assistant
       </Typography>

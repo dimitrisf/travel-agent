@@ -218,9 +218,26 @@ model Booking {
   idempotencyKey String        @unique
   status         BookingStatus @default(PROPOSED)
 
-  // Denormalized customer info — replaced by userId FK once Stage 11 lands.
-  customerName  String
-  customerEmail String
+  // Ownership (Stage 17 Phase 2). Nullable because anonymous users can create
+  // PROPOSED bookings without signing in — the row gets an owner only when
+  // someone signs in and clicks Confirm (the Confirm route atomically sets
+  // userId + customerName + customerEmail from the session and transitions
+  // to CONFIRMED/PAID). Once past PROPOSED, userId is always set — enforced
+  // in application code (BookingService.confirmBooking) rather than a
+  // Postgres CHECK constraint to keep the migration path simple.
+  userId String?
+  user   User?   @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  // Denormalized customer info — nullable because anon PROPOSED rows have no
+  // known customer until Confirm claims them. For signed-in flows, the
+  // Confirm route fills these from the session (session.email / session.name).
+  // Concrete scenarios where the denormalization matters
+  // User changes their email (job change, moves to a personal account) — the flight booking they made last month was sent to airlines with the OLD email. If BookingCard renders from User.email, past bookings retroactively show the new email as if that's what was on the reservation. Wrong.
+  // User changes their name (marriage, typo fix, legal change) — flights are tied to a specific passenger name printed on the ticket. Displaying the current User.name on a past booking is misleading; the reservation was made under the previous name.
+  // User account deletion (GDPR right to erasure, or just "delete my account") — our Booking.user relation is onDelete: SetNull, meaning if the User row is deleted, booking.userId becomes NULL. Without denormalized customerName/Email, the past booking loses its identity entirely. With them, the historical record survives (which is often a legal/audit requirement).
+  // Third-party manifest — real airlines/hotels get sent name+email at booking time. The record should reflect what was actually sent, not what the profile currently says.
+  customerName  String?
+  customerEmail String?
 
   totalPriceEUR Float
   currency      String @default("EUR")
@@ -236,6 +253,7 @@ model Booking {
   payments       Payment[]
 
   @@index([status, createdAt])
+  @@index([userId])
 }
 
 enum BookingStatus {
@@ -344,6 +362,7 @@ model User {
   image         String?
   accounts      Account[]
   sessions      Session[]
+  bookings      Booking[]
 }
 
 // Account is one row per OAuth provider per user. A user can have multiple

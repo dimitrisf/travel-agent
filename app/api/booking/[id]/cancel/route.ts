@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { apiErrorResponse } from '@/utils/apiErrorResponse';
 import { createBookingService } from '@/lib';
+import { getCurrentUser } from '@/lib/auth/session';
 
 // runtime and dynamic settings for Next.js API route
 export const runtime = 'nodejs';
@@ -17,6 +18,11 @@ type RouteContext = { params: Promise<{ id: string }> };
 // leg causes the whole cancellation to fail. When allowed, restores inventory
 // (flight seats + hotel rooms) and marks payments REFUNDED, all in one
 // transaction.
+//
+// Auth (Stage 17 Phase 2): NOT strictly required. Anon PROPOSED bookings can
+// be cancelled by anyone with the id (id itself is the only credential —
+// see the Stage 17 design notes). Owned rows can only be cancelled by their
+// owner; cross-tenant requests get 404 from the service layer.
 //
 // Body: optional { reason?: string }.
 export async function POST(req: NextRequest, ctx: RouteContext) {
@@ -35,8 +41,14 @@ export async function POST(req: NextRequest, ctx: RouteContext) {
     // No JSON body — that's fine for an optional field.
   }
 
+  const user = await getCurrentUser();
+
   try {
-    const booking = await bookingService.cancelBooking(id, reason);
+    const booking = await bookingService.cancelBooking(id, {
+      currentUserId: user?.id ?? null,
+      reason,
+    });
+
     return NextResponse.json(booking);
   } catch (err) {
     return apiErrorResponse(err);
