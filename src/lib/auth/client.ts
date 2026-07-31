@@ -27,8 +27,10 @@ export async function signInWithGoogle(callbackUrl?: string): Promise<void> {
   });
 }
 
-// Imperative sign-out — clears the session cookie AND deletes the Session
-// row from the DB (database session strategy). Returns to the current URL.
+// Imperative sign-out. Triggers a POST to /api/auth/signout, which clears
+// the session cookie AND (because we're on database session strategy)
+// deletes the Session row via the Prisma adapter's deleteSession call.
+// Returns to the current URL by default.
 export async function signOutCurrent(callbackUrl?: string): Promise<void> {
   await signOut({
     callbackUrl: callbackUrl ?? window.location.href,

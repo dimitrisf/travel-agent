@@ -1842,7 +1842,7 @@ Modified: `src/evals/runner.ts` (registered 2 new cases), `src/agents/buildTrave
 
 ### Stage 17 — Auth + session persistence
 
-Roadmap item from the very beginning ("multi-user; audit trail; DB-backed conversations; save/resume URLs"), split into four phases so each ships as a coherent commit boundary rather than one monolithic PR. Phases 1 and 2 have landed; Phases 3 and 4 are planned.
+Roadmap item from the very beginning ("multi-user; audit trail; DB-backed conversations; save/resume URLs"), split into four phases so each ships as a coherent commit boundary rather than one monolithic PR. Phases 1, 2, and 3 have landed; Phase 4 is planned.
 
 Design shape (locked in before Phase 1 started):
 
@@ -1931,9 +1931,79 @@ The "past-PROPOSED always has an owner" invariant is enforced in application cod
 
 **Eval status.** All existing eval cases green — the harness never signs in, so it exercises the anon paths, and those are behavior-identical to before Phase 2 (propose still works without customer fields, cancel of anon PROPOSED still allowed, `get_booking` of an anon in-conversation PROPOSED still works).
 
-#### Phases 3 and 4 (planned, not shipped)
+#### Phase 3 — Conversation persistence
 
-- **Phase 3 — Conversation persistence.** DB-backed conversations, `/c/[id]` resume URLs. Fixes the "chat state lost on OAuth redirect" pain point exposed in Phase 2.
+What ships: signed-in users' chats are DB-backed with `/c/[id]` resume URLs. Header gains a "+ New chat" link and a Conversations dropdown. Anonymous users behave exactly as before Phase 3 (tab-scoped, no persistence).
+
+**Storage shape.** Two tables (proper normalization for pedagogical clarity — over the alternative of one big JSON blob on Conversation):
+
+- **`Conversation`** — `id` (cuid), `userId` (String FK, required — no anon conversations), `title` (nullable, auto-derived from the first user message, truncated to 60 chars), `createdAt`, `updatedAt`.
+- **`Message`** — `id` (cuid), `conversationId` (FK), `data JSON` (one `AgentInputItem` as-is), `createdAt`, sortable by insertion order.
+
+One `Message` row per `AgentInputItem` — one for a user turn, one for an assistant turn, one for each `function_call`, one for each `function_call_result`. Load is `SELECT * ORDER BY createdAt ASC, id ASC` — the resulting array is what the agent's `run()` expects verbatim.
+
+**Why `Message.data` is JSON, not typed columns.** `AgentInputItem` is a discriminated union with wildly different shapes per role (`{ role: 'user', content: string }`, `{ role: 'assistant', content: [...] }`, `{ type: 'function_call', name, arguments, callId }`, `{ type: 'function_call_result', callId, output: { type: 'text', text } }`). Normalizing every possible field would be a schema for one library's internal format, and would need re-migrating every time the SDK's shape shifted. A JSON blob preserves fidelity and matches what `run()` consumes.
+
+**Schema changes** (`prisma/schema.prisma`):
+
+- `User.conversations Conversation[]` — reverse relation.
+- New `Conversation` model — see above. `@@index([userId, updatedAt])` for fast per-user listing sorted newest-first (the header dropdown query).
+- New `Message` model — see above. `onDelete: Cascade` on `conversationId` so deleting a conversation cleans up its messages. `@@index([conversationId, createdAt])` for fast ordered load.
+
+**Persistence layer** (three new files under `src/lib/`):
+
+- **`services/ConversationServiceError.ts`** — typed error class, `CONVERSATION_NOT_FOUND` / `INTERNAL_ERROR` codes. Mirrors `BookingServiceError` so `apiErrorResponse` maps it to HTTP status uniformly (extended with a new branch).
+- **`repositories/ConversationRepository.ts`** — raw Prisma queries. `findById` (full load with messages ordered), `findMetaById` (metadata-only for cheap ownership checks — skips the messages join), `listByUser` (10 most-recent for the header), `create` (new empty conversation), `appendMessages` (batch insert via `createMany` in a transaction that also bumps `updatedAt` on the parent so the dropdown sees fresh conversations on top).
+- **`services/ConversationService.ts`** — business logic. Key methods:
+  - `loadForUser({ id, userId })` — full load + ownership check. Throws `CONVERSATION_NOT_FOUND` (not `FORBIDDEN`) on cross-tenant, so id-scanning can't enumerate other users' conversations. Decodes the JSON blobs back into `AgentInputItem[]` in the returned `LoadedConversation.history`.
+  - `assertOwnership({ id, userId })` — cheap variant used by `/api/agent` on every turn (skips the messages load).
+  - `create({ userId, seedHistory })` — creates the row; auto-derives a title by finding the first user turn in the seed and truncating to 60 chars with an ellipsis.
+  - `appendTurn({ conversationId, newItems })` — batch-writes a list of `AgentInputItem`s as `Message` rows.
+
+Also `src/lib/index.ts` exports the new module, adds `createConversationService()` factory (shares the same PrismaClient as the rest of the app), and adds `isConversationServiceError` type guard.
+
+**Agent route wiring** (`app/api/agent/route.ts`):
+
+- Body now accepts optional `conversationId: string` (follow-up turns only).
+- Right after body parse, calls `getCurrentUser()`. Anonymous → persistence skipped entirely (no service is even constructed).
+- Signed-in **with** `conversationId` — `assertOwnership` throws 404 if the caller doesn't own it. Guards against a client trying to write into someone else's conversation.
+- Signed-in **without** `conversationId` — first turn of a fresh conversation. Call `create({ userId, seedHistory: [...history, { role: 'user', content: userInput }] })` so `deriveTitle` sees the user's actual message. Now `conversationId` is set for the rest of the request.
+- After `await stream.completed` inside the SSE stream's `start()`, if there's a service + id, compute `newItems = stream.history.slice(history.length)` (everything new since this turn started) and `appendTurn`. Wrapped in try/catch so a persistence failure logs but doesn't corrupt the stream — the user still sees the turn complete.
+- `done` event now includes `conversationId` so the client can pick it up and swap the URL.
+
+**New API route** (`app/api/conversations/route.ts`) — `GET /api/conversations` returns the current user's 10 most-recent conversations. Anonymous callers get an empty array (not 401), so the header dropdown renders gracefully in both auth states without conditional fetches on the client.
+
+**Stream type + hydration utility:**
+
+- `src/types/stream.ts` — the `done` event's payload now declares optional `conversationId: string`.
+- **New** `src/utils/hydrateChatMessages.ts` — converts `AgentInputItem[]` (canonical, DB-stored) into `ChatMessage[]` (rich UI display). Grouping rule: each user turn opens a new user bubble AND a new agent bubble; every `function_call` / `function_call_result` / assistant message that follows accumulates onto the current agent bubble until the next user turn. Mirrors what `useAgentChat` builds up live via SSE events, so a loaded `/c/[id]` looks identical to a just-chatted session. UI-only concepts (`handoffs`, `blockedBy`, `pending`) don't survive persistence — restored bubbles show empty handoffs and `pending: false`.
+
+**Hook rework** (`src/hooks/useAgentChat.ts`):
+
+- Now accepts `{ initialConversationId?, initialHistory? }`. `/` passes nothing; `/c/[id]` passes both.
+- `messages` state is seeded via `hydrateChatMessages(opts.initialHistory)` when hydrating a resumed conversation.
+- `history` state is seeded from `opts.initialHistory`.
+- **New**: `conversationId` state, seeded from `opts.initialConversationId ?? null`.
+- `send()` request body includes `conversationId` (undefined for anon or first signed-in turn).
+- On the `done` event: if the payload's `conversationId` doesn't match current state, `setConversationId(payload.conversationId)` AND `window.history.replaceState({}, '', '/c/[id]')` — the URL swap on the first-turn case, no re-render loop.
+- Returns `{ messages, pending, send, conversationId }`.
+
+**UI:**
+
+- **New** `src/components/ChatContainer.tsx` — extracted the chat surface (Container, Paper, MessageBubbles/SamplePrompts, form input, `PostSignInConfirmHandler`) from `app/page.tsx` into a reusable client component. Takes optional `initialConversationId` + `initialHistory` props and passes them to `useAgentChat`. `app/page.tsx` shrinks to just `<ChatContainer />`.
+- **New** `app/c/[id]/page.tsx` — server component. Reads `params.id` and the current user. Anonymous caller → `redirect('/')` (see the UX note below). Signed-in caller → `loadForUser({ id, userId })`; success renders `<ChatContainer initialConversationId={id} initialHistory={history} />`; failure with `CONVERSATION_NOT_FOUND` → `notFound()` triggers Next.js 404 (cross-tenant guard, no info leak).
+- **Header rework** — split into three sub-components: `SignedInControls` (with a `+ New chat` link, the Conversations dropdown, and the avatar/sign-out menu), `ConversationsMenu` (lazy fetch on first open; refetches on each open so a just-created conversation on the current tab shows up), and `SignedOutControls` (the Sign in button, unchanged). Title is now a `Link` to `/`.
+
+**Anon-user redirect on `/c/[id]`.** The original draft of `/c/[id]/page.tsx` redirected anonymous callers to the built-in NextAuth sign-in page. Smoke-testing revealed this was bad UX: signing out from a `/c/[id]` URL sent the user through NextAuth's redirect chain back to `/c/[id]`, saw no user, and then pushed them into the sign-in page — the opposite of what they wanted after clicking Sign Out. Also: signing back in as a different user (via that forced sign-in page) landed them on the *previous* user's `/c/[id]` URL, hitting a cross-tenant 404. Fixed by redirecting anonymous callers to `/` instead — sign-out lands on fresh anon chat, and a shared/bookmarked `/c/[id]` URL opened by someone not signed in also lands on `/` (where the header still offers a sign-in button if they want it).
+
+**Auto-create flow.** Signed-in user visits `/`, types their first message; the agent route creates a `Conversation` row (deriving the title from that first message), streams the response, and echoes the new `conversationId` in the `done` event. The hook picks that up and calls `window.history.replaceState(..., '/c/[id]')` — the URL swaps silently, no page reload, no re-render loop. From that point on, refresh + bookmarking work.
+
+**Deferred to Phase 3.5 (or later): the anon-to-signed-in bridge.** If an anon user chats on `/` and then signs in mid-flow (e.g., via the Phase 2 Confirm button), their chat state is still lost on the OAuth redirect — same as after Phase 2. The fix requires `localStorage`/`sessionStorage` machinery to save the anon history before redirect and restore + persist it after. Skipped for Phase 3 to keep the scope tight; a candidate for its own small stage between Phase 3 and Phase 4.
+
+**Eval status.** All existing eval cases green — the harness never signs in, so it exercises the anon `/api/agent` path, which is behavior-identical to before Phase 3 (no session → no persistence → no changes visible to the agent flow).
+
+#### Phase 4 (planned, not shipped)
+
 - **Phase 4 — Sharing.** Private-per-user by default, explicit Share toggle grants link-view. Read-only for non-owners.
 
 #### File index
@@ -1945,22 +2015,31 @@ src/lib/auth/
 ├── session.ts                         (server: CurrentUser, getCurrentUser, requireUser)
 └── client.ts                          (client: useCurrentUser, signInWithGoogle, signOutCurrent)
 
+src/lib/repositories/ConversationRepository.ts    (Phase 3 — Prisma queries + ownership metadata lookup)
+src/lib/services/ConversationService.ts           (Phase 3 — loadForUser, listForUser, create, appendTurn, assertOwnership)
+src/lib/services/ConversationServiceError.ts      (Phase 3 — typed error class)
+
 src/types/next-auth.d.ts               (module augmentation — adds id to session.user)
+src/utils/hydrateChatMessages.ts       (Phase 3 — AgentInputItem[] → ChatMessage[] for /c/[id] hydration)
 
 src/components/
-├── Header.tsx                         (Phase 1 — MUI AppBar, sign-in button / user avatar menu)
-└── PostSignInConfirmHandler.tsx       (Phase 2 — auto-completes booking confirm after OAuth redirect)
+├── Header.tsx                         (Phase 1 — MUI AppBar; extended in Phase 3 with New chat + Conversations dropdown)
+├── PostSignInConfirmHandler.tsx       (Phase 2 — auto-completes booking confirm after OAuth redirect)
+└── ChatContainer.tsx                  (Phase 3 — extracted chat surface, reused by / and /c/[id])
 
 app/
 ├── providers.tsx                      (Phase 1 — client AuthProvider wrapping SessionProvider)
-└── api/auth/[...nextauth]/route.ts    (Phase 1 — mounts handlers.GET / handlers.POST)
+├── api/auth/[...nextauth]/route.ts    (Phase 1 — mounts handlers.GET / handlers.POST)
+├── api/conversations/route.ts         (Phase 3 — GET list, 10 most-recent for current user)
+└── c/[id]/page.tsx                    (Phase 3 — server-loads conversation, hydrates ChatContainer)
 
 prisma/migrations/
 ├── 20260721193613_stage_17_auth_tables/                   (Phase 1 — User, Account, Session, VerificationToken)
-└── 20260722192414_stage_17_phase_2_booking_ownership/     (Phase 2 — Booking.userId FK, nullable customer fields)
+├── 20260722192414_stage_17_phase_2_booking_ownership/     (Phase 2 — Booking.userId FK, nullable customer fields)
+└── 20260727185322_stage_17_phase_3_conversations/         (Phase 3 — Conversation + Message tables)
 ```
 
-Modified across both phases: `prisma/schema.prisma`, `src/lib/index.ts`, `src/lib/services/BookingService.ts`, `src/types/booking.ts`, `src/components/BookingCard.tsx`, `src/agents/buildTravelAgent.ts`, `src/mcp/tools/travel/proposeBookingToolSpec.ts`, `app/layout.tsx`, `app/page.tsx`, `app/api/booking/propose/route.ts`, `app/api/booking/[id]/route.ts`, `app/api/booking/[id]/confirm/route.ts`, `app/api/booking/[id]/cancel/route.ts`, `.env.example`, `package.json` (+ `package-lock.json`).
+Modified across all three phases: `prisma/schema.prisma`, `src/lib/index.ts`, `src/lib/services/BookingService.ts`, `src/types/booking.ts`, `src/types/chat.ts`, `src/types/stream.ts`, `src/hooks/useAgentChat.ts`, `src/components/BookingCard.tsx`, `src/agents/buildTravelAgent.ts`, `src/mcp/tools/travel/proposeBookingToolSpec.ts`, `src/utils/apiErrorResponse.ts`, `app/layout.tsx`, `app/page.tsx`, `app/api/agent/route.ts`, `app/api/booking/propose/route.ts`, `app/api/booking/[id]/route.ts`, `app/api/booking/[id]/confirm/route.ts`, `app/api/booking/[id]/cancel/route.ts`, `.env.example`, `package.json` (+ `package-lock.json`).
 
 ---
 

@@ -3,6 +3,9 @@ import { z } from 'zod';
 import { BookingRepository } from './repositories/BookingRepository';
 import { BookingService } from './services/BookingService';
 import { BookingServiceError } from './services/BookingServiceError';
+import { ConversationRepository } from './repositories/ConversationRepository';
+import { ConversationService } from './services/ConversationService';
+import { ConversationServiceError } from './services/ConversationServiceError';
 import { FlightRepository } from './repositories/FlightRepository';
 import { FlightService } from './services/FlightService';
 import { HotelRepository } from './repositories/HotelRepository';
@@ -69,6 +72,19 @@ export {
   type BookingServiceErrorCode,
 } from './services/BookingServiceError';
 
+// ───── Conversations (Stage 17 Phase 3) ─────
+export { ConversationRepository } from './repositories/ConversationRepository';
+export type {
+  ConversationSummary,
+  ConversationWithMessages,
+} from './repositories/ConversationRepository';
+export { ConversationService } from './services/ConversationService';
+export type { LoadedConversation } from './services/ConversationService';
+export {
+  ConversationServiceError,
+  type ConversationServiceErrorCode,
+} from './services/ConversationServiceError';
+
 // ───── Helpers ─────
 let defaultPrisma: PrismaClient | undefined;
 
@@ -103,6 +119,13 @@ export function createBookingService(prisma?: PrismaClient): BookingService {
   return new BookingService(client, new BookingRepository(client));
 }
 
+export function createConversationService(
+  prisma?: PrismaClient,
+): ConversationService {
+  const client = prisma ?? getSharedPrisma();
+  return new ConversationService(new ConversationRepository(client));
+}
+
 export function isWeatherServiceError(
   err: unknown,
 ): err is WeatherServiceError {
@@ -117,6 +140,12 @@ export function isBookingServiceError(
   err: unknown,
 ): err is BookingServiceError {
   return err instanceof BookingServiceError;
+}
+
+export function isConversationServiceError(
+  err: unknown,
+): err is ConversationServiceError {
+  return err instanceof ConversationServiceError;
 }
 
 export function isZodValidationError(err: unknown): err is z.ZodError {

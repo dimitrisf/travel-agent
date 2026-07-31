@@ -355,14 +355,15 @@ enum PaymentStatus {
 // therefore also be String, not Int (relevant for Booking.userId in Phase 2).
 
 model User {
-  id            String    @id @default(cuid())
+  id            String         @id @default(cuid())
   name          String?
-  email         String    @unique
+  email         String         @unique
   emailVerified DateTime?
   image         String?
   accounts      Account[]
   sessions      Session[]
   bookings      Booking[]
+  conversations Conversation[]
 }
 
 // Account is one row per OAuth provider per user. A user can have multiple
@@ -408,4 +409,55 @@ model VerificationToken {
   expires    DateTime
 
   @@id([identifier, token])
+}
+
+// ───────────────────────────────────────────────
+// Conversations (Stage 17 Phase 3)
+// ───────────────────────────────────────────────
+// Persistence for signed-in users' chat sessions. Anonymous users continue
+// to run tab-scoped without writing to these tables — the /api/agent route
+// only creates a Conversation when the request carries a valid session.
+//
+// Model choice: one Message row per AgentInputItem (user turn, assistant
+// turn, function_call, function_call_result). The AgentInputItem is a
+// discriminated union with wildly different shapes per role, so `data` is
+// stored as a JSON blob — normalizing every field would be a schema for
+// one library's internal format. Loading is `SELECT * WHERE
+// conversationId = ? ORDER BY createdAt ASC` — the resulting array is
+// what the agent's run() expects verbatim.
+
+model Conversation {
+  id     String @id @default(cuid())
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  // Nullable — derived from the first user message on first turn, may be
+  // updated later (LLM summarization is future work). Kept short (~60 chars)
+  // for the conversations dropdown UI.
+  title String?
+
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  messages  Message[]
+
+  @@index([userId, updatedAt])
+}
+
+model Message {
+  id             String       @id @default(cuid())
+  conversationId String
+  conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+
+  // Full AgentInputItem serialized as JSON. Shape depends on the item type:
+  //   user turn:              { role: 'user', content: string }
+  //   assistant turn:         { role: 'assistant', content: [...] }
+  //   tool call:              { type: 'function_call', name, arguments, callId }
+  //   tool call result:       { type: 'function_call_result', callId, output }
+  // Consumers must parse and dispatch by shape — Prisma can't type this any
+  // further without a real generic-Json variant.
+  data Json
+
+  createdAt DateTime @default(now())
+
+  @@index([conversationId, createdAt])
 }

@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import {
   isBookingServiceError,
+  isConversationServiceError,
   isTravelServiceError,
   isWeatherServiceError,
   isZodValidationError,
@@ -64,6 +65,21 @@ export function apiErrorResponse(err: unknown): NextResponse {
     // in the server log so we can diagnose failures without losing them.
     if (err.code === 'INTERNAL_ERROR') {
       console.error('[booking] internal error:', err.message, err.cause ?? err);
+    }
+    return NextResponse.json(
+      { error: err.message, code: err.code },
+      { status },
+    );
+  }
+
+  if (isConversationServiceError(err)) {
+    const status = err.code === 'CONVERSATION_NOT_FOUND' ? 404 : 500;
+    if (err.code === 'INTERNAL_ERROR') {
+      console.error(
+        '[conversation] internal error:',
+        err.message,
+        err.cause ?? err,
+      );
     }
     return NextResponse.json(
       { error: err.message, code: err.code },

@@ -10,6 +10,8 @@ import {
 import { buildAgentGraph } from '@/agents/buildAgentGraph';
 import { rebuildCollectorFromHistory } from '@/agents/agentRunContext';
 import type { AgentRunContext } from '@/agents/agentRunContext';
+import { getCurrentUser } from '@/lib/auth/session';
+import { createConversationService, isConversationServiceError } from '@/lib';
 import { unwrapToolOutput } from '@/utils/toolOutput';
 import { userFacingGuardrailErrorMessage } from '@/utils/userFacingGuardrailErrorMessage';
 
@@ -65,14 +67,29 @@ function getOrInitMcps(): Promise<McpBundle> {
 // ───────────────────────────────────────────────
 // We define a POST handler for the /api/agent route. This handler receives a request with a JSON body containing the user's input and the conversation history. It validates the input, initializes the MCP servers and agent, and runs the agent to generate a response. The response is streamed back to the client as Server-Sent Events (SSE) in real-time.
 export async function POST(req: NextRequest) {
-  // We only accept userInput as a string and history as an array of AgentInputItem.
-  // This is what is being sent from app/page.tsx when the user submits a prompt.
+  // We accept userInput, history, and optionally conversationId. The
+  // conversationId is present on follow-up turns to an existing
+  // conversation (either loaded from /c/[id] or created on a prior turn
+  // and returned via the `done` event's conversationId field). Absent for
+  // the very first turn of a fresh conversation and for anonymous turns.
   const body = (await req.json()) as {
-    // AgentInputItem is a discriminated union of { role: 'user' | 'assistant' | 'system', content: string } and { role: 'tool', content: string, toolName: string, toolArgs: unknown }.
+    // history is the AgentInputItem[] the client is sending as this
+    // turn's prior context. Item shapes we actually see (per the SDK):
+    //   { role: 'user', content: string }
+    //   { role: 'assistant', content: [...] }  ← content is an array of parts
+    //   { type: 'function_call', callId, name, arguments }
+    //   { type: 'function_call_result', callId, output: { type: 'text', text } }
+    // See hydrateChatMessages.ts and rebuildCollectorFromHistory for
+    // consumers that walk this shape.
     history: AgentInputItem[];
     userInput: string;
+    conversationId?: string;
   };
+
+  // We destructure the body to get the history, userInput, and conversationId. We provide a default value of an empty array for history in case it is not provided. The conversationId is optional and may be undefined for the first turn of a new conversation or for anonymous requests.
+  // history is the conversation history up to this point, which may include user messages, assistant messages, tool calls, and tool call results. userInput is the new message from the user that we want the agent to respond to. conversationId is undefined for the very first turn of a fresh conversation and for all anonymous turns.
   const { history = [], userInput } = body;
+  let conversationId = body.conversationId;
 
   // We validate that userInput is a non-empty string. If it is not, we return a 400 Bad Request response with an error message. This ensures that the agent has a valid input to process.
   if (!userInput || typeof userInput !== 'string') {
@@ -80,6 +97,50 @@ export async function POST(req: NextRequest) {
       status: 400,
       headers: { 'Content-Type': 'application/json' },
     });
+  }
+
+  // Persistence (Stage 17 Phase 3) — signed-in users only. If a session
+  // exists, we either verify ownership of the incoming conversationId or
+  // create a fresh Conversation seeded with this turn's user message.
+  // Anonymous requests skip persistence entirely and preserve the
+  // pre-Phase-3 tab-scoped behavior.
+
+  // We get the current user from the session. If there is a user, we create a ConversationService instance to handle conversation persistence. If there is no user, we skip persistence and allow anonymous requests.
+  const user = await getCurrentUser();
+  const conversationService = user ? createConversationService() : null;
+
+  if (user && conversationService) {
+    if (conversationId) {
+      // Follow-up turn to an existing conversation -- in this case, conversationId is provided, so we verify that the user owns it.
+      try {
+        await conversationService.assertOwnership({
+          id: conversationId,
+          userId: user.id,
+        });
+      } catch (err) {
+        if (isConversationServiceError(err)) {
+          return new Response(
+            JSON.stringify({ error: err.message, code: err.code }),
+            { status: 404, headers: { 'Content-Type': 'application/json' } },
+          );
+        }
+
+        // Unexpected error — let the stream fail and log it, but don't return a 500 to the client. The client will see the stream close and can retry. We rethrow the error so it gets logged by Next.js.
+        throw err;
+      }
+    } else {
+      // First turn of a fresh conversation. conversationId is not provided, so we create a new conversation. Seed the title from the current
+      // user message so the header dropdown gets a meaningful label right
+      // away — deriveTitle (called in conversationService.create) reads the first user turn in the seed array.
+      const created = await conversationService.create({
+        userId: user.id,
+        seedHistory: [
+          ...history,
+          { role: 'user', content: userInput } as AgentInputItem,
+        ],
+      });
+      conversationId = created.id;
+    }
   }
 
   const { mcpTravel, mcpWeather } = await getOrInitMcps();
@@ -212,7 +273,33 @@ export async function POST(req: NextRequest) {
         }
 
         await stream.completed;
-        send({ type: 'done', history: stream.history });
+
+        // Phase 3 persistence — append the items produced by this turn
+        // (user message + any function_call / function_call_result /
+        // assistant items the agent generated). Only for signed-in users
+        // with a resolved conversationId. Best-effort: a persistence
+        // failure gets logged but doesn't corrupt the stream — the user
+        // still sees the turn complete and can retry later.
+        if (conversationService && conversationId) {
+          // newItems is the slice of stream.history that was added by this turn. It includes the user's message and any items generated by the agent during this turn. We append these new items to the conversation in the database.
+          // history holds the conversation history before this turn, and stream.history holds the full conversation history including this turn. We slice stream.history from history.length to get only the new items added during this turn.
+          const newItems = stream.history.slice(history.length);
+
+          // We call appendTurn to persist the new items to the conversation in the database. This allows us to maintain a complete record of the conversation across turns. If an error occurs during persistence, we log it but do not interrupt the stream, allowing the user to continue interacting with the agent.
+          try {
+            await conversationService.appendTurn({
+              conversationId,
+              newItems,
+            });
+          } catch (err) {
+            console.error('[api/agent] persistence failed:', err);
+          }
+        }
+
+        // conversationId is echoed back to the client so /page.tsx can
+        // swap the URL to /c/[id] on the first-turn case (auto-create
+        // flow) and the follow-up turns can pass it back to us.
+        send({ type: 'done', history: stream.history, conversationId });
       } catch (err) {
         // Split guardrail trips from actual errors so the UI can render
         // them as a policy notice (soft styling, no "Error:" prefix)

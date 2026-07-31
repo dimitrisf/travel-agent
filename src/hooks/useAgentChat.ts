@@ -2,20 +2,44 @@ import { useState } from 'react';
 import type { AgentInputItem } from '@openai/agents';
 import type { ChatMessage } from '@/types/chat';
 import type { StreamEvent } from '@/types/stream';
+import { hydrateChatMessages } from '@/utils/hydrateChatMessages';
+
+// Options for the hook. All optional — the / page passes nothing (fresh
+// anon or signed-in chat), the /c/[id] page passes both `initialHistory`
+// and `initialConversationId` (resumed conversation).
+export type UseAgentChatOptions = {
+  initialHistory?: AgentInputItem[];
+  initialConversationId?: string;
+};
 
 // useAgentChat encapsulates the chat-with-the-agent state and streaming
 // protocol. Owns the displayed messages, the conversation history sent to
-// the agent on the next turn, and the in-flight pending flag. Exposes a
-// single `send(prompt)` action; callers deal with the UI (text input,
-// autoscroll, form submit) themselves.
-export function useAgentChat() {
+// the agent on the next turn, the current conversationId (Stage 17 Phase 3),
+// and the in-flight pending flag. Exposes a single `send(prompt)` action;
+// callers deal with the UI (text input, autoscroll, form submit) themselves.
+export function useAgentChat(opts: UseAgentChatOptions = {}) {
   // messages is the chat history displayed in the UI. Each message has an id, role (user or agent), text content, an array of tool calls (if any), and a pending flag indicating if the message is still being processed.
-  const [messages, setMessages] = useState<ChatMessage[]>([]);
+  // Seeded from initialHistory when hydrating a resumed conversation (/c/[id]).
+  const [messages, setMessages] = useState<ChatMessage[]>(() =>
+    // We use hydrateChatMessages to convert the canonical AgentInputItem[] history into ChatMessage[] bubbles for display. This ensures that the UI-facing bubble structure matches what the agent's run() consumes, and that the loaded page looks identical to a live chat session.
+    opts.initialHistory ? hydrateChatMessages(opts.initialHistory) : [],
+  );
 
   // history is the conversation history sent to the agent for context; in other words, it is the transcript the agent needs on the next turn. It includes both user and agent messages, but does not include the tool call details.
   // It is updated when the agent sends a 'done' event, which includes the full history of the conversation so far.
   // The difference between messages and history is that messages are for display in the UI, while history is for sending to the agent to maintain context across turns.
-  const [history, setHistory] = useState<AgentInputItem[]>([]);
+  const [history, setHistory] = useState<AgentInputItem[]>(
+    opts.initialHistory ?? [],
+  );
+
+  // conversationId (Stage 17 Phase 3) is the id of the persisted
+  // Conversation this chat belongs to. Null for anonymous chats and for
+  // the pre-first-turn signed-in state on `/`; server sets it on the
+  // first turn's `done` event, after which the client swaps the URL to
+  // /c/[id] so refresh + bookmarking work.
+  const [conversationId, setConversationId] = useState<string | null>(
+    opts.initialConversationId ?? null,
+  );
 
   // pending indicates if a request to the agent is currently in progress.
   // It locks the send button and input field to prevent multiple simultaneous requests, i.e., while a turn is in flight.
@@ -136,8 +160,15 @@ export function useAgentChat() {
       const res = await fetch('/api/agent', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        // The request body includes the current conversation history and the new user input. The agent API will use this to generate a response, potentially calling tools as needed.
-        body: JSON.stringify({ history, userInput }),
+        // Request body: current history + this turn's input + optional
+        // conversationId (for signed-in follow-up turns). If no id yet,
+        // the server creates a Conversation on this turn and echoes the
+        // id back via the `done` event.
+        body: JSON.stringify({
+          history,
+          userInput,
+          conversationId: conversationId ?? undefined,
+        }),
       });
 
       if (!res.ok || !res.body) throw new Error(`HTTP ${res.status}`);
@@ -283,8 +314,26 @@ export function useAgentChat() {
     } else if (payload.type === 'done') {
       // Update client-side history; unlock send button
       // Mark the agent message as no longer pending, so the UI can stop showing the "thinking..." indicator. We find the agent message in the messages state by its id (agentMsgId) and set its pending flag to false. This indicates that the agent has finished processing the user's input and has sent a final response.
-      // E.g., payload = { type: 'done', history: [...] }
+      // E.g., payload = { type: 'done', history: [...], conversationId: 'abc123' }
       setHistory(payload.history);
+      // Stage 17 Phase 3: if this is the first turn of a fresh signed-in
+      // conversation, the server assigned an id. Swap the URL to /c/[id]
+      // via history.replaceState (no page reload, no re-render loop) so
+      // refresh + bookmarking work. Skip when the id is already set (we
+      // opened /c/[id] directly) or absent (anon chat).
+      if (payload.conversationId && payload.conversationId !== conversationId) {
+        setConversationId(payload.conversationId);
+
+        // We only manipulate the URL in the browser environment (window is defined). If window is undefined, we are likely in a server-side rendering context, and we should not attempt to change the URL.
+        if (typeof window !== 'undefined') {
+          const target = `/c/${payload.conversationId}`;
+
+          // Only replace the URL if it is different from the current pathname. This prevents unnecessary history entries and avoids triggering a re-render loop. We use window.history.replaceState to change the URL without reloading the page or causing a full navigation.
+          if (window.location.pathname !== target) {
+            window.history.replaceState({}, '', target);
+          }
+        }
+      }
     } else if (payload.type === 'error') {
       // Replace agent message with an error
       setMessages((prev) =>
@@ -316,5 +365,5 @@ export function useAgentChat() {
     }
   }
 
-  return { messages, pending, send };
+  return { messages, pending, send, conversationId };
 }

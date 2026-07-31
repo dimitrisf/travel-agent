@@ -10,8 +10,12 @@ export type StreamEvent =
   | { type: 'tool_output'; output: string; callId?: string }
   // The 'agent_updated' event is emitted when the SDK hands off control to a different agent. The payload includes the new agent's name, which can be used to display a chip in the UI indicating the handoff.
   | { type: 'agent_updated'; agentName: string }
-  // The 'done' event is emitted when the agent has finished processing the user's input and has sent a final response. The payload includes the full conversation history so far, which can be used to update the client-side history state.
-  | { type: 'done'; history: AgentInputItem[] }
+  // The 'done' event is emitted when the agent has finished processing the user's input and has sent a final response. The payload includes the full conversation history so far, which can be used to update the client-side history state. `conversationId` is set for signed-in users whose turn was persisted (Stage 17 Phase 3); undefined for anonymous callers whose chat stays tab-scoped.
+  | {
+      type: 'done';
+      history: AgentInputItem[];
+      conversationId?: string;
+    }
   // The 'error' event is emitted when a genuine failure occurs during
   // processing (network, MCP, model call). The UI renders it with an
   // error prefix. Guardrail trips do NOT come through this channel —
