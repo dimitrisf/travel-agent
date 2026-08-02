@@ -16,11 +16,14 @@ import Stack from '@mui/material/Stack';
 import AddIcon from '@mui/icons-material/Add';
 import HistoryIcon from '@mui/icons-material/History';
 import GoogleIcon from '@mui/icons-material/Google';
+import ShareIcon from '@mui/icons-material/Share';
 import {
   useCurrentUser,
   signInWithGoogle,
   signOutCurrent,
 } from '@/lib/auth/client';
+import { useShareState } from '@/lib/share/ShareContext';
+import { ShareModal } from '@/components/ShareModal';
 
 // Header for both the / and /c/[id] surfaces. Signed-out: title + sign-in
 // button. Signed-in: title, "+ New chat", "Conversations" dropdown (10
@@ -83,6 +86,8 @@ function SignedInControls() {
       </Button>
 
       <ConversationsMenu />
+
+      <ShareButton />
 
       <IconButton onClick={(e) => setUserMenuAnchor(e.currentTarget)}>
         <Avatar
@@ -223,5 +228,40 @@ function SignedOutControls() {
     >
       Sign in
     </Button>
+  );
+}
+
+// Share button (Stage 17 Phase 4). Reads ShareContext to decide whether
+// to render at all — only shows when there's a current conversation AND
+// the viewer owns it. Non-owners viewing a shared conversation see no
+// button (they're view-only). Anonymous users see no button. Owners on
+// `/` (no conversation yet) also see no button.
+//
+// Icon color reflects the current shared state at a glance: `primary`
+// (theme accent, blue in the default MUI theme) when sharing is on,
+// `default` (grey) when off. The color flips optimistically the moment
+// the user toggles the switch in ShareModal — see the setShared call
+// there for the state flow.
+function ShareButton() {
+  // Read the current conversation ID, ownership, and shared state from the ShareContext. This context is populated by the ChatContainer on mount and updated by the ShareModal when the user toggles sharing. The button only renders if there's a valid conversation ID and the viewer is the owner.
+  const { conversationId, isOwner, shared } = useShareState();
+
+  // modalOpen state controls whether the ShareModal is open. Clicking the button sets this to true, and closing the modal sets it back to false. This state is local to this component and does not affect the shared state itself.
+  const [modalOpen, setModalOpen] = useState(false);
+
+  // If there's no current conversation or the viewer isn't the owner, don't render the button at all. This prevents non-owners from seeing a Share button they can't use, and avoids showing a Share button when there's no conversation context (e.g., on the landing page before starting a chat).
+  if (!conversationId || !isOwner) return null;
+
+  return (
+    <>
+      <IconButton
+        onClick={() => setModalOpen(true)}
+        aria-label={shared ? 'Manage sharing (currently shared)' : 'Share'}
+        color={shared ? 'primary' : 'default'}
+      >
+        <ShareIcon />
+      </IconButton>
+      <ShareModal open={modalOpen} onClose={() => setModalOpen(false)} />
+    </>
   );
 }

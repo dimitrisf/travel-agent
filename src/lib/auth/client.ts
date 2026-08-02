@@ -30,9 +30,14 @@ export async function signInWithGoogle(callbackUrl?: string): Promise<void> {
 // Imperative sign-out. Triggers a POST to /api/auth/signout, which clears
 // the session cookie AND (because we're on database session strategy)
 // deletes the Session row via the Prisma adapter's deleteSession call.
-// Returns to the current URL by default.
+// Defaults to redirecting to `/` (home) because "sign out and stay on
+// the current URL" leads to bad UX: on a /c/[id] URL, sign-out would
+// either bounce through the anon fallback back to `/` (extra redirect
+// visible in the URL bar) or, if the conversation is shared, land the
+// user on the read-only viewer view — not what someone clicking Sign
+// out wants.
 export async function signOutCurrent(callbackUrl?: string): Promise<void> {
   await signOut({
-    callbackUrl: callbackUrl ?? window.location.href,
+    callbackUrl: callbackUrl ?? '/',
   });
 }

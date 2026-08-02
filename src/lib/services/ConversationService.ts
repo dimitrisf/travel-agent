@@ -14,10 +14,16 @@ export type LoadedConversation = {
   id: string;
   userId: string;
   title: string | null;
+  shared: boolean;
   createdAt: Date;
   updatedAt: Date;
   history: AgentInputItem[];
 };
+
+// Viewer-side variant. Same fields plus a computed isOwner flag. Callers
+// use isOwner to decide UI affordances (Share button visible? input
+// disabled? banner shown?) without re-comparing viewerId to userId.
+export type ConversationView = LoadedConversation & { isOwner: boolean };
 
 // Title auto-generated from the first user message. Kept short so it fits
 // the header dropdown's single-line row. Newlines collapsed to spaces.
@@ -56,29 +62,33 @@ function isUserTurn(
 export class ConversationService {
   constructor(private readonly repo: ConversationRepository) {}
 
-  // Load an existing conversation with ownership check. Cross-user access
-  // returns CONVERSATION_NOT_FOUND (same shape as truly-missing) so id
-  // enumeration can't discover which ones exist under other users.
-  async loadForUser(input: {
+  // Load an existing conversation for a viewer. Access rules:
+  //   - owner (signed in as userId matching row.userId) → always allowed
+  //   - anyone else (signed-in OR anon) → allowed IF row.shared === true
+  //   - otherwise → returns null (caller renders 404, no info leak)
+  //
+  // Returns null rather than throwing so the /c/[id] page can distinguish
+  // "not viewable" from "some other error" and choose 404 vs redirect
+  // vs throw at the boundary.
+  async loadForViewer(input: {
     id: string;
-    userId: string;
-  }): Promise<LoadedConversation> {
+    viewerId: string | null;
+  }): Promise<ConversationView | null> {
     const row = await this.repo.findById(input.id);
+    if (!row) return null;
 
-    if (!row || row.userId !== input.userId) {
-      throw new ConversationServiceError(
-        `Conversation ${input.id} not found.`,
-        'CONVERSATION_NOT_FOUND',
-      );
-    }
+    const isOwner = input.viewerId !== null && row.userId === input.viewerId;
+    if (!isOwner && !row.shared) return null;
 
     return {
       id: row.id,
       userId: row.userId,
       title: row.title,
+      shared: row.shared,
       createdAt: row.createdAt,
       updatedAt: row.updatedAt,
       history: extractHistory(row),
+      isOwner,
     };
   }
 
@@ -90,15 +100,32 @@ export class ConversationService {
   }
 
   // Cheap ownership check for the agent route's per-turn validation. Same
-  // 404-on-cross-tenant shape as loadForUser but skips the messages load.
+  // 404-on-cross-tenant shape as loadForViewer but skips the messages
+  // load. Note: this is still owner-strict (shared conversations do NOT
+  // grant write access — only the owner can append turns).
   async assertOwnership(input: { id: string; userId: string }): Promise<void> {
+    // If the conversation doesn't exist or the userId doesn't match, throw a 404-shaped error. This is the same shape as loadForViewer's "not viewable" case, so the agent route can treat it uniformly.
     const meta = await this.repo.findMetaById(input.id);
+
     if (!meta || meta.userId !== input.userId) {
       throw new ConversationServiceError(
         `Conversation ${input.id} not found.`,
         'CONVERSATION_NOT_FOUND',
       );
     }
+  }
+
+  // Toggle the shared flag on an existing conversation. Owner-only —
+  // cross-tenant callers get the same 404-shaped error as any other
+  // owner-scoped operation. Returns the new shared value.
+  async setShared(input: {
+    id: string;
+    userId: string;
+    shared: boolean;
+  }): Promise<{ shared: boolean }> {
+    await this.assertOwnership({ id: input.id, userId: input.userId });
+
+    return this.repo.setShared({ id: input.id, shared: input.shared });
   }
 
   // Create an empty conversation and derive its title from the first user

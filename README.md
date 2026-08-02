@@ -1842,7 +1842,7 @@ Modified: `src/evals/runner.ts` (registered 2 new cases), `src/agents/buildTrave
 
 ### Stage 17 — Auth + session persistence
 
-Roadmap item from the very beginning ("multi-user; audit trail; DB-backed conversations; save/resume URLs"), split into four phases so each ships as a coherent commit boundary rather than one monolithic PR. Phases 1, 2, and 3 have landed; Phase 4 is planned.
+Roadmap item from the very beginning ("multi-user; audit trail; DB-backed conversations; save/resume URLs"), split into four phases so each ships as a coherent commit boundary rather than one monolithic PR. All four phases have landed.
 
 Design shape (locked in before Phase 1 started):
 
@@ -2002,9 +2002,79 @@ Also `src/lib/index.ts` exports the new module, adds `createConversationService(
 
 **Eval status.** All existing eval cases green — the harness never signs in, so it exercises the anon `/api/agent` path, which is behavior-identical to before Phase 3 (no session → no persistence → no changes visible to the agent flow).
 
-#### Phase 4 (planned, not shipped)
+#### Phase 4 — Sharing
 
-- **Phase 4 — Sharing.** Private-per-user by default, explicit Share toggle grants link-view. Read-only for non-owners.
+What ships: opt-in per-conversation sharing via a header icon → modal → toggle. Anyone with the link (signed-in or anonymous) can view a shared conversation read-only. Only the owner can continue.
+
+**Sharing model.**
+
+| State | Who can view `/c/[id]` | Who can append turns |
+|---|---|---|
+| Private (default) | Only the owner | Only the owner |
+| Shared | Owner + anyone with the link (signed-in or anon) | Only the owner |
+| Shared → un-shared | Back to owner-only. Anyone who had the link gets 404 (signed-in) or redirected to `/` with a notice banner (anon) | Only the owner |
+
+Two consistent design choices:
+- **Read-only viewers** — sharing only grants view access, never write. The `/api/agent` route's `assertOwnership` check is intentionally NOT relaxed for shared conversations.
+- **Info-leak-safe** — non-owner attempts to view a private conversation return the same shape (404 for signed-in / redirect + neutral banner for anon) whether the conversation doesn't exist, is private, or was previously shared and revoked. Prevents id-enumeration from distinguishing between these cases.
+
+**Schema change** (`prisma/schema.prisma`): a single `Conversation.shared Boolean @default(false)` column. Nothing else — everything derives from this flag.
+
+**Migration**: additive, defaults existing rows to `shared: false`.
+
+**Service** (`src/lib/services/ConversationService.ts`):
+
+- `LoadedConversation` now includes `shared: boolean` so the client can seed its state without a second query.
+- New `ConversationView = LoadedConversation & { isOwner: boolean }` — viewer-side shape with a computed `isOwner` flag so the page doesn't re-compare viewerId to userId.
+- Replaced `loadForUser({ id, userId })` with **`loadForViewer({ id, viewerId: string | null })`** — new access rules: owner OR (`shared === true`). Returns `null` instead of throwing, which lets the page distinguish "not viewable" from "some other error" and choose 404 vs redirect vs throw at the boundary.
+- New **`setShared({ id, userId, shared })`** — owner-only via the existing `assertOwnership` check; returns the new `{ shared }` for optimistic UI.
+- **`assertOwnership` intentionally unchanged** — sharing grants READ access; only the owner can append turns.
+
+**Repository** (`src/lib/repositories/ConversationRepository.ts`): new `setShared({ id, shared })` — raw Prisma update returning `{ shared }`.
+
+**New API route** (`app/api/conversations/[id]/route.ts`): `PATCH /api/conversations/[id]` — owner-only. 401 if anon, cross-tenant → 404 via the service. Body `{ shared: boolean }`. Returns `{ shared }`.
+
+**Client Context** — the load-bearing piece of coordination between Header and page:
+
+- **New `src/lib/share/ShareContext.tsx`** — client React Context. Shape: `{ conversationId, isOwner, shared, setShareState, setShared }`. Empty default (`conversationId: null`) so the Header's `ShareButton` trivially short-circuits on `/`.
+- **Why a Context and not props**: Header is a sibling of the page — both mount inside the root layout, which is a server component. Prop-drilling between them would require lifting state into the layout, which can't hold client state. A client Context in `app/providers.tsx` is the cleaner boundary. Alternative was Header fetching ownership metadata on every navigation — an extra HTTP round-trip that most navigations don't need.
+- **`app/providers.tsx`** nests `ShareProvider` inside `SessionProvider`.
+
+**Page** (`app/c/[id]/page.tsx`):
+
+- Uses `loadForViewer` instead of the old `loadForUser`.
+- Passes `initialShared` + `isOwner` to `ChatContainer`.
+- Fallback when `loadForViewer` returns `null`: signed-in → `notFound()` (real 404); anon → `redirect('/?notice=conversation-unavailable')` (friendlier UX, notice explained by `UrlNoticeHandler`).
+
+**ChatContainer** (`src/components/ChatContainer.tsx`):
+
+- Accepts `initialShared` + `isOwner`. Computes `readOnly = initialConversationId != null && !isOwner`.
+- **Publishes to `ShareContext` on mount** with a subtle disambiguation: if `liveConversationId` (from `useAgentChat`) matches `initialConversationId` (from props), trust `props.isOwner` — this is the `/c/[id]` load path. If they differ (id was undefined at mount but the hook resolved a new one via the auto-create flow on `/`), set `isOwner: true` — `/api/agent` only creates conversations under the signed-in user's id, so the caller is by definition the owner. Without this branch, the Header's Share button wouldn't appear after the URL swap on `/` (the bug caught during smoke testing).
+- **Read-only rendering**: `outlined` info Alert above the chat surface ("Shared conversation — view-only"), plus a disabled `TextField` and disabled Send button with a different placeholder ("Read-only — sign in and open your own chat to send messages.").
+
+**ShareModal** (`src/components/ShareModal.tsx`):
+
+- MUI `Dialog` with a `Switch` at the top, help text underneath, and (when shared) a read-only `TextField` with the URL + copy `IconButton`.
+- Reads `useShareState()` for current `conversationId` + `shared`.
+- Toggle → `PATCH /api/conversations/[id]` → on success, `setShared(body.shared)` writes back to the Context so the Header's icon updates immediately.
+- Copy uses `navigator.clipboard.writeText`; success shows a 2-second alert.
+- URL computed from `window.location.origin` — works in dev + prod without config.
+
+**Header extension** (`src/components/Header.tsx`):
+
+- **New `ShareButton` sub-component** — reads `useShareState()`. Returns `null` unless BOTH `conversationId` AND `isOwner` are set. Icon color reflects state: `primary` (blue) when currently shared, `default` (grey) when not. Opens `ShareModal` on click.
+
+**New `UrlNoticeHandler`** (`src/components/UrlNoticeHandler.tsx`): communicates soft errors from server-side redirects.
+
+- Reads `?notice=…` from `useSearchParams`, matches against a `NOTICES` dictionary, renders an **inline persistent MUI `Alert` banner** above the chat surface. Iteration went bottom-right Snackbar → top-anchored Snackbar → **inline banner** because the redirect notice is easy to miss when it isn't user-triggered, and a persistent banner in the same visual position as the "Shared conversation — view-only" one gives it consistent semantics.
+- **`variant: 'outlined'`, `severity: 'warning'`** (orange) — reads as "heads up, this didn't work" rather than neutral info.
+- Only `conversation-unavailable` notice defined so far — neutrally worded to avoid revealing which of *doesn't-exist / private / was-revoked* actually applied.
+- Strips the param via `history.replaceState` so a refresh doesn't re-fire.
+- `useRef` guard against React strict-mode double-invoke.
+
+**Late UX fix** (`src/lib/auth/client.ts`): `signOutCurrent` default callback URL changed from `window.location.href` to `'/'`. The old default meant signing out from a shared `/c/[id]` (as owner) would land the user on the read-only viewer view of their own conversation — actively confusing. Now sign-out from anywhere lands on `/`.
+
+**Eval status**: all existing eval cases green — sharing is entirely UI + persistence-layer work; the agent flow is untouched.
 
 #### File index
 
@@ -2015,31 +2085,36 @@ src/lib/auth/
 ├── session.ts                         (server: CurrentUser, getCurrentUser, requireUser)
 └── client.ts                          (client: useCurrentUser, signInWithGoogle, signOutCurrent)
 
-src/lib/repositories/ConversationRepository.ts    (Phase 3 — Prisma queries + ownership metadata lookup)
-src/lib/services/ConversationService.ts           (Phase 3 — loadForUser, listForUser, create, appendTurn, assertOwnership)
+src/lib/repositories/ConversationRepository.ts    (Phase 3 — findById/findMetaById/listByUser/create/appendMessages; Phase 4 added setShared)
+src/lib/services/ConversationService.ts           (Phase 3 — listForUser/create/appendTurn/assertOwnership; Phase 4 replaced loadForUser with loadForViewer, added setShared)
 src/lib/services/ConversationServiceError.ts      (Phase 3 — typed error class)
+src/lib/share/ShareContext.tsx                    (Phase 4 — client Context for {conversationId, isOwner, shared})
 
 src/types/next-auth.d.ts               (module augmentation — adds id to session.user)
 src/utils/hydrateChatMessages.ts       (Phase 3 — AgentInputItem[] → ChatMessage[] for /c/[id] hydration)
 
 src/components/
-├── Header.tsx                         (Phase 1 — MUI AppBar; extended in Phase 3 with New chat + Conversations dropdown)
+├── Header.tsx                         (Phase 1 — MUI AppBar; extended in Phase 3 with New chat + Conversations dropdown; Phase 4 added ShareButton sub-component)
 ├── PostSignInConfirmHandler.tsx       (Phase 2 — auto-completes booking confirm after OAuth redirect)
-└── ChatContainer.tsx                  (Phase 3 — extracted chat surface, reused by / and /c/[id])
+├── ChatContainer.tsx                  (Phase 3 — extracted chat surface; Phase 4 added readOnly mode + share-context publishing)
+├── ShareModal.tsx                     (Phase 4 — Dialog with toggle + URL + copy button)
+└── UrlNoticeHandler.tsx               (Phase 4 — inline warning banner for ?notice=… server redirects)
 
 app/
-├── providers.tsx                      (Phase 1 — client AuthProvider wrapping SessionProvider)
+├── providers.tsx                      (Phase 1 — client AuthProvider; Phase 4 nested ShareProvider inside)
 ├── api/auth/[...nextauth]/route.ts    (Phase 1 — mounts handlers.GET / handlers.POST)
 ├── api/conversations/route.ts         (Phase 3 — GET list, 10 most-recent for current user)
-└── c/[id]/page.tsx                    (Phase 3 — server-loads conversation, hydrates ChatContainer)
+├── api/conversations/[id]/route.ts    (Phase 4 — PATCH { shared: boolean }, owner-only)
+└── c/[id]/page.tsx                    (Phase 3 — server-loads; Phase 4 uses loadForViewer, passes isOwner/initialShared, anon-fallback notice)
 
 prisma/migrations/
 ├── 20260721193613_stage_17_auth_tables/                   (Phase 1 — User, Account, Session, VerificationToken)
 ├── 20260722192414_stage_17_phase_2_booking_ownership/     (Phase 2 — Booking.userId FK, nullable customer fields)
-└── 20260727185322_stage_17_phase_3_conversations/         (Phase 3 — Conversation + Message tables)
+├── 20260727185322_stage_17_phase_3_conversations/         (Phase 3 — Conversation + Message tables)
+└── 20260731202040_stage_17_phase_4_conversation_shared/   (Phase 4 — Conversation.shared column)
 ```
 
-Modified across all three phases: `prisma/schema.prisma`, `src/lib/index.ts`, `src/lib/services/BookingService.ts`, `src/types/booking.ts`, `src/types/chat.ts`, `src/types/stream.ts`, `src/hooks/useAgentChat.ts`, `src/components/BookingCard.tsx`, `src/agents/buildTravelAgent.ts`, `src/mcp/tools/travel/proposeBookingToolSpec.ts`, `src/utils/apiErrorResponse.ts`, `app/layout.tsx`, `app/page.tsx`, `app/api/agent/route.ts`, `app/api/booking/propose/route.ts`, `app/api/booking/[id]/route.ts`, `app/api/booking/[id]/confirm/route.ts`, `app/api/booking/[id]/cancel/route.ts`, `.env.example`, `package.json` (+ `package-lock.json`).
+Modified across all four phases: `prisma/schema.prisma`, `src/lib/index.ts`, `src/lib/services/BookingService.ts`, `src/types/booking.ts`, `src/types/chat.ts`, `src/types/stream.ts`, `src/hooks/useAgentChat.ts`, `src/components/BookingCard.tsx`, `src/agents/buildTravelAgent.ts`, `src/mcp/tools/travel/proposeBookingToolSpec.ts`, `src/utils/apiErrorResponse.ts`, `app/layout.tsx`, `app/page.tsx`, `app/api/agent/route.ts`, `app/api/booking/propose/route.ts`, `app/api/booking/[id]/route.ts`, `app/api/booking/[id]/confirm/route.ts`, `app/api/booking/[id]/cancel/route.ts`, `.env.example`, `package.json` (+ `package-lock.json`).
 
 ---
 

@@ -1,9 +1,6 @@
 import { notFound, redirect } from 'next/navigation';
 import { ChatContainer } from '@/components/ChatContainer';
-import {
-  createConversationService,
-  isConversationServiceError,
-} from '@/lib';
+import { createConversationService } from '@/lib';
 import { getCurrentUser } from '@/lib/auth/session';
 
 export const runtime = 'nodejs';
@@ -12,48 +9,50 @@ export const dynamic = 'force-dynamic';
 type PageProps = { params: Promise<{ id: string }> };
 
 // Resumed-conversation page. Server component: loads the conversation
-// on the request (bypassing any /api/conversations fetch) and hands the
-// full history + id to ChatContainer as initial state. useAgentChat's
-// hydrateChatMessages call rebuilds the visible bubbles on mount.
+// on the request and hands the full history + id + share metadata to
+// ChatContainer as initial state. useAgentChat's hydrateChatMessages
+// call rebuilds the visible bubbles on mount.
 //
-// Auth: signed-in only. Anonymous callers get redirected to `/` rather
-// than forced through the sign-in page — that's better UX for two flows:
-//   (1) Sign-out from a /c/[id] URL: NextAuth returns you here, this
-//       page sees no user, sends you to `/` (fresh anon chat). No
-//       "you-just-signed-out-please-sign-back-in" whiplash.
-//   (2) A shared or bookmarked /c/[id] URL opened by someone who isn't
-//       signed in: they land on `/` and can decide to sign in from the
-//       header if they want to.
-// Signed-in-but-not-owner falls through to the loadForUser call below
-// and gets a 404 (cross-tenant guard, no info leak).
+// Access (Stage 17 Phase 4):
+//   - Owner (signed-in, userId matches) → full read/write access
+//   - Anyone else (signed-in OR anonymous) → allowed IF conversation.shared
+//     is true; view is read-only (input disabled, banner shown)
+//   - Not viewable → 404 for signed-in visitors, redirect to `/` for anon.
+//     Same info-leak guard: cross-tenant existence is never revealed.
 export default async function ConversationPage({ params }: PageProps) {
   const { id } = await params;
   const user = await getCurrentUser();
-  if (!user) {
-    redirect('/');
-  }
 
   const conversationService = createConversationService();
-  try {
-    const conversation = await conversationService.loadForUser({
-      id,
-      userId: user.id,
-    });
-    return (
-      <ChatContainer
-        initialConversationId={conversation.id}
-        initialHistory={conversation.history}
-      />
-    );
-  } catch (err) {
-    // Cross-tenant or truly-missing both surface as CONVERSATION_NOT_FOUND.
-    // Same 404 shape either way — no info leak on id enumeration.
-    if (
-      isConversationServiceError(err) &&
-      err.code === 'CONVERSATION_NOT_FOUND'
-    ) {
-      notFound();
-    }
-    throw err;
+
+  // Load the conversation for the current viewer. Returns null if not viewable
+  // (doesn't exist, or exists but not shared and caller isn't the owner).
+  // The service layer handles ownership validation and returns a ConversationView
+  // object with the conversation's metadata and history if viewable.
+  const conversationView = await conversationService.loadForViewer({
+    id,
+    viewerId: user?.id ?? null,
+  });
+
+  if (!conversationView) {
+    // Not viewable — either doesn't exist, or exists but not shared and
+    // caller isn't the owner. Same 404 shape either way (no info leak
+    // on id enumeration). Anon visitors get redirected to `/` with a
+    // `?notice=conversation-unavailable` query param — UrlNoticeHandler
+    // on the landing page reads it and shows an Alert explaining why
+    // they didn't land where they expected. Signed-in visitors get the
+    // real Next.js 404 page (cross-tenant scenario, cleaner signal).
+    if (user) notFound();
+
+    redirect('/?notice=conversation-unavailable');
   }
+
+  return (
+    <ChatContainer
+      initialConversationId={conversationView.id}
+      initialHistory={conversationView.history}
+      initialShared={conversationView.shared}
+      isOwner={conversationView.isOwner}
+    />
+  );
 }

@@ -436,6 +436,12 @@ model Conversation {
   // for the conversations dropdown UI.
   title String?
 
+  // Sharing (Stage 17 Phase 4). Default is private (owner-only view).
+  // When true, anyone with the /c/[id] URL — signed-in or anonymous — can
+  // view the full history read-only. Owner keeps write access; nobody
+  // else can append turns. Toggle back to false to invalidate the link.
+  shared Boolean @default(false)
+
   createdAt DateTime  @default(now())
   updatedAt DateTime  @updatedAt
   messages  Message[]

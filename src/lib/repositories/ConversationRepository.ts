@@ -70,6 +70,19 @@ export class ConversationRepository {
     return row;
   }
 
+  // Toggle the shared flag. Returns the updated row's shared value so the
+  // service can hand it back to the API caller for optimistic UI updates.
+  async setShared(input: {
+    id: string;
+    shared: boolean;
+  }): Promise<{ shared: boolean }> {
+    return this.prisma.conversation.update({
+      where: { id: input.id },
+      data: { shared: input.shared },
+      select: { shared: true },
+    });
+  }
+
   // Batch-insert a list of AgentInputItems as Message rows and bump the
   // parent's updatedAt in the same transaction so the header dropdown
   // sees fresh conversations on top. Prisma.InputJsonValue is what
