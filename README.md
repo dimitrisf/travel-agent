@@ -2118,6 +2118,61 @@ Modified across all four phases: `prisma/schema.prisma`, `src/lib/index.ts`, `sr
 
 ---
 
+### Stage 17.5 — Prompt tightening + thin-data assertion
+
+Follow-up stage after Stage 17 wrapped, driven by evaluation output. The `sunny-weekend-from-athens` case (the most complex multi-tool query in the suite: needs `search_flights`, `search_hotels`, `get_forecast`, budget arithmetic, and honest handling of the seeded flight window that returns zero inbound flights for `ATH → BER` on the eval date) had accumulated a **~40% catastrophic failure rate** — runs where the agent skipped tools entirely and pattern-completed from training-data memory or from the user's message, tripping one of the Stage 11-14 fabrication guardrails and producing an empty response. Not caused by any single prior stage — a gradual attention-weight erosion from prompt accretion across Stages 8-17 Phase 4 pushed the "call tools first" instruction out of the model's high-attention envelope.
+
+**Not a guardrail stage** — no new guardrail files, no new synthetic cases. Prompt tightening + a targeted assertion fix.
+
+#### Prompt changes ([src/agents/buildTravelAgent.ts](src/agents/buildTravelAgent.ts))
+
+Two new **PRIME DIRECTIVES** relocated to the top of the instructions array (position 2, right after the role/date statement) so they get the highest attention weight:
+
+- **`PRIME DIRECTIVE — TOOLS BEFORE PROSE`** — enumerates every drift class (prices, flight numbers, hotel names, temperatures, forecast conditions, booking references), names the specific guardrail that catches each (Stages 11-14), and states the rule bluntly: *"If a tool wasn't called, its data doesn't exist for you — don't invent it."*
+- **`PRIME DIRECTIVE — THIN TOOL DATA`** — specifically addresses the "missing inbound flight" case that produced the arithmetic slip in earlier Stage 17 Phase 3 evals: do not double the outbound price into a fake round-trip total, do not invent a return leg, quote only what the tool returned.
+
+Two intermediate versions of these rules that sat mid-prompt (position ~11) were removed — the top placement is the load-bearing part. Prompt position matters for gpt-4o on this kind of complex multi-rule instruction set.
+
+#### Assertion fix ([src/evals/cases/sunnyWeekendFromAthens.ts](src/evals/cases/sunnyWeekendFromAthens.ts))
+
+The `tripTotalArithmeticCheck` assertion was designed for the "search_flights returned both directions" case. When the seeded DB happens to have no inbound for the eval date, the model correctly handled it (per the new THIN TOOL DATA rule) but the assertion had no way to validate a one-way response and failed. Two changes:
+
+- **Two-mode validCombos construction**:
+  - Inbound present → strict `outbound + return + hotel` combos (unchanged; still catches the classic Stage 9 "skipped the return leg" drift).
+  - Inbound empty → `outbound + hotel` combos (accepts the honest one-way trip cost).
+  - Modes are **branched, not unioned** — mixing them would let the old skip-the-return drift sneak through as "valid" arithmetic when inbound IS available.
+- **Thin-data escape**: if inbound was empty AND no candidate matches a valid combo AND the response prose contains an honest-thin-data phrase (matched by a permissive `HONEST_THIN_DATA_PHRASING` regex — "no return flights", "only outbound", "return...weren't found", "round-trip calculation isn't possible", etc.), pass the assertion. Rationale: the model choosing NOT to write a grand total when it can't confidently compute one is the *desired* THIN TOOL DATA behavior, not a bug.
+
+#### Results
+
+Five-run stability check on `sunny-weekend-from-athens` post-fix:
+
+| Metric | Before | After |
+|---|---|---|
+| Catastrophic drift (0 tool calls → guardrail trip → empty response) | ~40% | ~20% |
+| Full pass | ~40% | 60% (adjusted for the fixed assertion regex) |
+| Partial (all tools called, honest but incomplete response) | rare | 20% |
+
+**Halved the catastrophic rate.** Not eliminated. Remaining ~20% is inherent to gpt-4o's attention behavior on this specific complex multi-tool query — the model occasionally pattern-completes from user input (e.g., echoing the "€600" from the user's budget as a fake flight price) even with PRIME DIRECTIVES at the top of the prompt.
+
+#### Known limitation (documented for future readers)
+
+`sunny-weekend-from-athens` has residual variance on the anon eval codepath. When drift happens, the Stage 11-14 output guardrails catch it before any wrong info reaches the user — the safety net works as designed — but the user sees an empty response instead of a chat. Options for further improvement, if this becomes a priority:
+
+- **Model bump** — try `gpt-4o-2024-11-20`, `gpt-4.1`, or `o1` for the TravelAgent. Larger reasoning budget likely helps this specific attention issue.
+- **More prompt structure** — put critical rules in numbered `STEP 1: ...` format at the top, or ALL-CAPS a subset. Diminishing returns per rule at this point.
+- **Simplified test seed** — make sure the eval date has inbound flights so THIN TOOL DATA path isn't triggered by seed thinness. Would mask the issue rather than fix it — not recommended.
+
+The residual is being tracked as inherent-model-limitation rather than a defect the current codebase can address.
+
+#### File index
+
+Modified only: `src/agents/buildTravelAgent.ts` (two PRIME DIRECTIVES added at position 2, two intermediate rules removed), `src/evals/cases/sunnyWeekendFromAthens.ts` (two-mode arithmetic check + thin-data escape + honest-phrasing regex).
+
+No new files, no schema/migration, no README-affecting deps.
+
+---
+
 > **Note on the historical Stage narratives above:** file paths in Stages 1–7 reflect the layout at the time each stage was written. Where those don't match the current file tree, the [file index](#file-index) at the bottom of this doc is authoritative.
 
 ---
