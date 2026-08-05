@@ -365,5 +365,9 @@ export function useAgentChat(opts: UseAgentChatOptions = {}) {
     }
   }
 
-  return { messages, pending, send, conversationId };
+  // `history` is exposed for Stage 17 Phase 3.5 — ChatContainer needs
+  // to auto-save the anon-user history to sessionStorage on every
+  // update so a mid-flow sign-in can resume the conversation on the
+  // signed-in side. Not needed for any other consumer.
+  return { messages, pending, send, conversationId, history };
 }

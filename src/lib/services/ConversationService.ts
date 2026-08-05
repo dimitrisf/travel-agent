@@ -129,15 +129,38 @@ export class ConversationService {
   }
 
   // Create an empty conversation and derive its title from the first user
-  // message in the caller-provided seed history. Called from the agent
-  // route on the first turn of a fresh conversation (no id yet). Returns
-  // the new id so the client can navigate to /c/[id].
+  // message in `titleSource`. Does NOT persist the titleSource messages —
+  // it's used solely to compute the title. Callers that need messages
+  // persisted in the same operation should use createWithSeed() (single
+  // atomic write) or follow this call with appendTurn().
+  //
+  // Called from the agent route on the first turn of a fresh conversation:
+  // the id must be returned to the client mid-stream (before the agent
+  // finishes producing turn output), so create + appendTurn can't be
+  // atomized on that path — they're separated by the whole agent turn.
   async create(input: {
     userId: string;
-    seedHistory: AgentInputItem[];
+    titleSource: AgentInputItem[];
   }): Promise<{ id: string }> {
-    const title = deriveTitle(input.seedHistory);
+    const title = deriveTitle(input.titleSource);
     return this.repo.create({ userId: input.userId, title });
+  }
+
+  // Create a Conversation AND persist the initial history in one
+  // transaction. Used by /api/conversations (Phase 3.5 anon-resume path)
+  // where the caller has the full history up-front. Atomic — if the
+  // message insert fails, the Conversation row is rolled back too, so
+  // the header dropdown never sees a titled-but-empty ghost row.
+  async createWithSeed(input: {
+    userId: string;
+    history: AgentInputItem[];
+  }): Promise<{ id: string }> {
+    const title = deriveTitle(input.history);
+    return this.repo.createWithMessages({
+      userId: input.userId,
+      title,
+      items: input.history as unknown as Prisma.InputJsonValue[],
+    });
   }
 
   // Persist all new items produced by one agent turn. `newItems` is the

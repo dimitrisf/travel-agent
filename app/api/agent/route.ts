@@ -131,10 +131,15 @@ export async function POST(req: NextRequest) {
     } else {
       // First turn of a fresh conversation. conversationId is not provided, so we create a new conversation. Seed the title from the current
       // user message so the header dropdown gets a meaningful label right
-      // away — deriveTitle (called in conversationService.create) reads the first user turn in the seed array.
+      // away — deriveTitle (called in conversationService.create) reads the first user turn in the titleSource array.
+      // Note: titleSource is title-derivation only. The turn's messages
+      // are persisted separately via appendTurn once the agent finishes
+      // (create + append can't be atomized here because they're separated
+      // by the whole agent turn — the id is returned to the client
+      // mid-stream, before turn output is ready).
       const created = await conversationService.create({
         userId: user.id,
-        seedHistory: [
+        titleSource: [
           ...history,
           { role: 'user', content: userInput } as AgentInputItem,
         ],

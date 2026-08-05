@@ -70,6 +70,38 @@ export class ConversationRepository {
     return row;
   }
 
+  // Create a Conversation AND insert its initial messages in a single
+  // transaction. Used by /api/conversations (Phase 3.5 anon-resume path)
+  // where the caller has the full history up-front. Atomic: if the
+  // message insert fails, the Conversation row is rolled back too — no
+  // orphan titled-but-empty rows in the header dropdown.
+  //
+  // Callback-form $transaction (not the array form used by appendMessages)
+  // because the second op references the id produced by the first, and
+  // array-form batches operations independently. No updatedAt bump —
+  // the row is fresh, so createdAt === updatedAt already.
+  async createWithMessages(input: {
+    userId: string;
+    title: string | null;
+    items: Prisma.InputJsonValue[];
+  }): Promise<{ id: string }> {
+    return this.prisma.$transaction(async (tx) => {
+      const conversation = await tx.conversation.create({
+        data: { userId: input.userId, title: input.title },
+        select: { id: true },
+      });
+      if (input.items.length > 0) {
+        await tx.message.createMany({
+          data: input.items.map((data) => ({
+            conversationId: conversation.id,
+            data,
+          })),
+        });
+      }
+      return conversation;
+    });
+  }
+
   // Toggle the shared flag. Returns the updated row's shared value so the
   // service can hand it back to the API caller for optimistic UI updates.
   async setShared(input: {

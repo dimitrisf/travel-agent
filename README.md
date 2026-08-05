@@ -1953,11 +1953,12 @@ One `Message` row per `AgentInputItem` — one for a user turn, one for an assis
 **Persistence layer** (three new files under `src/lib/`):
 
 - **`services/ConversationServiceError.ts`** — typed error class, `CONVERSATION_NOT_FOUND` / `INTERNAL_ERROR` codes. Mirrors `BookingServiceError` so `apiErrorResponse` maps it to HTTP status uniformly (extended with a new branch).
-- **`repositories/ConversationRepository.ts`** — raw Prisma queries. `findById` (full load with messages ordered), `findMetaById` (metadata-only for cheap ownership checks — skips the messages join), `listByUser` (10 most-recent for the header), `create` (new empty conversation), `appendMessages` (batch insert via `createMany` in a transaction that also bumps `updatedAt` on the parent so the dropdown sees fresh conversations on top).
+- **`repositories/ConversationRepository.ts`** — raw Prisma queries. `findById` (full load with messages ordered), `findMetaById` (metadata-only for cheap ownership checks — skips the messages join), `listByUser` (10 most-recent for the header), `create` (new empty conversation), `appendMessages` (batch insert via `createMany` in a transaction that also bumps `updatedAt` on the parent so the dropdown sees fresh conversations on top). `createWithMessages` added in the Phase 3.5 post-refactor — creates + inserts messages in a single callback-form transaction for the anon-resume path.
 - **`services/ConversationService.ts`** — business logic. Key methods:
   - `loadForUser({ id, userId })` — full load + ownership check. Throws `CONVERSATION_NOT_FOUND` (not `FORBIDDEN`) on cross-tenant, so id-scanning can't enumerate other users' conversations. Decodes the JSON blobs back into `AgentInputItem[]` in the returned `LoadedConversation.history`.
   - `assertOwnership({ id, userId })` — cheap variant used by `/api/agent` on every turn (skips the messages load).
-  - `create({ userId, seedHistory })` — creates the row; auto-derives a title by finding the first user turn in the seed and truncating to 60 chars with an ellipsis.
+  - `create({ userId, titleSource })` — creates the row; auto-derives a title by finding the first user turn in `titleSource` and truncating to 60 chars with an ellipsis. `titleSource` is title-derivation *only* — no messages are persisted here. Used by `/api/agent` on the first turn (where create + append can't be atomized because the id must be returned to the client mid-stream). Param was called `seedHistory` originally; renamed in the Phase 3.5 post-refactor to make the narrow purpose obvious.
+  - `createWithSeed({ userId, history })` — atomic create + append via `repo.createWithMessages`. Used by `/api/conversations` (Phase 3.5 anon-resume path) where the full history is available up-front. If the message insert fails, the Conversation row rolls back — no orphan titled-but-empty ghost in the header dropdown.
   - `appendTurn({ conversationId, newItems })` — batch-writes a list of `AgentInputItem`s as `Message` rows.
 
 Also `src/lib/index.ts` exports the new module, adds `createConversationService()` factory (shares the same PrismaClient as the rest of the app), and adds `isConversationServiceError` type guard.
@@ -1967,7 +1968,7 @@ Also `src/lib/index.ts` exports the new module, adds `createConversationService(
 - Body now accepts optional `conversationId: string` (follow-up turns only).
 - Right after body parse, calls `getCurrentUser()`. Anonymous → persistence skipped entirely (no service is even constructed).
 - Signed-in **with** `conversationId` — `assertOwnership` throws 404 if the caller doesn't own it. Guards against a client trying to write into someone else's conversation.
-- Signed-in **without** `conversationId` — first turn of a fresh conversation. Call `create({ userId, seedHistory: [...history, { role: 'user', content: userInput }] })` so `deriveTitle` sees the user's actual message. Now `conversationId` is set for the rest of the request.
+- Signed-in **without** `conversationId` — first turn of a fresh conversation. Call `create({ userId, titleSource: [...history, { role: 'user', content: userInput }] })` so `deriveTitle` sees the user's actual message. Now `conversationId` is set for the rest of the request.
 - After `await stream.completed` inside the SSE stream's `start()`, if there's a service + id, compute `newItems = stream.history.slice(history.length)` (everything new since this turn started) and `appendTurn`. Wrapped in try/catch so a persistence failure logs but doesn't corrupt the stream — the user still sees the turn complete.
 - `done` event now includes `conversationId` so the client can pick it up and swap the URL.
 
@@ -2086,7 +2087,7 @@ src/lib/auth/
 └── client.ts                          (client: useCurrentUser, signInWithGoogle, signOutCurrent)
 
 src/lib/repositories/ConversationRepository.ts    (Phase 3 — findById/findMetaById/listByUser/create/appendMessages; Phase 4 added setShared)
-src/lib/services/ConversationService.ts           (Phase 3 — listForUser/create/appendTurn/assertOwnership; Phase 4 replaced loadForUser with loadForViewer, added setShared)
+src/lib/services/ConversationService.ts           (Phase 3 — listForUser/create/appendTurn/assertOwnership; Phase 4 replaced loadForUser with loadForViewer, added setShared; Phase 3.5 post-refactor renamed create's seedHistory→titleSource, added atomic createWithSeed)
 src/lib/services/ConversationServiceError.ts      (Phase 3 — typed error class)
 src/lib/share/ShareContext.tsx                    (Phase 4 — client Context for {conversationId, isOwner, shared})
 
@@ -2170,6 +2171,461 @@ The residual is being tracked as inherent-model-limitation rather than a defect 
 Modified only: `src/agents/buildTravelAgent.ts` (two PRIME DIRECTIVES added at position 2, two intermediate rules removed), `src/evals/cases/sunnyWeekendFromAthens.ts` (two-mode arithmetic check + thin-data escape + honest-phrasing regex).
 
 No new files, no schema/migration, no README-affecting deps.
+
+---
+
+### Stage 17 Phase 3.5 — Anon-to-signed-in bridge
+
+Ships after Phase 4 and Stage 17.5, but logically extends the Phase 2 anon-Confirm handoff + the Phase 3 persistence model. Not renumbered because it doesn't invalidate anything in Phase 4 or 17.5 — it slots between the two like a delta patch.
+
+**Motivation.** After Phase 2, the anon-Confirm-then-OAuth loop technically worked (`PostSignInConfirmHandler` completed the confirm) but had several UX gaps that surfaced during smoke testing:
+
+1. **Chat state was gone.** After OAuth redirect back to `/`, the anon-side chat lived only in React state — a route change wiped it. The `?confirm=<id>` param carried enough for the confirm POST, but the user landed on a blank canvas with the header showing a stray success snackbar and no visible chat, then had to re-do the whole planning conversation to reach another booking.
+2. **The confirm POST ran serially with a conversation-create POST**, so once persistence landed in Phase 3 the total post-OAuth wait was ~6-8s (two 3-4s Neon round-trips back to back) plus a visible mid-flight route change between them.
+3. **A race between the refetch-on-mount and the `booking-updated` event** could clobber the just-set PAID booking back to PROPOSED if the GET response happened to arrive after the confirm POST completed. (Only shows up under specific timing — showed up on the second smoke run.)
+4. **A tab refresh mid-anon-chat lost the whole chat**, since anon state was React-only.
+
+Also folds in a couple of unrelated defects noticed during the same round of smoke testing: hydrated tool outputs coming through MCP-envelope-wrapped (BookingCard degraded to a generic accordion after page reload), and a residual `THIN TOOL DATA` violation where the model would silently emit `Flight Total: €138` when only the outbound leg existed.
+
+#### The persistence model
+
+**sessionStorage, not localStorage.** Anon chats are tab-scoped by design — the same trade-off as anon Booking rows in Phase 2. localStorage would let a chat outlive its owner (e.g. shared browser). sessionStorage clears on tab close, matches user intuition for "unauth ephemeral state," AND survives F5 refresh in the same tab as a bonus.
+
+**Save-on-every-turn, never on empty.** [`src/utils/anonChatStorage.ts`](src/utils/anonChatStorage.ts) writes the full history each time it changes. Empty histories are treated as *don't clobber* rather than *clear*: on post-OAuth mount, the fresh `ChatContainer` initialises with `history=[]` while `useCurrentUser()` is still loading. If we cleared storage on empty here, we'd wipe the anon history a hair before `AnonChatResumeHandler` could read it. Explicit clears live in the resume handler after successful migration.
+
+**Synchronous restore on first render.** [`ChatContainer`](src/components/ChatContainer.tsx) reads sessionStorage via `useMemo` (not `useEffect`) so the restored history is available in the very first render — `useAgentChat` only reads its `initialHistory` prop in its `useState` initializer, so a delayed `setState` would arrive too late. Paired with a `mounted` state gate: server renders empty, first client render also renders null, then the mount effect flips `mounted` true and the restored content renders. Without the gate, hydration would mismatch (server: `<SamplePrompts />`, client: `<MessageBubbles>` with restored content).
+
+#### The resume handler
+
+[`AnonChatResumeHandler`](src/components/AnonChatResumeHandler.tsx) runs at the top of `ChatContainer`. On mount, when both preconditions align (signed-in user + non-empty saved history):
+
+1. Reads `?confirm=<id>` from the URL. If present, fires the booking-confirm POST **in parallel** with the conversation-create POST via `Promise.all`. Cuts total wait from ~6-8s serial to ~3-4s concurrent, since both hit the same Neon DB and are individually round-trip-bound.
+2. When both resolve: writes the freshly-PAID booking + a success snackbar payload to sessionStorage under separate keys.
+3. Clears the anon-chat history key **before** navigating (a race with `ChatContainer`'s auto-save effect on the new page would otherwise re-write it).
+4. Navigates to `/c/<newConvId>` via `router.replace`, stripping `?confirm=` so `PostSignInConfirmHandler` doesn't re-POST.
+
+Failure semantics: conversation-create failure surfaces inline as a warning banner and leaves storage in place (manual refresh retries). Confirm failure is best-effort — the resume still navigates (chat migration succeeded) and stashes an *error* snackbar so the user learns why. `firedRef` guards against React strict-mode double-invoke.
+
+#### Handoff on `/c/[id]`
+
+Two consumers pick up the handoff:
+
+- **[`BookingCard`](src/components/BookingCard.tsx)** on mount, if `booking.status === 'PROPOSED'`, reads `readPendingConfirmedBooking(booking.id)` first. Match → `setBooking(paid)` + clear key + skip refetch entirely (no network round-trip, no visible flicker from PROPOSED→PAID). Miss → falls through to the general refetch-on-mount, which handles the "stale snapshot after page reload much later" case unrelated to the resume flow.
+- **[`PostSignInConfirmHandler`](src/components/PostSignInConfirmHandler.tsx)** on mount reads `readPendingSnackbar()` unconditionally. Match → renders the snackbar, clears the key, doesn't POST. Miss → falls back to the original POST path, but only on `/c/[id]` (the pathname gate prevents racing `AnonChatResumeHandler` on `/`). The fallback is for the edge case of someone hitting `/c/[id]?confirm=<id>` directly (bookmarked URL, hand-typed).
+
+The refetch on `BookingCard` also uses the functional `setState` form to refuse downgrading a non-PROPOSED status:
+
+```ts
+setBooking((prev) => (prev.status === 'PROPOSED' ? fresh : prev));
+```
+
+This guards the fallback POST path — the mount-time refetch and the confirm POST race on `/c/[id]?confirm=<id>`, and the GET can hit the DB before the POST commits (so `fresh.status === 'PROPOSED'` while the local state has already flipped to PAID via the `booking-updated` event). React runs child effects before parent effects, so `BookingCard`'s refetch fires *before* `PostSignInConfirmHandler`'s POST — same-order every mount, so this isn't a rare corner case. The functional setter makes refetch-vs-event ordering irrelevant.
+
+#### In-flight UX on `/?confirm=<id>`
+
+While the parallel POSTs are in flight (~3-4s), the anon-side `BookingCard` derives a busy state from the URL:
+
+```ts
+const searchParams = useSearchParams();
+const oauthConfirmInFlight =
+  booking.status === 'PROPOSED' &&
+  searchParams.get('confirm') === String(booking.id);
+```
+
+Confirm button shows a spinner + is disabled; Cancel button is also disabled. Without this, the card sat with both buttons active for the whole 3-4s window — a user might click Confirm again and re-enter the OAuth loop.
+
+#### Cross-tab / cross-nav event fallout
+
+The fast path avoids `booking-updated` events entirely (the sessionStorage handoff is direct-to-`BookingCard`). But the *fallback* POST path in `PostSignInConfirmHandler` still needs to update any mounted `BookingCard` for the same id, so it dispatches a `booking-updated` `CustomEvent` on `window` with the full `BookingLike` payload. `BookingCard` listens for it and updates itself if the detail id matches. Same-tab only (window events don't cross tabs) — which is exactly the intended scope.
+
+#### Two dropped-in defects
+
+- **MCP-envelope hydration** ([`src/utils/hydrateChatMessages.ts`](src/utils/hydrateChatMessages.ts)) — the live agent-route SSE path unwraps MCP envelopes before delivering to the client, but `stream.history` (which is what gets persisted and hydrated) may still contain the wrapped shape. Without the fix, hydrated `toolCall.output` looked like `{"content":[{"type":"text","text":"{\"id\":42,...}"}]}` and `tryParseBooking` failed (id/reference/status aren't at top level), so the rich `BookingCard` degraded to a generic accordion after reload. `normalizeMcpEnvelope` mirrors what `rebuildCollectorFromHistory` already does for guardrails.
+- **THIN TOOL DATA required phrasing** ([`src/agents/buildTravelAgent.ts`](src/agents/buildTravelAgent.ts)) — the Stage 17.5 rule said "don't invent inbound data" but didn't forbid emitting a `Flight Total: €138` label when only the outbound existed. Extended with REQUIRED phrasing ("*No return flight was found in the current window; the totals below reflect one-way pricing only.*") and a FORBIDDEN example. Deterministic, low-token, no new guardrail — the model was already suppressing the fabrication, just not the misleading label.
+
+#### Code walkthrough — Flow A end-to-end
+
+In the order the code executes, from clicking Confirm while anon to seeing a PAID card on `/c/[id]`.
+
+**1. During the anon session — auto-save.**
+
+The user chats, gets a `PROPOSED` booking, and hasn't signed in yet. Every time the chat history updates, this effect in [`ChatContainer.tsx:137-142`](src/components/ChatContainer.tsx#L137-L142) fires:
+
+```ts
+const currentUser = useCurrentUser();
+useEffect(() => {
+  if (currentUser || liveConversationId) return;
+  if (liveHistory.length === 0) return;
+  saveAnonChatHistory(liveHistory);
+}, [liveHistory, currentUser, liveConversationId]);
+```
+
+Three gates matter:
+- `currentUser || liveConversationId` — once signed in or a real DB conversation exists, the DB is source of truth; sessionStorage stops being written.
+- `liveHistory.length === 0` — the load-bearing one. On the post-OAuth mount, `useAgentChat` initializes with `history=[]` and `useCurrentUser()` returns `null` while the session resolves. If we cleared storage on empty here, we'd wipe the anon history milliseconds before `AnonChatResumeHandler` could read it. So empty is treated as "don't touch", not "clear". Explicit clears live in `AnonChatResumeHandler` after successful migration.
+
+Also required exposing `history` from `useAgentChat` (previously only `messages` — the UI-facing bubble form — was returned). See [`useAgentChat.ts`](src/hooks/useAgentChat.ts). We save the canonical form so we can hand it back to the agent later.
+
+**2. User clicks Confirm on a `PROPOSED` BookingCard.**
+
+In [`BookingCard.tsx:143-152`](src/components/BookingCard.tsx#L143-L152), when the click handler sees a null `currentUser`, it triggers OAuth with a callback URL that encodes the booking id as a query param:
+
+```ts
+if (action === 'confirm' && !currentUser) {
+  const callbackUrl = `/?confirm=${booking.id}`;
+  void signInWithGoogle(callbackUrl);
+  return;
+}
+```
+
+Google auth → back to `/?confirm=42`.
+
+**3. Landing on `/?confirm=42` — restore + immediate visual feedback.**
+
+`ChatContainer` mounts. Three things happen in parallel:
+
+*(a) Synchronous restore* ([`ChatContainer.tsx:63-70`](src/components/ChatContainer.tsx#L63-L70)):
+
+```ts
+const restoredAnonHistory = useMemo(() => {
+  if (initialConversationId) return undefined;
+  if (typeof window === 'undefined') return undefined;
+  const saved = readAnonChatHistory();
+  if (!saved || saved.length === 0) return undefined;
+  return saved;
+}, [initialConversationId]);
+const effectiveInitialHistory = initialHistory ?? restoredAnonHistory;
+```
+
+**Why `useMemo` here?** This is the load-bearing hook choice in Phase 3.5, and it's used *not for the usual reason* (perf caching) but for its **execution timing**. Three candidates were on the table; only `useMemo` works.
+
+*Option A — inline expression (no memoization):*
+
+```ts
+const restoredAnonHistory =
+  initialConversationId
+    ? undefined
+    : typeof window !== 'undefined'
+      ? readAnonChatHistory() ?? undefined
+      : undefined;
+```
+
+Correctness-wise fine. But it re-reads sessionStorage + parses JSON on every re-render, even though the value is only ever consumed on the first render (by `useAgentChat`'s `useState` initializer). Cheap, but pointless.
+
+*Option B — `useState` + `useEffect` (the natural instinct):*
+
+```ts
+const [restoredAnonHistory, setRestoredAnonHistory] = useState<AgentInputItem[]>();
+useEffect(() => {
+  if (initialConversationId) return;
+  const saved = readAnonChatHistory();
+  if (saved?.length) setRestoredAnonHistory(saved);
+}, [initialConversationId]);
+```
+
+This is **broken**, and the reason is the whole point of Phase 3.5's timing quirks:
+
+1. First render: `restoredAnonHistory === undefined` → `useAgentChat` receives `initialHistory: undefined`.
+2. `useAgentChat` internally does `useState(initialHistory ?? [])` → its state is now `[]`, forever.
+3. Post-mount, our effect fires, calls `setRestoredAnonHistory(saved)`.
+4. Re-render: `useAgentChat` receives `initialHistory: <saved>` — but its state is already initialized, and `useState`'s initializer only runs once. **The new prop is ignored.**
+5. Chat stays blank.
+
+`useEffect` is too late. We need the value to exist *during* the first render, not after.
+
+*Option C — `useMemo` (what we ship):*
+
+- Runs **during render** (like Option A) — so the value is available in the same render pass where `useAgentChat` initializes its state.
+- Only recomputes when `initialConversationId` changes (Option A ran every re-render).
+- Result is a stable reference across re-renders — nice for downstream `??` chains and any deps arrays.
+
+The mental model:
+
+- `useEffect` — "after render, do a side effect." Wrong tool when you need the value *for* the render.
+- `useMemo` — "during render, compute this value; cache it across re-renders." Right tool when you need render-phase execution but not repeated recomputation.
+- `useState` initializer function (`useState(() => ...)`) — also runs only during first render, but the value gets stored in state. Would work here too, but then we'd own the state and have to decide when to update it; `useMemo` keeps it purely derived.
+
+Small caveat worth knowing: React's docs say `useMemo` is a *hint*, not a guarantee — React reserves the right to recompute even without deps changing (in practice it doesn't today, but shouldn't be relied on for side-effecting work). Reading sessionStorage is idempotent, so this is safe. If the "computation" had side effects, `useMemo` would be the wrong choice.
+
+*(b) Hydration mismatch guard* ([`ChatContainer.tsx:83-86 + 207`](src/components/ChatContainer.tsx#L83-L86)):
+
+```ts
+const [mounted, setMounted] = useState(false);
+useEffect(() => { setMounted(true); }, []);
+// ...
+if (!mounted && !initialConversationId) return null;
+```
+
+The synchronous restore is a client-only concept (`window` is `undefined` on the server). Without this gate, the server would render `<SamplePrompts />` (empty state) and the client would render `<MessageBubbles>` with restored content, and React would abort hydration. The gate makes the first client render match the server (null), then the mount effect flips `mounted` true and the restored content renders on the next tick.
+
+**Deep dive: what `'use client'` actually means, and why this gate is needed.** One of the most common sources of confusion with Next.js App Router. The misconception is that `'use client'` means "runs only on the client." It doesn't.
+
+*What `'use client'` actually means.* It's a **boundary marker**, not an SSR opt-out. All it says is: *"this component can use client-only features (hooks, event handlers, browser APIs), and everything below it in the tree also becomes client-side."* Crucially, the component **still gets rendered on the server** for the initial HTML response.
+
+So the lifecycle of `ChatContainer` when you hit `/`:
+
+1. **Server render**: Next.js runs `ChatContainer()` on the server to produce an HTML string for the response.
+2. **Client hydration**: Browser receives the HTML, React runs `ChatContainer()` **again** on the client. It compares the client output tree to the pre-rendered HTML that arrived from the server. If they match, React "attaches" event handlers to the existing DOM — no visual change, just becomes interactive. This is called **hydration**.
+3. **Post-hydration**: `useEffect`s fire. From here on, standard React re-render loop.
+
+The key point: `ChatContainer` runs **twice** — once on the server, once on the client — with the *expectation that both produce the same output*.
+
+*But hooks are client-only, right?* Useful shorthand, becomes wrong the moment SSR enters the picture. The precise version: hooks require a `'use client'` component (server components can't use them), but those components still get rendered on the server, and hooks DO execute during that render — with slightly different behavior per hook:
+
+| Hook | Server behavior | Client behavior |
+|---|---|---|
+| `useState(init)` | Returns `[init, noopSetter]`. The setter exists but calling it does nothing — there's no re-render loop on the server. | Normal — setter triggers re-renders. |
+| `useMemo(fn, deps)` | Runs `fn`, returns the value. No caching benefit (only runs once) but the value is correct. | Normal — memoizes across re-renders. |
+| `useRef(init)` | Returns `{ current: init }`. | Same. |
+| `useCallback(fn, deps)` | Returns `fn`. | Normal. |
+| `useContext(ctx)` | Reads the value from the provider tree that server-rendered above it. | Same. |
+| `useEffect(fn, deps)` | **Skipped entirely.** The effect is registered but never executed. | Runs after commit. |
+| `useLayoutEffect(fn, deps)` | Skipped, and warns. | Runs synchronously before paint. |
+
+Key insight: **state hooks work on the server, effect hooks don't.** Why the asymmetry? Because SSR's job is to produce the *initial HTML* — a snapshot of what the DOM will look like before any interaction. To do that, React needs to know the initial state (that's why `useState` runs and returns the initial value), but it doesn't need to run effects (those fire *after* the initial paint on the client, so they don't affect the initial HTML).
+
+*Why sessionStorage breaks this.* Look at what `restoredAnonHistory` computes in each environment:
+
+| Environment | `typeof window` | `readAnonChatHistory()` | Result |
+|---|---|---|---|
+| Server | `'undefined'` | never runs (guarded) | `undefined` → falls through to `<SamplePrompts />` |
+| Client | `'object'` | reads sessionStorage, might return saved history | non-empty history → renders `<MessageBubbles>` |
+
+Same URL, same code, same props — the server-produced HTML shows an empty state, and the client-produced tree shows a populated chat. React tries to hydrate and sees a total mismatch.
+
+*What React does on mismatch.* Two bad things: (1) logs a console error (`Hydration failed because the server rendered HTML didn't match the client...`), and (2) throws away the entire subtree and re-renders from scratch client-side. You lose the SSR benefit for that subtree, and users see a brief flash where the server HTML disappears and gets replaced. On slower devices this is visibly janky. There are also subtler issues — text nodes might be re-parented weirdly, keyed lists can get confused about identity, event listeners attach to the wrong DOM nodes if you're unlucky.
+
+*Tracing the mount-guard through both renders.*
+
+Server render pass:
+
+```ts
+const [mounted, setMounted] = useState(false);
+//    ↑ this runs. mounted = false, setMounted = noop.
+useEffect(() => { setMounted(true); }, []);
+//    ↑ this runs — the effect is REGISTERED — but the callback never fires.
+//      React just makes a note "if this ever mounts on the client, run this."
+if (!mounted && !initialConversationId) return null;
+//    ↑ mounted is false here. initialConversationId is undefined on /.
+//      Returns null. Server sends empty HTML in the component's slot.
+```
+
+First client render (hydration):
+
+```ts
+const [mounted, setMounted] = useState(false);
+//    ↑ runs. mounted = false, setMounted = REAL setter.
+useEffect(() => { setMounted(true); }, []);
+//    ↑ registers the effect, to be scheduled after commit.
+if (!mounted && !initialConversationId) return null;
+//    ↑ mounted is still false during this first render. Returns null.
+//      → matches the server's null → hydration succeeds.
+```
+
+After hydration completes: React commits and runs pending effects. Our `useEffect` fires → `setMounted(true)` (the real setter this time). State change triggers a re-render. This time `mounted === true`, guard skipped, `<MessageBubbles>` renders with restored content. This is a normal client-side state update, not hydration — no mismatch detection.
+
+The pattern is essentially: *"on the first client render, deliberately match the server's boring output, even though I know I could produce better output. Then after hydration is done, produce the real output."*
+
+*Why the `!initialConversationId` half of the guard?* That's the "only guard when we're doing the sessionStorage dance" clause. On `/c/[id]` pages, the server already loaded the conversation from the DB and passed `initialConversationId` + `initialHistory` down as props — both server and client render the same populated chat from those props, no sessionStorage involved, no mismatch risk. Guarding those pages would just produce a needless flash of null on every `/c/[id]` load.
+
+*Alternatives considered.*
+
+- **`dynamic(() => import('./ChatContainer'), { ssr: false })`** — Next.js lets you disable SSR for a component. Works but disables SSR for the WHOLE component including `/c/[id]` loads that don't need it, hurting initial-render time on those pages.
+- **`suppressHydrationWarning`** — silences the warning but doesn't prevent the client re-render + flash. Visual bug remains, diagnostic is muted.
+- **Read sessionStorage in `useLayoutEffect`** — runs before browser paint, so no flash. But hydration itself still fails; you just paper over the visual symptom. And `useLayoutEffect` on the server produces its own warning.
+
+Mount-guard is cleanest because it addresses the root cause (server/client produce different output) by making the first client render deterministic.
+
+*Related SSR-safety footgun.* Consider what would happen if the initial `useState` value came from `sessionStorage`:
+
+```ts
+const [restored, setRestored] = useState(() => readAnonChatHistory());
+```
+
+The lazy initializer function *would* run on the server (state hooks execute during SSR, remember). `window` would be undefined inside `readAnonChatHistory`, and unless the function guards against that, it'd throw during SSR. Classic App Router footgun — people write `useState(() => localStorage.getItem(...))` and get a runtime error the first time it SSRs. That's why every function in [`anonChatStorage.ts`](src/utils/anonChatStorage.ts) starts with `if (typeof window === 'undefined') return null` — that guard is what makes it SSR-safe.
+
+*Rule of thumb for future SSR-safety.* If a value depends on anything browser-only (`window`, `document`, `localStorage`, `navigator`, `matchMedia`, etc.):
+
+- Compute it inside `useMemo` or `useEffect`
+- Guard with `typeof window === 'undefined'`
+- If it must affect the initial render, use the mount-gate pattern to defer visible output until after hydration
+
+*Server components vs client components — the clean summary.* Two totally different rendering models coexist in the App Router:
+
+- **Server components** (no `'use client'` directive): render **only on the server**, once. They can `async`/`await`, hit the DB directly, read files. They can't use hooks — no client-side lifecycle. Output is serialized into the RSC payload and shipped to the browser.
+- **Client components** (`'use client'` at the top): render **on the server AND on the client**. Hooks work in both places, with the caveats above. State + interactivity kick in on the client after hydration.
+
+`'use client'` is opt-INTO-hooks, not opt-OUT-of-SSR. The SSR part still happens.
+
+*(c) Immediate busy state on the BookingCard* ([`BookingCard.tsx:62-65`](src/components/BookingCard.tsx#L62-L65)):
+
+```ts
+const searchParams = useSearchParams();
+const oauthConfirmInFlight =
+  booking.status === 'PROPOSED' &&
+  searchParams.get('confirm') === String(booking.id);
+```
+
+Purely derived from the URL — no state, no coordination with anything else. Wired into both buttons so during the ~3-4s parallel-POST window the user sees a spinner and disabled buttons, not the stale active buttons that made them think their earlier click was ignored.
+
+**4. Parallel POSTs — `AnonChatResumeHandler`.**
+
+The new component, [`AnonChatResumeHandler.tsx`](src/components/AnonChatResumeHandler.tsx). Effect fires on mount when both preconditions align (signed-in user + non-empty saved history):
+
+```ts
+const urlConfirmId = new URLSearchParams(window.location.search).get('confirm');
+const parsedConfirmId = urlConfirmId ? Number(urlConfirmId) : null;
+const shouldConfirm = parsedConfirmId !== null && Number.isInteger(parsedConfirmId) && parsedConfirmId > 0;
+
+const [convRes, confirmRes] = await Promise.all([
+  fetch('/api/conversations', { method: 'POST', ... body: { history } }),
+  shouldConfirm
+    ? fetch(`/api/booking/${parsedConfirmId}/confirm`, { method: 'POST', ... })
+    : Promise.resolve(null),
+]);
+```
+
+Both hit Neon and each takes ~3-4s individually. `Promise.all` runs them concurrently, so total is bounded by the slower — half the wait vs the previous serial version.
+
+Then, best-effort handling of the confirm arm:
+
+```ts
+if (shouldConfirm && confirmRes) {
+  const confirmBody = await confirmRes.json();
+  if (confirmRes.ok && confirmBody?.id) {
+    savePendingConfirmedBooking(confirmBody);   // for BookingCard on /c/[id]
+    savePendingSnackbar({                        // for PostSignInConfirmHandler on /c/[id]
+      severity: 'success',
+      message: `Booking ${confirmBody.reference} confirmed.`,
+    });
+  } else {
+    savePendingSnackbar({ severity: 'error', message: ... });
+  }
+}
+```
+
+Asymmetric error handling: conversation-create failure aborts (surfaced inline as a warning banner, storage left intact so a refresh retries). Confirm failure is best-effort — the chat migration still lands, and the error goes into the snackbar. That way the user isn't stranded on `/` because of a confirm hiccup.
+
+Then clean up and navigate:
+
+```ts
+clearAnonChatHistory();                       // BEFORE navigation — else ChatContainer's
+                                              // auto-save on the new page could re-write it
+const target = new URL(`/c/${convBody.id}`, window.location.origin);
+const currentParams = new URLSearchParams(window.location.search);
+currentParams.forEach((value, key) => {
+  if (key === 'confirm') return;              // strip — we already handled it above
+  target.searchParams.set(key, value);        // preserve any others
+});
+router.replace(target.pathname + target.search);
+```
+
+Stripping `?confirm=` matters: without it, `PostSignInConfirmHandler` on `/c/[id]` would see the param and fire its own POST, either double-confirming or 404ing.
+
+**5. Storage layer — `anonChatStorage.ts`.**
+
+Three keys, all in sessionStorage ([`src/utils/anonChatStorage.ts`](src/utils/anonChatStorage.ts)):
+
+- `anon-chat-history-v1` — the running history
+- `anon-resume-confirmed-booking-v1` — the PAID booking after confirm
+- `anon-resume-snackbar-v1` — the snackbar payload
+
+Read functions all guard `typeof window === 'undefined'` for SSR-safety and swallow all storage exceptions (private mode, quota, etc.) — worst case the feature silently degrades. `readPendingConfirmedBooking(id)` includes an id-match guard so a stale entry from a different booking (e.g. two proposals in the same tab, only one confirmed) can't accidentally overwrite the wrong card.
+
+**6. On `/c/[id]` — two synchronous consumers.**
+
+The `router.replace` triggers a route change. `/c/[id]/page.tsx` server-loads the freshly-created conversation and renders. Client hydrates. Two components pick up the sessionStorage handoff on mount:
+
+*BookingCard* ([`BookingCard.tsx:88-119`](src/components/BookingCard.tsx#L88-L119)):
+
+```ts
+useEffect(() => {
+  if (booking.status !== 'PROPOSED') return;
+
+  // Fast path
+  const preconfirmed = readPendingConfirmedBooking(booking.id);
+  if (preconfirmed) {
+    setBooking(preconfirmed);
+    clearPendingConfirmedBooking();
+    return;
+  }
+
+  // Slow path — refetch
+  let cancelled = false;
+  void (async () => {
+    try {
+      const res = await fetch(`/api/booking/${booking.id}`);
+      if (!res.ok) return;
+      const fresh = await res.json();
+      if (cancelled || fresh?.id !== booking.id) return;
+      setBooking((prev) => (prev.status === 'PROPOSED' ? fresh : prev));
+    } catch {}
+  })();
+  return () => { cancelled = true; };
+}, []);
+```
+
+The fast path is a synchronous state upgrade — no network round-trip, no visible flicker from PROPOSED → PAID. The card just renders PAID from the first frame after mount.
+
+The slow path (refetch) is kept for two other cases: an unrelated page reload much later, or the fallback POST path in `PostSignInConfirmHandler`. That's where the **functional setState guard** matters:
+
+```ts
+setBooking((prev) => (prev.status === 'PROPOSED' ? fresh : prev));
+```
+
+Without it, this race: React runs child effects before parent effects, so on the fallback path where `PostSignInConfirmHandler` POSTs from `/c/[id]?confirm=<id>`, the BookingCard's refetch fires *before* the confirm POST. Both hit the DB. If the GET arrives at the DB before the POST commits, `fresh.status === 'PROPOSED'` — and if the confirm POST then completes and its `booking-updated` event flips the local state to PAID before the GET response comes back, the naive `setBooking(fresh)` clobbers PAID back to PROPOSED. The functional form reads the *latest* state at the moment of update and refuses to downgrade a non-PROPOSED status, so ordering doesn't matter.
+
+*PostSignInConfirmHandler* ([`PostSignInConfirmHandler.tsx:52-67`](src/components/PostSignInConfirmHandler.tsx#L52-L67)):
+
+```ts
+// Fast path: consume snackbar left by AnonChatResumeHandler
+const pending = readPendingSnackbar();
+if (pending) {
+  firedRef.current = true;
+  clearPendingSnackbar();
+  setResult(pending);
+  return;
+}
+
+// Fallback POST path only applies on /c/[id]
+if (!pathname.startsWith('/c/')) return;
+// ... existing POST + booking-updated dispatch logic
+```
+
+Fast path just renders. No POST, no `booking-updated` dispatch (BookingCard already consumed its own key).
+
+The pathname gate on the fallback POST is what prevents the two handlers from racing on `/`. Both mount on `/` and `/c/[id]`, but on `/`: `AnonChatResumeHandler` fires (owns the resume flow); `PostSignInConfirmHandler` fallback is gated off (pathname doesn't start with `/c/`). If we let the fallback POST fire on `/` too, two POSTs to `/api/booking/42/confirm` would race — one from each handler.
+
+#### Flow C — F5 mid-anon-chat
+
+Same restore logic as Flow A, minus everything after step 3. `useMemo` reads sessionStorage on mount, `mounted` gate keeps hydration clean, chat comes back. `AnonChatResumeHandler` gates on `user` — anon = no-op. `?confirm=` isn't in URL, so `oauthConfirmInFlight` is false and the buttons render normally.
+
+#### Design decisions worth flagging
+
+1. **Why `Promise.all` and not two sequential awaits?** The two POSTs are independent — creating a Conversation doesn't touch the Booking row, and confirming a Booking doesn't need the Conversation to exist. Serial had no correctness benefit; concurrent halves the wait.
+2. **Why keep `PostSignInConfirmHandler` at all after the fast path exists?** The fallback covers `/c/[id]?confirm=<id>` landing directly — bookmarked URL, hand-typed, or if `AnonChatResumeHandler`'s confirm arm somehow didn't run. Small blast radius, small code cost, keeps the design robust to edge cases.
+3. **Why derive `oauthConfirmInFlight` from the URL and not from a shared state / context?** No coordination between components required — `?confirm=` is already in the URL as the OAuth callback protocol. Adding a Context would be redundant plumbing for what's already public.
+4. **Why the `booking-updated` window event is still around.** Dead weight on the fast path, but the fallback POST path in `PostSignInConfirmHandler` still needs to update any mounted `BookingCard` for the same id, so it dispatches after its POST. Same-tab-only fanout — exactly the intended scope.
+
+#### File index
+
+```
+src/utils/anonChatStorage.ts                   (NEW — sessionStorage read/save/clear for history, confirmed-booking handoff, snackbar handoff)
+src/components/AnonChatResumeHandler.tsx       (NEW — reads storage, fires parallel POSTs, stashes handoff, navigates to /c/[id])
+```
+
+Modified: `src/components/ChatContainer.tsx` (synchronous restore + auto-save + mount guard + resume handler wiring), `src/components/BookingCard.tsx` (preconfirmed lookup, functional setter guard, URL-derived busy state, booking-updated listener), `src/components/PostSignInConfirmHandler.tsx` (snackbar-from-storage fast path + pathname gate on fallback POST + booking-updated dispatch), `src/utils/hydrateChatMessages.ts` (`normalizeMcpEnvelope`), `src/hooks/useAgentChat.ts` (expose `history` for the auto-save effect), `src/agents/buildTravelAgent.ts` (THIN TOOL DATA required phrasing + forbidden example), `app/api/conversations/route.ts` (POST handler — accepts `AgentInputItem[]`, atomically creates Conversation + persists seed history via `createWithSeed`, returns id).
+
+No new schema/migration — the Conversation + Message tables from Phase 3 already handle it; this stage just adds a new *entry point* into that persistence.
+
+#### Post-ship refactor — `createWithSeed` + `titleSource` rename
+
+Follow-up cleanup after the initial Phase 3.5 ship, driven by a code-review comment on `/api/conversations/route.ts`: the two-step `create({ seedHistory }) + appendTurn` shape looked redundant, because `seedHistory` sounds like "the messages to persist" but was only ever used to compute the title (`create` doesn't touch the messages table). Two changes:
+
+- **Parameter rename**: `ConversationService.create`'s `seedHistory` → `titleSource`. Docstring made explicit that it's title-only. `/api/agent/route.ts` updated to match — it still uses the two-step pattern because the id is returned to the client mid-stream before the turn's messages exist, so create + append can't be atomized on that path.
+- **New atomic method**: `ConversationService.createWithSeed({ userId, history })` for callers with the full history up-front (only `/api/conversations` today). Backed by a new `ConversationRepository.createWithMessages` that wraps the row insert + `message.createMany` in a callback-form `$transaction` (needs the created id for the second op, so array-form doesn't work). Bundles a latent bug-fix: the old two-call sequence had no transaction, so if `appendMessages` threw after `create` succeeded, you'd get an orphan titled-but-empty Conversation stuck in the user's dropdown. Now that class of ghost row is impossible.
+
+`/api/conversations/route.ts` collapses to a single `await conversationService.createWithSeed(...)`. Full eval suite still green after the refactor.
 
 ---
 

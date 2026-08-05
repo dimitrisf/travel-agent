@@ -1,5 +1,6 @@
 import type { AgentInputItem } from '@openai/agents';
 import type { ChatMessage } from '@/types/chat';
+import { unwrapToolOutput } from './toolOutput';
 
 // Convert a canonical AgentInputItem[] history into ChatMessage[] bubbles
 // for display. Used when loading /c/[id] — the DB stores the canonical
@@ -142,7 +143,7 @@ export function hydrateChatMessages(history: AgentInputItem[]): ChatMessage[] {
       // Find the matching ToolCall in the current agent bubble by callId and set its output to the text from the function_call_result. If no matching ToolCall is found, we skip it. This ensures that the output of the tool call is correctly associated with the corresponding tool call in the agent's response.
       // E.g., output.text = '{"tempC":32,"conditions":"sunny"}' and callId = 'call_1' → find the ToolCall with callId 'call_1' and set its output to '{"tempC":32,"conditions":"sunny"}'.
       const tc = currentAgent.toolCalls.find((c) => c.callId === callId);
-      if (tc) tc.output = output.text;
+      if (tc) tc.output = normalizeMcpEnvelope(output.text);
       continue;
     }
 
@@ -171,4 +172,30 @@ export function hydrateChatMessages(history: AgentInputItem[]): ChatMessage[] {
 
   flushAgent();
   return bubbles;
+}
+
+// The live agent-route SSE path unwraps MCP envelopes via unwrapToolOutput
+// before delivering to the client (see /api/agent's tool_call_output_item
+// handler). But `stream.history` — which is what gets persisted and
+// hydrated here — may still contain the wrapped shape, e.g.:
+//   {"content":[{"type":"text","text":"{\"id\":42,\"reference\":\"BKG-…\"}"}]}
+// If we hand that wrapped string to the UI as toolCall.output, then
+// ToolCallView's `tryParseBooking` fails (id/reference/status aren't at
+// top level) and the rich BookingCard degrades to a generic accordion.
+// This normalizer mirrors what rebuildCollectorFromHistory does for
+// guardrails, keeping the two hydration paths behaviorally aligned.
+function normalizeMcpEnvelope(raw: string): string {
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (
+      parsed &&
+      typeof parsed === 'object' &&
+      ('content' in parsed || 'text' in parsed)
+    ) {
+      return unwrapToolOutput(parsed);
+    }
+  } catch {
+    // Not JSON — return raw text unchanged.
+  }
+  return raw;
 }
