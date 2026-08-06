@@ -7,6 +7,7 @@ import {
 } from '@openai/agents';
 import { buildAgentGraph } from '../agents/buildAgentGraph';
 import { newAgentRunContext } from '../agents/agentRunContext';
+import { runWithBackoff } from './runWithBackoff';
 import { getTurns } from './types';
 import type { Case, CaseOutput } from './types';
 import { unwrapToolOutput } from '@/utils/toolOutput';
@@ -31,6 +32,10 @@ export async function runCase(
   let lastAgent = '';
   let guardrailTripped: string | undefined;
   let errored: string | undefined;
+  // Accumulates 429 retries across every turn. Surfaced on the case's
+  // timing line by the runner so chronic TPM offenders stay visible
+  // even when the case passes on retry.
+  let totalRetries = 0;
 
   try {
     // Loop over the case's turns (single-turn cases still take this path
@@ -82,11 +87,28 @@ export async function runCase(
       //   lastAgent: { name: 'weather-agent', ... },
       //   history: [...],
       // }
-      const result = await run(
-        agent,
-        [...history, { role: 'user', content: userText }],
-        { context: runCtx },
+      //
+      // Wrapped in runWithBackoff (Stage 17.6) — the OpenAI 30k gpt-4o
+      // TPM ceiling used to fail cancel-proposed-booking-happy-path
+      // deep in the case list because prior cases had eaten most of
+      // the rolling 60s window. Now we retry up to 3 times with the
+      // wait-time OpenAI reports in the error body ("try again in Xs"),
+      // making TPM saturation transparent to the report. Retries are
+      // logged inline so a chronic offender is still visible.
+      const { value: result, retries } = await runWithBackoff(
+        () =>
+          run(agent, [...history, { role: 'user', content: userText }], {
+            context: runCtx,
+          }),
+        {
+          onRetry: (attempt, waitMs) => {
+            process.stderr.write(
+              `    ⚠ 429 rate limit — waiting ${waitMs}ms before retry ${attempt}\n`,
+            );
+          },
+        },
       );
+      totalRetries += retries;
 
       // E.g, result.newItems = [
       //   { type: 'tool_call_item', rawItem: { name: 'get_weather', arguments: '{"city":"Athens"}', callId: '1' }, agent: { name: 'weather-agent', ... } },
@@ -224,5 +246,16 @@ export async function runCase(
     }
   }
 
-  return { toolCalls, finalText, lastAgent, guardrailTripped, errored };
+  // Return the accumulated output for this case, which the caller will hand to the case's `expect(...)` for assertion checking.
+  return {
+    toolCalls,
+    finalText,
+    lastAgent,
+    guardrailTripped,
+    errored,
+    // Accumulated 429 retries across all turns. Surfaced on the case's
+    // timing line by the runner so chronic TPM offenders stay visible
+    // even when the case passes on retry.
+    retries: totalRetries,
+  };
 }
