@@ -57,6 +57,11 @@ export type CaseOutput = {
   guardrailTripped?: string;
   // Any other unexpected error (network, MCP, model call, etc.).
   errored?: string;
+  // Total 429 retries the runner absorbed across all turns of this case
+  // (Stage 17.6). Reported next to the case timing so chronic TPM
+  // offenders stay visible even when they pass. Zero on the vast
+  // majority of runs.
+  retries?: number;
 };
 
 export type AssertionResult = {

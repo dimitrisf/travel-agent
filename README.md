@@ -2629,6 +2629,27 @@ Follow-up cleanup after the initial Phase 3.5 ship, driven by a code-review comm
 
 ---
 
+### Stage 17.6 — Eval harness 429 backoff
+
+Small operational stage, one-file scope. Motivated by a recurring failure of `cancel-proposed-booking-happy-path` in the full suite: gpt-4o's 30k TPM ceiling was getting hit deep in the case list because prior 3-4s real-agent cases had already consumed most of the rolling 60s window. OpenAI's own error message told us exactly how long to wait (`"Please try again in 10.458s"`), but the eval harness treated any thrown error as a hard fail, so cases that would have passed on retry showed up red instead. Manual workaround was rerunning the flaky case in isolation once the TPM window cleared.
+
+**Fix.** New [`src/evals/runWithBackoff.ts`](src/evals/runWithBackoff.ts) — a general async wrapper that catches errors, checks whether they're 429s, parses the wait time out of the error message (both `Xms` and `Xs` forms observed in the wild), and retries after sleeping. Up to 3 retries, exponential-with-jitter fallback if the parse fails (message-shape changes upstream), plus a small buffer on top of the parsed wait time so we don't race the window boundary.
+
+**Wiring.** [`runCase.ts`](src/evals/runCase.ts) wraps the `run(agent, ...)` call inside its per-turn loop and accumulates the retry count across all turns. Two visibility signals so nothing goes silent:
+
+- Mid-run: rate-limit hits print `⚠ 429 rate limit — waiting Xms before retry N` inline (stderr) so a slow wait doesn't feel like a hang.
+- Post-run: the case's timing line gets a `, retried Nx` annotation when the runner absorbed any 429s — e.g. `(46.6s, retried 2x)`. Zero-retry cases print as before, so the annotation only shows up when it matters. A scan of the log post-run makes chronic TPM offenders obvious even when they pass.
+
+The retry count rides on `CaseOutput.retries` (new optional field in [`src/evals/types.ts`](src/evals/types.ts)) so future reporting (e.g. a summary line, CI badge annotation) can consume it structurally rather than parsing log lines.
+
+**Rejected alternatives.** Bumping the OpenAI org tier (fixes the symptom, not the pattern — same code would still fail in CI on a fresh account). Pacing sleep between cases (adds 8+ min to every suite run). Reordering cases (fragile ordering luck).
+
+**Portability note.** The 429-with-`Retry-After` pattern is standard across most rate-limited APIs, so `runWithBackoff` is a general-purpose helper — same shape works for real weather / flight / payment integrations later. This stage doubles as prep for Stage 18 (CI-with-evals-on-PR), which would hit the ceiling much harder without retry plumbing in place.
+
+**File index.** New: `src/evals/runWithBackoff.ts`. Modified: `src/evals/runCase.ts` (wraps the per-turn `run()`, accumulates `totalRetries`), `src/evals/runner.ts` (appends `, retried Nx` to the timing line), `src/evals/types.ts` (new optional `retries` field on `CaseOutput`).
+
+---
+
 > **Note on the historical Stage narratives above:** file paths in Stages 1–7 reflect the layout at the time each stage was written. Where those don't match the current file tree, the [file index](#file-index) at the bottom of this doc is authoritative.
 
 ---

@@ -281,6 +281,7 @@ async function main() {
     const elapsedSec = ((Date.now() - t0) / 1000).toFixed(1);
     const results = c.expect(out);
     let caseFailed = 0;
+
     for (const r of results) {
       totalAsserts++;
       const icon = r.passed ? '  ✓' : '  ✗';
@@ -291,7 +292,13 @@ async function main() {
         if (r.details) process.stdout.write(`      ${r.details}\n`);
       }
     }
-    process.stdout.write(`  (${elapsedSec}s)\n`);
+    // Timing line, with a `retried Nx` annotation if runWithBackoff had
+    // to absorb any 429s during this case (Stage 17.6). Zero on almost
+    // every run — the annotation is the loud visibility for the runs
+    // where TPM saturation quietly happened underneath.
+    const retryNote =
+      out.retries && out.retries > 0 ? `, retried ${out.retries}x` : '';
+    process.stdout.write(`  (${elapsedSec}s${retryNote})\n`);
     if (caseFailed > 0) {
       failedCases.push({
         name: c.name,
