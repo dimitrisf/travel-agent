@@ -27,24 +27,33 @@ export const optionsCountMatchesRequest: Case = {
       (t) => t.name === 'search_flights',
     );
 
-    // Count option enumerations at the start of a line. The model uses two
-    // common shapes interchangeably:
+    // Count option enumerations at the start of a line. The model uses
+    // three common shapes interchangeably:
     //   (a) Markdown numbered list: `1. **AirlineName**\n   - detail...`
     //   (b) "Option N" heading/label: `### Option 1`, `**Option 1**`,
-    //       `Option 1:`
-    // Both communicate the same count to the user, so the assertion accepts
-    // either. Trailing items inside a single option (like "1) morning" as a
-    // stops label) won't start a line, so this stays targeted.
-    // E.g., if out.finalText is:
-    //   ### Option 1
-    //   - Flight Number: A3 600
-    //   ### Option 2
-    //   - Flight Number: A3 601
-    // then numberedCount will be 2.
+    //       `Option 1:`.
+    //   (c) Top-level bullet with the option name in bold (used mostly
+    //       when there's only one option — Stage 19 addition): `- **Aegean
+    //       Airlines Flight A3 600**` at column 0, with indented sub-items
+    //       for the details underneath.
+    // Any of the three communicates the same count to the user, so the
+    // assertion accepts whichever the model picked.
+    //
+    // Bullet detection is anchored to column 0 (no leading whitespace) so
+    // indented sub-items inside a bulleted option don't double-count.
+    // Numbered- and bullet-shaped enumerations don't overlap textually,
+    // so taking the max across the two counts is safe — a response uses
+    // one style or the other, not both. If the model ever mixed them in
+    // a real case (5 numbered + 1 bullet), the max would still return
+    // the intended count within one styling family.
     const numberedItemPattern =
       /^\s*(?:#+\s+|[*_]+\s*)?(?:\d+\.\s|Option\s+\d+\b)/gim;
     const numberedCount = (out.finalText.match(numberedItemPattern) ?? [])
       .length;
+    const topLevelBulletPattern = /^[-*+]\s+/gm;
+    const bulletCount = (out.finalText.match(topLevelBulletPattern) ?? [])
+      .length;
+    const optionCount = Math.max(numberedCount, bulletCount);
 
     // Supply cap: the model can't show more flights than the tool actually
     // returned. If the seed only has 1 outbound flight for ATH→LHR on that
@@ -72,13 +81,13 @@ export const optionsCountMatchesRequest: Case = {
       ),
       {
         description:
-          'numbered options equal min(requested, available) — catches over- and under-listing',
+          'option count equals min(requested, available) — catches over- and under-listing',
         // The load-bearing check. `expectedNumbered` collapses to `requestedCount`
         // when supply is plentiful (the normal drift-detection case) and to
         // `availableOutbound` when the seed is thin (avoids false positives
         // from data limits).
-        passed: numberedCount === expectedNumbered,
-        details: `numbered items: ${numberedCount}, expected ${expectedNumbered} (requested ${requestedCount}, tool returned ${availableOutbound})`,
+        passed: optionCount === expectedNumbered,
+        details: `option count: ${optionCount} (numbered=${numberedCount}, bullet=${bulletCount}), expected ${expectedNumbered} (requested ${requestedCount}, tool returned ${availableOutbound})`,
       },
     ];
   },

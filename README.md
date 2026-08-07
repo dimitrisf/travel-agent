@@ -2683,6 +2683,109 @@ Every PR that isn't a draft runs the full eval suite on GitHub Actions and repor
 
 ---
 
+### Stage 19 — Eval stability
+
+Follow-up to Stage 18. The first CI run landed 97/101 and a same-day local run landed 95/101 with a *different* set of failing cases — proving the CI infrastructure works and the residual red is genuine non-determinism in the eval suite. Two independent fixes to close the gaps.
+
+#### 1. BOOK MEANS BOOK — new PRIME DIRECTIVE
+
+Three multi-turn cases all failed on the same input pattern: `"Book the first one for John Doe, john@example.com"` after a hotel search. Observed model responses across five recent runs:
+
+| Response | Frequency | Root cause |
+|---|---|---|
+| Calls `propose_booking` correctly | ~50% | Happy path |
+| Re-lists the same hotels | ~20% | Ignores "book" verb; treats as re-search |
+| Fabricates a flight number → Stage 13 guardrail trips → empty response | ~15% | Model conflates "book" with "book a trip", starts inventing flights |
+| Asks "should I book?" | ~15% | Requests permission the user already gave |
+
+Root cause: the "trigger `propose_booking` when …" rule lives mid-prompt (position ~28, after tool descriptions). gpt-4o's attention dilutes on multi-rule prompts; deep-buried rules get inconsistent adherence.
+
+**Fix:** new **PRIME DIRECTIVE — BOOK MEANS BOOK** at position 4 (right after TOOLS BEFORE PROSE and THIN TOOL DATA). Same reasoning as Stage 17.5 for placing critical rules at the top of the instruction array — max attention weight.
+
+Enumerates each observed failure mode explicitly as FORBIDDEN:
+
+- FORBIDDEN: re-listing the options they just saw.
+- FORBIDDEN: running another `search_hotels` or `search_flights` for the same trip.
+- FORBIDDEN: mentioning a flight number when only hotels are on screen (names the specific guardrail — Stage 13 search-result-fabrication — so the model understands the consequence).
+- FORBIDDEN: asking "would you like me to book?" — the user already said yes.
+
+Plus explicit handling for the "flights[] shape" confusion:
+
+- If only hotels are on screen, the booking is hotel-only (empty `flights[]`).
+- If only flights are on screen, it's flight-only.
+- If both, include both.
+
+And a follow-up-action clause to stabilise the other two failure modes (`cancel-proposed-booking-happy-path`, `get-booking-by-numeric-id-happy-path`):
+
+- If the user then says "cancel that booking" or "what's the status of that booking", act on the id `propose_booking` just returned — do NOT re-run any searches, do NOT re-list options.
+
+#### 2. sunny-weekend-from-athens tri-mode arithmetic check
+
+Stage 17.5 added a two-mode assertion for `search_flights` results (inbound-present vs inbound-empty). Today's runs surfaced a **third mode**: both outbound *and* inbound empty. Happens when "next weekend" resolves to a date range outside the seeded flight window, or when the agent's inferred `max_price` filter is tight enough to exclude every seeded flight. The agent handles it correctly ("no flights were found") but the assertion had no path to accept "no trip total present, honest about missing flights."
+
+**Fix:** tri-mode structure documented in the header of `tripTotalArithmeticCheck`:
+
+- **Mode A** (both present): strict `outbound + return + hotel` combos. Unchanged.
+- **Mode B** (inbound empty): `outbound + hotel` combos. Unchanged.
+- **Mode C** (both empty — new): no combos possible; escape iff response contains an honest "no flights" phrasing and doesn't invent a trip total.
+
+New flag `allFlightsEmpty` starts true and flips false the moment any round-trip flight call has outbound results. Consumed at the `validCombos.size === 0` branch: if `allFlightsEmpty && HONEST_THIN_DATA_PHRASING.test(...)` → pass with a distinct explanation ("thin-data escape (both outbound and inbound empty)").
+
+`HONEST_THIN_DATA_PHRASING` regex extended with three new alternations:
+
+- `no (available|remaining)? flights? … (were found|are available|in (the|your|current|search) window|within budget)`
+- `no (available|remaining)? flights? (were|are|could be) found`
+- `unable to find (any|available)? flights?`
+- `no flights? found`
+
+Anchored to concrete phrasings from the two failing runs today:
+- "No flights were found for your selected weekend from Athens to Berlin within the specified budget."
+- "No available flights from Athens to Berlin from August 14-16 were found in the current search window."
+
+Both now match.
+
+#### 3. Two over-narrow assertions loosened
+
+The first 5-run verification after (1) and (2) landed at 99/101, with two new failures — both purely over-narrow assertions accepting only one of two equally-correct agent responses.
+
+- **`origin-ask-required`**: assertion was `\?\s*$` (strict end-of-message question mark). Model correctly asked "Where are you flying from?" then added "I can help you find flights if you provide your departure city." Question mark ended up mid-message. Loosened to `\?` anywhere — paired with the existing "mentions origin / departure" regex, the check stays specific enough.
+- **`get-booking-requires-numeric-id-not-reference`**: assertion required "asks for the numeric id" phrasing. Model instead deflected to "sign in to access your bookings" — equally valid, since Phase 2 gated `get_booking` behind auth for past bookings. Loosened to accept EITHER the id-request phrasing OR a sign-in deflection. The critical `toolNotCalled('get_booking')` check (never extract digits from `BKG-1234`) stays strict — that's the actual defect being guarded.
+
+Neither loosen weakens what the case is really testing. Both close persistent non-determinism where the model's choice between two valid responses shouldn't flip the assertion.
+
+#### 4. sunny-weekend € count check made mode-aware
+
+Second 5-run verification surfaced a fourth failure — the `sunnyWeekendFromAthens` case's `final summary references at least four € figures` assertion. Mode C hit again: with no flights available (outbound and inbound both empty), the model correctly returned only hotel totals (2 € figures), but the `>= 4` threshold assumed the mode-A shape (outbound + return + hotel + trip total).
+
+**Fix:** extracted the €-count check into `euroCountCheck` with a mode-aware threshold. New helper `anyRoundTripFlightHasResults(out)` inspects the same tool trace `tripTotalArithmeticCheck` uses:
+
+- **Flights present** → require ≥4 € figures (unchanged behaviour).
+- **All flights empty (mode C)** → require ≥1 € figure (a single hotel total is enough proof the search ran).
+
+Same tri-mode logic as `tripTotalArithmeticCheck`, applied at the shallower level of the €-count check. Assertion description updated to "final summary references € figures (≥4 with flights, ≥1 hotel-only)" so failure messages self-explain.
+
+#### 5. options-count enumeration accepts bullet lists
+
+Third verification round surfaced a fifth failure — `options-count-matches-request` with 0 numbered items detected when the user asked for 3 options but the seed had only 1 flight. The model correctly reported "here is one flight option" plus one top-level bullet with the flight details underneath, but the assertion's regex only counted `1.` / `2.` / `3.` numbered markers and `Option N` headings — the top-level `-` bullet was invisible to it.
+
+**Fix:** added a third enumeration pattern (top-level `[-*+]\s+` bullets, anchored to column 0 so indented sub-items don't double-count) alongside the existing numbered + `Option N` patterns. `optionCount = Math.max(numberedCount, bulletCount)` — a response uses one style or the other, and the max returns the intended count either way. Assertion description + details string updated to name both patterns so failures self-explain.
+
+#### Residual flakiness (accepted, not fixed)
+
+`sunny-weekend-from-athens` retains the ~20% catastrophic-drift rate that Stage 17.5 already documented as inherent to gpt-4o. The failure mode: agent skips all tools, drifts straight into prose about weather-for-dates-outside-forecast-coverage, gets caught by the Stage 12 forecast-attribution guardrail, response comes back empty. All Stage 19 changes above address a different class of issues; this residual is untouchable without either restructuring the case (removing the "sunny" trigger word that pulls in weather) or bumping the TravelAgent's model.
+
+**Implication for CI:** the Evals check on `main` will occasionally be red purely because of a sunny-weekend blowout, not because of a new regression. This is exactly the scenario the "check informational for 2-3 stable runs before flipping to Required" plan from Stage 18 was built for. Do not flip the check to Required until either the sunny-weekend flakiness is addressed (Stage 20+ — model swap, or case restructure) or the eval harness gains a `EVALS_SKIP_KNOWN_FLAKY`-style opt-out for CI.
+
+#### Stability bar
+
+Before merging: 5 consecutive local `EVALS_BRIEF=1 npm run evals` runs, all 101/101. If any one fails, either the fix wasn't enough or a new regression — no merge until stable. Only after that plus 2-3 clean CI runs on subsequent real PRs does the CI check flip to Required in branch protection.
+
+**File index.** Modified only: `src/agents/buildTravelAgent.ts` (new PRIME DIRECTIVE — BOOK MEANS BOOK at position 4), `src/evals/cases/sunnyWeekendFromAthens.ts` (tri-mode `tripTotalArithmeticCheck` + extended `HONEST_THIN_DATA_PHRASING` + mode-aware `euroCountCheck`), `src/evals/cases/originAskRequired.ts` (question-mark check loosened to anywhere-in-message), `src/evals/cases/getBookingRequiresNumericIdNotReference.ts` (accepts id-request OR sign-in deflection), `src/evals/cases/optionsCountMatchesRequest.ts` (adds top-level-bullet enumeration alongside numbered + `Option N`).
+
+No new schema/migration, no new deps, no workflow changes.
+
+---
+
 > **Note on the historical Stage narratives above:** file paths in Stages 1–7 reflect the layout at the time each stage was written. Where those don't match the current file tree, the [file index](#file-index) at the bottom of this doc is authoritative.
 
 ---
