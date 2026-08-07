@@ -5,6 +5,7 @@ name: Evals
 # the check to "required" in branch protection).
 #
 # Design notes:
+#
 #   - Concurrency-cancel: a new push on the same branch cancels any
 #     still-running eval job. Iterative pushes don't stack up multiple
 #     $0.50 OpenAI runs, and the PR always shows the latest verdict.
