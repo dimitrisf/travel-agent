@@ -2650,6 +2650,39 @@ The retry count rides on `CaseOutput.retries` (new optional field in [`src/evals
 
 ---
 
+### Stage 18 — CI with evals-on-PR
+
+Every PR that isn't a draft runs the full eval suite on GitHub Actions and reports pass/fail as a check on the PR page. Turns the eval suite from a "thing you remember to run" into a safety net that catches regressions before merge — the highest-leverage change to the development loop since the eval harness itself.
+
+**Trigger and gating.** `pull_request` events (`opened`, `synchronize`, `reopened`, `ready_for_review`). Draft PRs are skipped via a job-level `if: github.event.pull_request.draft == false` — open a PR as draft while iterating, flip it to "Ready for review" when you actually want the verdict. Cost mitigation: iterative pushes on a WIP feature shouldn't burn ~$0.50 per suite run each.
+
+**Concurrency-cancel** (the second cost mitigation): a new push on the same branch cancels any still-running eval job in the same group (`evals-${{ github.head_ref }}`). Without this, pushing five commits in quick succession stacks five parallel eval runs on the same branch, four of which are testing stale commits nobody cares about. With cancel-in-progress, only the latest push's run survives. Different branches (parallel PRs) don't interfere — they land in different concurrency groups.
+
+**Neon evals branch** for isolation. Rather than sharing the local dev database (concurrent writes between your local dev session and the CI runner would poison each other's state), CI uses a copy-on-write Neon branch off dev. Free at this scale, seconds to create, deterministic starting state. `DATABASE_URL_EVALS` GitHub secret carries the connection string; `prisma migrate deploy` in the workflow keeps the schema in sync if a migration lands and CI hasn't run since.
+
+**Dev server in the runner.** The eval harness talks to MCP endpoints over HTTP (`MCPServerStreamableHttp` in [`runCase.ts`](src/evals/runCase.ts)), so the workflow boots `npm run dev` in the background before invoking `npm run evals`. A bash readiness loop polls `http://localhost:3000` with a 90-second budget — the first-run compile takes ~30s on the runner. Build + start would be faster per-request but slower to warm up; not worth it for a ~5-8 min suite.
+
+**Secrets contract.** Three repo secrets:
+- `OPENAI_API_KEY` — same key as local dev.
+- `DATABASE_URL_EVALS` — Neon `evals` branch connection string.
+- `AUTH_SECRET` — any 32-byte base64 string, needed because NextAuth's config throws at boot without it. Evals don't exercise auth flows, but the app has to be able to start.
+
+`AUTH_GOOGLE_ID` / `AUTH_GOOGLE_SECRET` are set to dummy strings inline in the workflow — evals don't exercise OAuth. If real Google config were needed for some future eval, promote them to secrets.
+
+**Not gating merge yet.** For the first few runs the check is informational only — lets us tune the workflow without every misconfig blocking work. Once stable (2-3 consecutive green runs), flip the check to "Required" via repo Settings → Branches → Branch protection rules on `main`.
+
+**What this doesn't cover.**
+- No push-to-main trigger — evals only run on PRs. If someone bypasses the PR flow (direct commit to main), CI stays quiet. Acceptable for solo work; add on push to main if that changes.
+- No result caching — every run is a full suite. Would want partial-run + case-selection if the suite grew to 100+ cases.
+- No coverage / trending — the run is pass/fail. A future stage could store historical pass rates in a Neon table or a simple JSON artifact for regression trending.
+- No cost budget alerting — a runaway workflow could burn credits. Concurrency-cancel + skip-drafts + the 20-minute job timeout are the main safeguards. Add cost budgets / alerts if the burn rate becomes noticeable.
+
+**Portability.** The workflow shape (checkout → node → deps → prisma → background app → wait → run suite) generalises to any Next.js + Prisma + eval setup. Node 20, Ubuntu latest, no non-portable steps.
+
+**File index.** New: `.github/workflows/evals.yml`.
+
+---
+
 > **Note on the historical Stage narratives above:** file paths in Stages 1–7 reflect the layout at the time each stage was written. Where those don't match the current file tree, the [file index](#file-index) at the bottom of this doc is authoritative.
 
 ---

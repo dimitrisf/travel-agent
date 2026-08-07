@@ -1,0 +1,109 @@
+name: Evals
+
+# Run the full eval suite on every non-draft PR. Reports pass/fail as a
+# GitHub Check on the PR page so a red suite blocks merge (once we flip
+# the check to "required" in branch protection).
+#
+# Design notes:
+#
+#   - Concurrency-cancel: a new push on the same branch cancels any
+#     still-running eval job. Iterative pushes don't stack up multiple
+#     $0.50 OpenAI runs, and the PR always shows the latest verdict.
+#   - Draft PRs are skipped (draft == false gate on the job). Open a
+#     draft PR while iterating, flip to Ready when you actually want
+#     the eval verdict.
+#   - Boots `npm run dev` in the background because runCase.ts talks to
+#     the MCP endpoints via HTTP (MCPServerStreamableHttp). Build+start
+#     would run faster per-request but slower to warm up — for a ~5min
+#     eval suite the trade-off doesn't matter.
+#   - Uses a separate Neon "evals" branch (DATABASE_URL_EVALS secret) so
+#     concurrent local dev and CI runs don't clobber each other's data.
+#     The branch is a copy of dev at branch-creation time, seeded and
+#     schema-migrated already; migrate-deploy is a no-op guard for
+#     future schema drift.
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+concurrency:
+  # One group per branch — parallel PRs on different branches run
+  # concurrently, but iterative pushes on the same PR cancel earlier
+  # runs. github.head_ref is the source branch of the PR.
+  group: evals-${{ github.head_ref }}
+  cancel-in-progress: true
+
+jobs:
+  evals:
+    # Skip drafts entirely — cost mitigation. Flip PR to "Ready for
+    # review" to trigger a run.
+    if: github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    # Full suite runs in ~5-8 min locally; 20 gives headroom for cold
+    # starts + retries in runWithBackoff.
+    timeout-minutes: 20
+    env:
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      DATABASE_URL: ${{ secrets.DATABASE_URL_EVALS }}
+      AUTH_SECRET: ${{ secrets.AUTH_SECRET }}
+      # Dummy values — evals don't exercise auth flows, but NextAuth's
+      # Google provider config throws at boot if the env vars are
+      # missing entirely. Real values would let the app boot with real
+      # OAuth, which we don't need here.
+      AUTH_GOOGLE_ID: dummy-google-id
+      AUTH_GOOGLE_SECRET: dummy-google-secret
+      # Brief mode: skip the agent-output dump for passing cases. The
+      # log is scannable even when 33 cases run.
+      EVALS_BRIEF: '1'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Prisma generate
+        run: npx prisma generate
+
+      - name: Prisma migrate deploy
+        # Idempotent — applies pending migrations only. On a fresh evals
+        # branch with schema already synced, this is a no-op.
+        run: npx prisma migrate deploy
+
+      - name: Start dev server (background)
+        # `&` backgrounds the process. Its stdout/stderr goes to the
+        # step's log — visible in the Actions UI if the server crashes.
+        # `disown` detaches so the shell doesn't get SIGHUP when this
+        # step ends and kill the server.
+        run: |
+          npm run dev &
+          disown
+
+      - name: Wait for dev server
+        run: |
+          echo "Waiting for http://localhost:3000..."
+          for i in $(seq 1 90); do
+            code=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:3000 || echo "000")
+            if [ "$code" = "200" ] || [ "$code" = "307" ] || [ "$code" = "308" ]; then
+              echo "Server ready after ${i}s (HTTP $code)"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "Server did not become ready in 90s"
+          exit 1
+
+      - name: Run evals
+        run: npm run evals
+
+      - name: Stop dev server
+        # Best-effort cleanup so the runner shuts down cleanly. `|| true`
+        # so a missing process doesn't fail the step (e.g. dev-server
+        # crashed earlier and there's nothing to kill).
+        if: always()
+        run: pkill -f "next dev" || true
