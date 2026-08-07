@@ -24,12 +24,17 @@ export const originAskRequired: Case = {
     // end of the eval output shows the args if this fires — no need for
     // custom detail formatting here.
     toolNotCalled(out, 'search_flights'),
-    // Trailing question mark is a decent proxy for "the agent is asking".
-    // `\s*$` handles trailing whitespace/newlines so we don't need to trim.
+    // Any question mark in the message is a decent proxy for "the agent
+    // is asking". Loosened Stage 19 from strict end-of-message `\?\s*$`
+    // to bare `\?` — the model often asks the question and then adds a
+    // helpful follow-up ("Where are you flying from? I can help you
+    // find flights if you provide your departure city."), which is
+    // still asking, just not on the terminal token. The paired
+    // "mentions origin" assertion below keeps the check specific enough.
     finalMessageMatches(
       out,
-      /\?\s*$/,
-      'final message ends with a question (asking for missing info)',
+      /\?/,
+      'final message contains a question (asking for missing info)',
     ),
     // Signals that the specific missing piece being asked about is origin.
     // If the agent asks about something else (dates, passengers, cabin)

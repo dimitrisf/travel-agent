@@ -30,14 +30,7 @@ export const sunnyWeekendFromAthens: Case = {
     ),
     toolCalled(out, 'search_hotels'),
     toolCalled(out, 'get_forecast'),
-    {
-      description: 'final summary references at least four € figures',
-      // A round-trip + one hotel option = outbound price + return price +
-      // hotel total + trip total = 4 minimum. Anything less and either
-      // the arithmetic collapsed to one-way or an option got dropped.
-      passed: (out.finalText.match(/€/g) ?? []).length >= 4,
-      details: `€ count: ${(out.finalText.match(/€/g) ?? []).length}`,
-    },
+    euroCountCheck(out),
     // This is the actual regression check we spent all of Stage 9
     // chasing: does every "trip total" the model wrote equal outbound
     // + return + some hotel total from the tool results? Cross-checks
@@ -46,26 +39,81 @@ export const sunnyWeekendFromAthens: Case = {
   ],
 };
 
+// Count the € symbols in the final summary and require the appropriate
+// threshold based on what search_flights returned. Two modes so the
+// check stays tight when flights are present but doesn't false-fail
+// when they aren't:
+//
+//   - Any round-trip search_flights call returned outbound OR inbound
+//     results → require ≥4 € figures. Rationale: outbound price +
+//     return price + hotel total + trip total = 4 minimum. Anything
+//     less means the arithmetic collapsed to one-way or a piece got
+//     dropped from the summary.
+//   - All round-trip calls returned both arrays empty (mode C —
+//     see tripTotalArithmeticCheck header) → require ≥1 € figure.
+//     Only hotel totals to report; no flight prices, no trip total
+//     to write. A single hotel total is enough proof the search
+//     went through.
+function euroCountCheck(out: CaseOutput): {
+  description: string;
+  passed: boolean;
+  details: string;
+} {
+  const count = (out.finalText.match(/€/g) ?? []).length;
+  const flightsPresent = anyRoundTripFlightHasResults(out);
+  const threshold = flightsPresent ? 4 : 1;
+  return {
+    description: 'final summary references € figures (≥4 with flights, ≥1 hotel-only)',
+    passed: count >= threshold,
+    details: `€ count: ${count} (${flightsPresent ? 'flights present → need ≥4' : 'no flights → need ≥1'})`,
+  };
+}
+
+// True iff any round-trip search_flights call in this case's tool trace
+// returned at least one outbound OR inbound flight. Used by euroCountCheck
+// to pick the right threshold; matches the mode A/B vs mode C split in
+// tripTotalArithmeticCheck without duplicating that function's inner
+// state (which is scoped to its own combo-building loop).
+function anyRoundTripFlightHasResults(out: CaseOutput): boolean {
+  return out.toolCalls.some((t) => {
+    if (t.name !== 'search_flights') return false;
+    if (!(t.args as { return_date?: unknown })?.return_date) return false;
+    if (typeof t.parsedOutput !== 'object' || t.parsedOutput === null) {
+      return false;
+    }
+    const parsed = t.parsedOutput as { outbound?: unknown; inbound?: unknown };
+    const outboundHasResults =
+      Array.isArray(parsed.outbound) && parsed.outbound.length > 0;
+    const inboundHasResults =
+      Array.isArray(parsed.inbound) && parsed.inbound.length > 0;
+    return outboundHasResults || inboundHasResults;
+  });
+}
+
 // Verify that every "trip total"-flavoured number in the final summary
-// equals a real combination of tool-returned prices. Two modes depending
-// on whether search_flights returned inbound results:
+// equals a real combination of tool-returned prices. Three modes
+// depending on what search_flights returned (Stage 19 added mode C
+// after CI + a same-day local run both surfaced the both-empty variant):
 //
-//   - Inbound present  → validCombo = outbound + return + hotel_total.
-//                        Catches the classic Stage 9 drift where the
-//                        agent skipped the return leg's cost in the total.
-//   - Inbound empty    → validCombo = outbound + hotel_total. Reflects
-//                        Stage 17.5's THIN TOOL DATA rule: when
-//                        search_flights returns zero inbound flights,
-//                        the agent must NOT invent a return leg, so the
-//                        honest trip total is one-way + hotel. If the
-//                        agent inflated (e.g., quoted outbound × 2 + hotel
-//                        by doubling the outbound as a fake return),
-//                        the arithmetic won't match this combo and the
-//                        check fails — that's the intent.
+//   A. Both outbound and inbound present → validCombo = outbound + return
+//      + hotel_total. Catches the classic Stage 9 drift where the agent
+//      skipped the return leg's cost in the total.
+//   B. Outbound present, inbound empty  → validCombo = outbound + hotel_total.
+//      Stage 17.5's THIN TOOL DATA rule: when search_flights returns zero
+//      inbound flights, the agent must NOT invent a return leg, so the
+//      honest trip total is one-way + hotel.
+//   C. Both outbound and inbound empty  → NO validCombo possible; no
+//      trip total is expected in the response at all. Assertion passes
+//      IF the response openly acknowledges that no flights were found
+//      (matched by HONEST_THIN_DATA_PHRASING), without inventing a
+//      flight number or fake trip total. Added Stage 19 after "next
+//      weekend" resolved to a date range with no seeded flights,
+//      producing legit-but-thin agent output that mode B couldn't accept.
 //
-// The two modes are branched, not unioned: if we added the one-way combo
+// Modes A vs B are branched, not unioned: if we added the one-way combo
 // when inbound IS available, the old skip-the-return drift would sneak
-// through as "valid" arithmetic.
+// through as "valid" arithmetic. Mode C is a separate escape (no combo
+// built at all), gated on a distinct flag.
 function tripTotalArithmeticCheck(out: CaseOutput): {
   description: string;
   passed: boolean;
@@ -136,11 +184,19 @@ function tripTotalArithmeticCheck(out: CaseOutput): {
   // i.e., validCombos = {380, 420, 430, 470, 480, 520, 530, 570}.
   const validCombos = new Set<number>();
   // Set to true if at least one round-trip flight call returned an
-  // empty `inbound` array. Used later to decide whether an "honest
-  // thin-data" prose response (subtotals only, no grand total) counts
-  // as a pass — the model correctly refusing to write a possibly-
-  // misleading trip total when the tool couldn't confirm a return leg.
+  // empty `inbound` array (with outbound still present). Used later to
+  // decide whether an "honest thin-data" prose response (subtotals only,
+  // no grand total) counts as a pass — the model correctly refusing to
+  // write a possibly-misleading trip total when the tool couldn't
+  // confirm a return leg. This is mode B in the header comment.
   let sawEmptyInbound = false;
+  // Set to true if EVERY round-trip flight call returned both outbound
+  // and inbound empty — no flights at all. Distinct from sawEmptyInbound
+  // because a legit response in this case has no flight numbers, no
+  // flight prices, no trip totals at all — the escape criteria differ
+  // (only the "no flights" phrasing needs to be present; no per-leg
+  // arithmetic to validate). This is mode C in the header comment.
+  let allFlightsEmpty = roundTripFlightCalls.length > 0;
 
   for (const fc of roundTripFlightCalls) {
     // we expect the parsed output to be an object with `outbound` and `inbound` arrays, each containing objects with a `price` property. If the structure is different, we skip this flight call.
@@ -176,6 +232,10 @@ function tripTotalArithmeticCheck(out: CaseOutput): {
     const inboundPrices = pricesFrom(flightsResult.inbound);
 
     if (outboundPrices.length === 0) continue;
+
+    // This flight call had outbound results — the "all flights empty"
+    // escape (mode C) no longer applies.
+    allFlightsEmpty = false;
 
     for (const hc of hotelCalls) {
       // E.g., imagine the agent runs this one call:
@@ -241,10 +301,27 @@ function tripTotalArithmeticCheck(out: CaseOutput): {
     }
   }
 
-  // If we didn't find any valid combinations at all, the tool results
-  // are too sparse to check against (e.g., outbound empty AND inbound
-  // empty, or no hotels returned). Fail with a clear message.
+  // If we didn't find any valid combinations, split on why:
+  //
+  //   - Mode C escape: every round-trip flight call returned both arrays
+  //     empty. There are no flights to build a combo from. The response
+  //     is legit iff it (a) doesn't invent a trip total and (b) openly
+  //     acknowledges the missing flights via HONEST_THIN_DATA_PHRASING.
+  //     A response that quotes a hotel-only total is fine — hotel totals
+  //     aren't trip totals, and the lenient candidate check below never
+  //     confuses the two once we short-circuit here.
+  //   - Otherwise (no hotels, or some other sparsity): hard fail with
+  //     the original message. That signals a real problem with the
+  //     tool results the eval should surface.
   if (validCombos.size === 0) {
+    if (allFlightsEmpty && HONEST_THIN_DATA_PHRASING.test(out.finalText)) {
+      return {
+        description,
+        passed: true,
+        details:
+          'thin-data escape (both outbound and inbound empty): response acknowledged missing flights without inventing a trip total',
+      };
+    }
     return {
       description,
       passed: false,
@@ -386,20 +463,29 @@ function pricesFrom(entries: Array<{ price?: number }> | undefined): number[] {
 }
 
 // Matches prose phrasings the model uses when honestly acknowledging that
-// search_flights returned no inbound flights. Used by the thin-data
-// escape in tripTotalArithmeticCheck: if the response contains any of
-// these AND no candidate matched a real combo AND inbound was empty,
-// we count it as a pass (the model correctly refused to invent a total).
+// search_flights returned no flights (either just the return leg, or
+// both directions). Used by the thin-data escape in
+// tripTotalArithmeticCheck: if the response contains any of these AND
+// no candidate matched a real combo AND the appropriate emptiness flag
+// is set, we count it as a pass (the model correctly refused to invent).
 //
-// Deliberately permissive: two matching strategies OR'd together —
+// Deliberately permissive: three matching strategies OR'd together —
 //   (a) "return" + one of a small set of missing-data verbs within 60
 //       characters (handles "return flights for this period weren't
 //       found", "return leg isn't available", "return flight was not
-//       found", "round-trip calculation isn't possible", etc.).
+//       found", "round-trip calculation isn't possible", etc.). Mode B.
 //   (b) Standalone flag phrases like "no return flights", "only
-//       outbound", "no inbound", "couldn't find a return".
+//       outbound", "no inbound", "couldn't find a return". Mode B.
+//   (c) Stage 19 additions for mode C (both outbound and inbound empty):
+//       "no (available|remaining) flights", "no flights (were|are|.*)
+//       found/available", "no flights ... in the (current|search) window",
+//       "no flights ... within (the|your) budget". Covers phrasings from
+//       real failing runs: "No flights were found for your selected
+//       weekend from Athens to Berlin within the specified budget" and
+//       "No available flights from Athens to Berlin ... were found in
+//       the current search window".
 // False-positive risk is low for this specific case — a `sunny weekend`
-// response mentioning "return" for unrelated reasons doesn't happen in
-// practice.
+// response mentioning "return" or "no flights" for unrelated reasons
+// doesn't happen in practice.
 const HONEST_THIN_DATA_PHRASING =
-  /return\s+(?:flights?|leg|direction|trip|calculation)[\s\S]{0,60}?(?:not\s+(?:available|found|possible)|unavailable|(?:weren'?t|wasn'?t|isn'?t|aren'?t)\s+(?:found|available|possible)|couldn'?t\s+(?:find|be\s+found)|missing|no\s+longer\s+available)|round-?trip\s+(?:calculation|total|cost|price)[\s\S]{0,30}?(?:not\s+possible|isn'?t\s+possible|cannot\s+be\s+(?:calculated|confirmed))|no\s+return\s+flights?|only\s+outbound|no\s+inbound|couldn'?t\s+find\s+(?:a\s+|any\s+)?return|cannot\s+confirm\s+the\s+full/i;
+  /return\s+(?:flights?|leg|direction|trip|calculation)[\s\S]{0,60}?(?:not\s+(?:available|found|possible)|unavailable|(?:weren'?t|wasn'?t|isn'?t|aren'?t)\s+(?:found|available|possible)|couldn'?t\s+(?:find|be\s+found)|missing|no\s+longer\s+available)|round-?trip\s+(?:calculation|total|cost|price)[\s\S]{0,30}?(?:not\s+possible|isn'?t\s+possible|cannot\s+be\s+(?:calculated|confirmed))|no\s+return\s+flights?|only\s+outbound|no\s+inbound|couldn'?t\s+find\s+(?:a\s+|any\s+)?return|cannot\s+confirm\s+the\s+full|no\s+(?:available\s+|remaining\s+)?flights?\b[\s\S]{0,120}?(?:were\s+found|are\s+available|(?:in|within)\s+(?:the|your|this)?\s*(?:current\s+|search\s+)?(?:search\s+window|window|budget|range))|no\s+(?:available\s+|remaining\s+)?flights?\s+(?:were|are|could\s+be)\s+found|unable\s+to\s+find\s+(?:any\s+|available\s+)?flights?|no\s+flights?\s+found/i;
