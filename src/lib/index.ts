@@ -1,20 +1,15 @@
 import { PrismaClient } from '@prisma/client';
-import { z } from 'zod';
 import { BookingRepository } from './repositories/BookingRepository';
 import { BookingService } from './services/BookingService';
-import { BookingServiceError } from './services/BookingServiceError';
 import { ConversationRepository } from './repositories/ConversationRepository';
 import { ConversationService } from './services/ConversationService';
-import { ConversationServiceError } from './services/ConversationServiceError';
 import { FlightRepository } from './repositories/FlightRepository';
 import { FlightService } from './services/FlightService';
 import { HotelRepository } from './repositories/HotelRepository';
 import { HotelService } from './services/HotelService';
-import { TravelServiceError } from './services/TravelServiceError';
 import { LiveWeatherRepository } from './repositories/LiveWeatherRepository';
 import { SeededWeatherRepository } from './repositories/SeededWeatherRepository';
 import { WeatherService } from './services/WeatherService';
-import { WeatherServiceError } from './services/WeatherServiceError';
 
 // ───── Weather ─────
 export { SeededWeatherRepository } from './repositories/SeededWeatherRepository';
@@ -88,6 +83,22 @@ export {
   type ConversationServiceErrorCode,
 } from './services/ConversationServiceError';
 
+// ───── Error taxonomy (OO refactor) ─────
+// Abstract base for anything the API layer can serialize into an HTTP
+// response. CodedServiceError is the intermediate template-method base
+// for the four domain error classes (they share the { error, code }
+// body shape and the INTERNAL_ERROR log pattern). Two library-side
+// wrappers cover errors we don't own (ZodError) and everything
+// unclassified (UnexpectedError). See utils/apiErrorResponse.ts for
+// the classifier.
+export {
+  ServiceError,
+  type ServiceErrorCode,
+} from './services/ServiceError';
+export { CodedServiceError } from './services/CodedServiceError';
+export { ZodValidationError } from './services/ZodValidationError';
+export { UnexpectedError } from './services/UnexpectedError';
+
 // ───── Helpers ─────
 let defaultPrisma: PrismaClient | undefined;
 
@@ -145,28 +156,3 @@ export function createConversationService(
   return new ConversationService(new ConversationRepository(client));
 }
 
-export function isWeatherServiceError(
-  err: unknown,
-): err is WeatherServiceError {
-  return err instanceof WeatherServiceError;
-}
-
-export function isTravelServiceError(err: unknown): err is TravelServiceError {
-  return err instanceof TravelServiceError;
-}
-
-export function isBookingServiceError(
-  err: unknown,
-): err is BookingServiceError {
-  return err instanceof BookingServiceError;
-}
-
-export function isConversationServiceError(
-  err: unknown,
-): err is ConversationServiceError {
-  return err instanceof ConversationServiceError;
-}
-
-export function isZodValidationError(err: unknown): err is z.ZodError {
-  return err instanceof z.ZodError;
-}

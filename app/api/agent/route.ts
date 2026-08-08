@@ -11,7 +11,7 @@ import { buildAgentGraph } from '@/agents/buildAgentGraph';
 import { rebuildCollectorFromHistory } from '@/agents/agentRunContext';
 import type { AgentRunContext } from '@/agents/agentRunContext';
 import { getCurrentUser } from '@/lib/auth/session';
-import { createConversationService, isConversationServiceError } from '@/lib';
+import { ConversationServiceError, createConversationService } from '@/lib';
 import { unwrapToolOutput } from '@/utils/toolOutput';
 import { userFacingGuardrailErrorMessage } from '@/utils/userFacingGuardrailErrorMessage';
 
@@ -118,7 +118,7 @@ export async function POST(req: NextRequest) {
           userId: user.id,
         });
       } catch (err) {
-        if (isConversationServiceError(err)) {
+        if (err instanceof ConversationServiceError) {
           return new Response(
             JSON.stringify({ error: err.message, code: err.code }),
             { status: 404, headers: { 'Content-Type': 'application/json' } },
