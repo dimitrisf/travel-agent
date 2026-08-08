@@ -1,18 +1,18 @@
+import { CodedServiceError, type DomainCodes } from './CodedServiceError';
+import type { ServiceErrorCode } from './ServiceError';
+
 export type WeatherServiceErrorCode =
+  | ServiceErrorCode
   | 'CITY_NOT_FOUND'
-  | 'NO_FORECAST_AVAILABLE'
-  | 'INTERNAL_ERROR';
+  | 'NO_FORECAST_AVAILABLE';
 
-export class WeatherServiceError extends Error {
-  readonly code: WeatherServiceErrorCode;
-
-  constructor(
-    message: string,
-    code: WeatherServiceErrorCode,
-    options?: { cause?: unknown },
-  ) {
-    super(message, options);
-    this.name = 'WeatherServiceError';
-    this.code = code;
-  }
+export class WeatherServiceError extends CodedServiceError<WeatherServiceErrorCode> {
+  protected readonly logPrefix = 'weather';
+  protected readonly statusByCode: Record<
+    DomainCodes<WeatherServiceErrorCode>,
+    number
+  > = {
+    CITY_NOT_FOUND: 404,
+    NO_FORECAST_AVAILABLE: 404,
+  };
 }

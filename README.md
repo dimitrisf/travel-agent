@@ -2861,6 +2861,114 @@ Two new entries in `.env.example`:
 
 Three-file shape mirrors the ports-and-adapters convention: interface in `WeatherRepository.ts`, adapters each in their own file (`SeededWeatherRepository.ts`, `LiveWeatherRepository.ts`). Adding a third source (Weather.com, Tomorrow.io, whatever) is a one-file addition.
 
+### Refactor — OO error taxonomy for API responses
+
+Follow-up cleanup, not a numbered stage. `apiErrorResponse` had grown into a ~90-line switch-chain across five branches (Zod + four domain services). Each branch inlined the HTTP status mapping (`404 for CITY_NOT_FOUND`, `409 for INVALID_STATE`, etc.), the response body shape, and the `console.error` for `INTERNAL_ERROR`. Two smells:
+
+1. **Misplaced HTTP knowledge.** Adding a new code to `WeatherServiceErrorCode` required a *second* edit inside `apiErrorResponse.ts` — the compiler had no idea it was missing a status decision. If you forgot, the code silently returned 500.
+2. **Duplication across four domain errors.** The Weather / Travel / Booking / Conversation branches were structurally identical (only status map and log prefix varied).
+
+Replaced with polymorphism: every error class carries its own status + body + logging via a `toApiResponse()` method, and `apiErrorResponse` collapses to a one-line orchestrator.
+
+#### The new hierarchy
+
+```
+ServiceError                                  abstract; auto-names via new.target.name
+├── CodedServiceError<TCode>                  template-method toApiResponse; owns SHARED_STATUS_BY_CODE
+│   ├── WeatherServiceError                   declares logPrefix + statusByCode only
+│   ├── TravelServiceError                    same
+│   ├── BookingServiceError                   same
+│   └── ConversationServiceError              same
+├── ZodValidationError                        independent — { error, issues } body
+└── UnexpectedError                           independent — { error } body
+```
+
+#### apiErrorResponse — collapsed
+
+From 96 lines / 5 branches to this:
+
+```ts
+export function apiErrorResponse(err: unknown): NextResponse {
+  return classify(err).toApiResponse();
+}
+
+function classify(err: unknown): ServiceError {
+  if (err instanceof ServiceError) return err;
+  if (err instanceof z.ZodError) return new ZodValidationError(err);
+  return new UnexpectedError(err);
+}
+```
+
+Two runtime branches (Zod + unknown fallback) is the unavoidable minimum at the `unknown → typed` boundary — JavaScript's `throw` accepts any value, so a runtime type-check is the price of bridging back into the type hierarchy. Design decision: `classify()` lives in `apiErrorResponse.ts` rather than as a `ServiceError.from()` static factory. A static factory would require the base to import its concrete subclasses (circular import in ESM); the standalone helper avoids the cycle.
+
+#### CodedServiceError — template method for the four domain errors
+
+The four domain error classes share more than the switch chain suggested: same body shape (`{ error, code }`), same conditional log on `INTERNAL_ERROR`, same 500 for internal failures. `CodedServiceError<TCode extends string>` captures the shared skeleton:
+
+```ts
+export abstract class CodedServiceError<TCode extends string> extends ServiceError {
+  readonly code: TCode;
+  protected abstract readonly logPrefix: string;
+  protected abstract readonly statusByCode: Record<DomainCodes<TCode>, number>;
+
+  private static readonly SHARED_STATUS_BY_CODE: Record<ServiceErrorCode, number> = {
+    INTERNAL_ERROR: 500,
+  };
+
+  toApiResponse(): NextResponse { /* templated: log-if-internal + JSON with resolved status */ }
+}
+```
+
+Each of the four subclasses reduces to declaration-only. Full [`WeatherServiceError.ts`](src/lib/services/WeatherServiceError.ts):
+
+```ts
+export type WeatherServiceErrorCode =
+  | ServiceErrorCode
+  | 'CITY_NOT_FOUND'
+  | 'NO_FORECAST_AVAILABLE';
+
+export class WeatherServiceError extends CodedServiceError<WeatherServiceErrorCode> {
+  protected readonly logPrefix = 'weather';
+  protected readonly statusByCode: Record<
+    DomainCodes<WeatherServiceErrorCode>,
+    number
+  > = {
+    CITY_NOT_FOUND: 404,
+    NO_FORECAST_AVAILABLE: 404,
+  };
+}
+```
+
+No constructor, no `toApiResponse`, no `this.name` boilerplate, no explicit `code` field declaration, no `INTERNAL_ERROR: 500`. All handled by the base.
+
+#### Compile-time invariants
+
+- **Every domain code has an explicit status decision.** `Record<DomainCodes<TCode>, number>` (not `Partial<>`) forces exhaustiveness. Adding a code without a status is a compile error, not a silent default-500.
+- **Subclasses cannot re-declare `INTERNAL_ERROR: 500`.** `DomainCodes<T> = Exclude<T, ServiceErrorCode>` removes it from the allowed key set; TypeScript flags an excess-property error if you try. The base owns it exclusively.
+- **`this.name` stays in sync with the class name automatically.** `this.name = new.target.name` in the abstract base captures the actual constructor invoked with `new`. Rename `WeatherServiceError` → `WeatherApiError` and `err.name` follows — no hardcoded string to drift.
+
+#### Shared code + shared status hoisted into one place
+
+`ServiceErrorCode` (currently `'INTERNAL_ERROR'`) is composed into every domain code union. Adding a shared code like `'RATE_LIMITED'` (429) is a two-touch change:
+
+1. `ServiceError.ts`: `type ServiceErrorCode = 'INTERNAL_ERROR' | 'RATE_LIMITED';`
+2. `CodedServiceError.ts`: `SHARED_STATUS_BY_CODE` grows `RATE_LIMITED: 429`.
+
+Zero touches to any of the four subclasses. Their code unions inherit `RATE_LIMITED` transitively (from `ServiceErrorCode`), and their `statusByCode` maps stay unaffected (`DomainCodes<T>` excludes shared codes). If you skip step 2, TS refuses to compile until the shared status is defined.
+
+#### Trade-offs considered and dropped
+
+- **Merging `ZodValidationError` / `UnexpectedError` under `CodedServiceError`.** Their response bodies differ from the coded shape (`{ error, issues }`, `{ error }`), and their logging semantics differ (never / always vs. only on `INTERNAL_ERROR`). Forcing them through the template would either change API contracts or dilute the template's meaning to nothing.
+- **Enforcing "TCode must include ServiceErrorCode" at the generic-constraint level.** TypeScript can't express "superset of X" without brittle workarounds. Convention is enforced instead by every existing domain type composing `ServiceErrorCode`, plus the base's `SHARED_STATUS_BY_CODE` map covering the shared codes. If a rogue subclass ever violated the convention, the `code === 'INTERNAL_ERROR'` check would just silently never fire — safe degradation, no crash.
+
+#### File index
+
+New: `src/lib/services/ServiceError.ts` (abstract base + `ServiceErrorCode` type + `new.target.name` auto-name), `src/lib/services/CodedServiceError.ts` (template-method intermediate + `DomainCodes<T>` helper + `SHARED_STATUS_BY_CODE`), `src/lib/services/ZodValidationError.ts` (wraps caught `ZodError` → 400 with `issues`), `src/lib/services/UnexpectedError.ts` (default classifier target → opaque 500 + server-side log). Modified: `src/lib/services/WeatherServiceError.ts`, `.../TravelServiceError.ts`, `.../BookingServiceError.ts`, `.../ConversationServiceError.ts` (all four gutted to declaration-only), `src/utils/apiErrorResponse.ts` (collapsed from 96 → 26 lines), `src/lib/index.ts` (added `ServiceError`/`CodedServiceError`/`ZodValidationError`/`UnexpectedError`/`ServiceErrorCode` exports, removed 5 unused `isXxxError` type guards + the `z` import they carried), `app/api/agent/route.ts` (last consumer of `isConversationServiceError` swapped to `err instanceof ConversationServiceError`).
+
+#### No behaviour change
+
+Every HTTP status, response body, and log line is byte-identical to pre-refactor. Same 404s for not-found codes, same 409 for booking conflicts, same 400 for validation errors, same opaque 500 body for unexpected errors, same `[weather] internal error: …` style log lines. `npx tsc --noEmit` clean; behaviour verified against Stage 20's live-mode weather endpoints.
+
 ---
 
 > **Note on the historical Stage narratives above:** file paths in Stages 1–7 reflect the layout at the time each stage was written. Where those don't match the current file tree, the [file index](#file-index) at the bottom of this doc is authoritative.

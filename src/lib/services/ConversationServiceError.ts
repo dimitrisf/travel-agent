@@ -1,23 +1,16 @@
-// Typed error class for the conversation persistence layer. Mirrors the
-// shape of BookingServiceError / WeatherServiceError so the API-error
-// mapper (utils/apiErrorResponse) handles all three uniformly.
+import { CodedServiceError, type DomainCodes } from './CodedServiceError';
+import type { ServiceErrorCode } from './ServiceError';
+
 export type ConversationServiceErrorCode =
-  | 'CONVERSATION_NOT_FOUND'
-  | 'INTERNAL_ERROR';
+  | ServiceErrorCode
+  | 'CONVERSATION_NOT_FOUND';
 
-export class ConversationServiceError extends Error {
-  readonly code: ConversationServiceErrorCode;
-
-  constructor(
-    // The error message to be returned to the client
-    message: string,
-    // The error code to be returned to the client
-    code: ConversationServiceErrorCode,
-    // Optional error options to be passed to the Error constructor, e.g., { cause: someError }
-    options?: ErrorOptions,
-  ) {
-    super(message, options);
-    this.name = 'ConversationServiceError';
-    this.code = code;
-  }
+export class ConversationServiceError extends CodedServiceError<ConversationServiceErrorCode> {
+  protected readonly logPrefix = 'conversation';
+  protected readonly statusByCode: Record<
+    DomainCodes<ConversationServiceErrorCode>,
+    number
+  > = {
+    CONVERSATION_NOT_FOUND: 404,
+  };
 }
