@@ -1,4 +1,14 @@
-import type { PrismaClient } from '@prisma/client';
+// Ports-and-adapters boundary (Stage 20). WeatherService depends on
+// this interface, not on any concrete class, so the underlying data
+// source can swap between seeded DB and live OpenWeatherMap without
+// touching the service layer or anything above it.
+//
+// Two implementations, one per file, both consuming this interface:
+//   - SeededWeatherRepository (see SeededWeatherRepository.ts) —
+//     reads from Prisma tables the demo library populates. Used by
+//     evals + CI + the fresh-install default.
+//   - LiveWeatherRepository (see LiveWeatherRepository.ts) — fetches
+//     from OpenWeatherMap's free tier. Opt-in via USE_SEEDED_WEATHER=0.
 
 export interface CurrentWeatherRow {
   city: string;
@@ -18,54 +28,11 @@ export interface ForecastRow {
   days: ForecastDayRow[];
 }
 
-export class WeatherRepository {
-  constructor(private readonly prisma: PrismaClient) {}
+export interface WeatherRepository {
+  findCurrentWeatherByCity(cityName: string): Promise<CurrentWeatherRow | null>;
 
-  async findCurrentWeatherByCity(
-    cityName: string,
-  ): Promise<CurrentWeatherRow | null> {
-    const row = await this.prisma.currentWeather.findFirst({
-      where: { city: { name: cityName } },
-      include: { city: true, conditions: true },
-    });
-    if (!row) return null;
-    return {
-      city: row.city.name,
-      tempC: row.tempC,
-      conditions: row.conditions.description,
-    };
-  }
-
-  async findForecastByCity(
+  findForecastByCity(
     cityName: string,
     days: number,
-  ): Promise<ForecastRow | null> {
-    const city = await this.prisma.city.findUnique({
-      where: { name: cityName },
-    });
-    if (!city) return null;
-
-    const today = new Date();
-    today.setUTCHours(0, 0, 0, 0);
-
-    const rows = await this.prisma.forecast.findMany({
-      where: {
-        cityId: city.id,
-        date: { gte: today },
-      },
-      include: { conditions: true },
-      orderBy: { date: 'asc' },
-      take: days,
-    });
-
-    return {
-      city: city.name,
-      days: rows.map((r) => ({
-        date: r.date.toISOString().slice(0, 10),
-        tempCMin: r.tempCMin,
-        tempCMax: r.tempCMax,
-        conditions: r.conditions.description,
-      })),
-    };
-  }
+  ): Promise<ForecastRow | null>;
 }

@@ -11,16 +11,19 @@ import { FlightService } from './services/FlightService';
 import { HotelRepository } from './repositories/HotelRepository';
 import { HotelService } from './services/HotelService';
 import { TravelServiceError } from './services/TravelServiceError';
-import { WeatherRepository } from './repositories/WeatherRepository';
+import { LiveWeatherRepository } from './repositories/LiveWeatherRepository';
+import { SeededWeatherRepository } from './repositories/SeededWeatherRepository';
 import { WeatherService } from './services/WeatherService';
 import { WeatherServiceError } from './services/WeatherServiceError';
 
 // ───── Weather ─────
-export { WeatherRepository } from './repositories/WeatherRepository';
+export { SeededWeatherRepository } from './repositories/SeededWeatherRepository';
+export { LiveWeatherRepository } from './repositories/LiveWeatherRepository';
 export type {
   CurrentWeatherRow,
   ForecastDayRow,
   ForecastRow,
+  WeatherRepository,
 } from './repositories/WeatherRepository';
 export { WeatherService } from './services/WeatherService';
 export type {
@@ -99,9 +102,25 @@ export function getSharedPrisma(): PrismaClient {
   return (defaultPrisma ??= new PrismaClient());
 }
 
+// createWeatherService picks between the seeded (Prisma) and live
+// (OpenWeatherMap HTTP) repositories based on the USE_SEEDED_WEATHER
+// env var. Default is seeded (safest for evals + tests + fresh dev
+// installs without an OWM key).
+//
+// The `prisma` argument is only consumed in seeded mode. In live mode
+// the DB isn't needed at all — getSharedPrisma() is deliberately NOT
+// called, so live-only deployments can run without DATABASE_URL and
+// without opening an unused Neon connection.
 export function createWeatherService(prisma?: PrismaClient): WeatherService {
-  const client = prisma ?? getSharedPrisma();
-  return new WeatherService(new WeatherRepository(client));
+  const useSeeded = process.env.USE_SEEDED_WEATHER !== '0';
+
+  if (useSeeded) {
+    const client = prisma ?? getSharedPrisma();
+    return new WeatherService(new SeededWeatherRepository(client));
+  }
+
+  const apiKey = process.env.OPENWEATHERMAP_API_KEY ?? '';
+  return new WeatherService(new LiveWeatherRepository({ apiKey }));
 }
 
 export function createFlightService(prisma?: PrismaClient): FlightService {
