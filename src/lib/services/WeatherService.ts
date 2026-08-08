@@ -6,6 +6,10 @@ import type {
 } from '../repositories/WeatherRepository';
 import { WeatherServiceError } from './WeatherServiceError';
 
+// WeatherRepository is now an interface (Stage 20). The service depends
+// only on the interface; the two concrete implementations
+// (SeededWeatherRepository, LiveWeatherRepository) plug in behind it.
+
 const GetCurrentWeatherInput = z.object({
   city: z.string().trim().min(1, 'City name is required.'),
 });

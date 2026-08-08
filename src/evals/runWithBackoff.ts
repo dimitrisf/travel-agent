@@ -26,6 +26,8 @@
 // works for any external API that returns Retry-After style hints —
 // swap the error detector + parser and the rest of the flow is unchanged.
 
+import { sleep } from '@/utils/sleep';
+
 export type BackoffResult<T> = {
   value: T;
   retries: number;
@@ -110,6 +112,3 @@ function fallbackBackoffMs(attempt: number): number {
   return base + jitter;
 }
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((r) => setTimeout(r, ms));
-}

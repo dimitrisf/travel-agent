@@ -2786,6 +2786,83 @@ No new schema/migration, no new deps, no workflow changes.
 
 ---
 
+### Stage 20 — Live weather via OpenWeatherMap
+
+First real external-API integration. Everything else in the demo library (flights, hotels, weather, bookings) still reads from a seeded Neon DB — this stage adds a live-fetch adapter for weather behind an env-var switch, without touching the service layer or any of the eval / agent code above it.
+
+#### What ships
+
+- **`WeatherRepository` becomes an interface.** The concrete class formerly known as `WeatherRepository` is renamed to `SeededWeatherRepository`. The interface declares just the two methods `WeatherService` uses: `findCurrentWeatherByCity(city)` and `findForecastByCity(city, days)`. Zero behaviour change for existing call sites — pure name shuffle + type extraction.
+- **New `LiveWeatherRepository`** ([`src/lib/repositories/LiveWeatherRepository.ts`](src/lib/repositories/LiveWeatherRepository.ts)). Implements the same interface, backed by HTTP calls to OpenWeatherMap. Handles the free-tier quirks (see below).
+- **`createWeatherService` now picks based on env** (`USE_SEEDED_WEATHER`, defaults to `"1"`). Seeded is the default so evals + CI + fresh installs stay deterministic and don't require an OWM key.
+
+#### Adapter-pattern boundary
+
+`WeatherService` depends on the interface, not the concrete class. It doesn't know or care whether the row it's returning came from Prisma or from a live API. The exact shape of the boundary:
+
+```
+API routes            → createWeatherService()  ← env-var pick happens here
+                          │
+                          ▼
+                       WeatherService (validation, error mapping)
+                          │
+                          ▼
+                       WeatherRepository (interface)
+                       ├── SeededWeatherRepository   (Prisma → Neon)
+                       └── LiveWeatherRepository     (fetch → OpenWeatherMap)
+```
+
+Small design detail worth flagging: **live mode doesn't construct a Prisma client at all.** The seeded branch of `createWeatherService` does `prisma ?? getSharedPrisma()`; the live branch never enters `getSharedPrisma()`. Which means a weather-only deployment with `USE_SEEDED_WEATHER=0` runs without `DATABASE_URL` and without opening an unused Neon connection. That's the adapter pattern earning its keep — each implementation carries its own dependencies.
+
+#### OpenWeatherMap free-tier quirks (and how we handle them)
+
+Real APIs come with real edge cases. Three worth calling out:
+
+- **Forecast granularity mismatch.** OpenWeatherMap's free `/forecast` returns 5 days of data in 3-hour intervals (40 data points), not the daily min/max/conditions shape our schema promises. Fix: `aggregateToDaily` in `LiveWeatherRepository` buckets points by `YYYY-MM-DD` and computes min-temp, max-temp, and mode-of-conditions per bucket. Roughly matches how OpenWeatherMap's paid daily endpoint composes its output.
+- **Coverage cap at 5 days.** Seeded promises up to 7; free tier tops out at 5. `LiveWeatherRepository` clamps requests to 5 silently. The agent's existing FORECAST BOUNDARY RULE in the prompt already handles "returned fewer days than requested" honestly (Stage 12), so no downstream changes needed.
+- **City-name ambiguity.** "Berlin" alone can resolve to `Berlin, DE` or `Berlin, US`. Hardcoded lookup shape: `Record<string, { country: string; state?: string }>`, e.g. `{ Athens: { country: 'GR' }, Berlin: { country: 'DE' }, … }`. Passed as `q=Berlin,DE` on every call. The `state?` field is intentionally speculative — no current entry uses it — so a future US-internal disambiguation (e.g. `'Athens, GA': { country: 'US', state: 'GA' }`) is a one-line addition that hits OpenWeatherMap's 3-level `q=City,State,Country` form via the same `qualifyForOwm` helper. Beyond a handful of cities, the right escape hatch is OpenWeatherMap's Geocoding API to resolve names → lat/lon; for the demo's 5 cities the map stays simpler and deterministic.
+
+#### In-memory TTL cache
+
+Two `Map<string, {value, expiresAt}>` — one per endpoint. TTLs: 5 minutes for current weather, 1 hour for forecast. Purpose is rate-limit protection, not latency: OpenWeatherMap free tier is 60 requests/minute, and five users asking about the same city inside 5 minutes collapse to one API call. Not persistent — dev-server restart clears it. Fine for demo scale.
+
+#### HTTP error mapping
+
+Status-code-aware retry helper (`fetchWithRetries`) covers the common failure modes:
+
+| Status | Behaviour |
+|---|---|
+| 200 | Return response. |
+| 404 | Return `null` (caller treats as city-not-found, mapped to `CITY_NOT_FOUND`). |
+| 401 | Throw with a specific message about the API key (newly-created keys can take hours to activate). |
+| 429 | One retry after 1s, then throw. Cache TTL should keep us well below this. |
+| 5xx | Two retries with exponential backoff (1s, 2s), then throw. |
+| Other 4xx | Throw immediately — request problem, no retry. |
+| Network error | One retry after 1s, then throw. Handles transient DNS/socket hiccups. |
+
+Anything that throws bubbles up as `LiveWeatherFetchError`, which `WeatherService` catches and re-wraps as `WeatherServiceError` with `INTERNAL_ERROR` — the API-route layer already knows how to translate that to a proper HTTP response. No new plumbing needed.
+
+**No automatic fallback to seeded on live failure.** If the live API is down and the app is in live mode, the user sees a clear error message ("live data unavailable, try again") rather than silently-stale seeded data. Cleaner semantics; a "prefer live, fall back to seeded" hybrid is a can of worms (source-of-truth ambiguity, `city` name mismatch drift). If we ever want that, it's a new stage.
+
+#### Testing
+
+- **Seeded path is byte-identical** to what shipped before — pure rename. `SeededWeatherRepository.findCurrentWeatherByCity` and `.findForecastByCity` are the same code as the old `WeatherRepository`'s methods.
+- **Eval suite runs in seeded mode by default** (no env var change needed). All 33 cases should stay green.
+- **Live mode verification is manual** — `USE_SEEDED_WEATHER=0`, hit the app in the browser, ask "what's the weather in Berlin?" A live-mode eval case would need `OPENWEATHERMAP_API_KEY` as a CI secret plus tolerance for non-deterministic weather content in the assertions — deferred as Stage 20.5 territory.
+
+#### Env-var contract
+
+Two new entries in `.env.example`:
+
+- **`USE_SEEDED_WEATHER=1`** — default. Set to `"0"` to switch to live.
+- **`OPENWEATHERMAP_API_KEY=...`** — required only in live mode. Free tier at [openweathermap.org/api](https://openweathermap.org/api), no card. Constructor throws with a clear message if live mode is selected without a key.
+
+**File index.** New: `src/lib/repositories/LiveWeatherRepository.ts` (HTTP + cache + retries + 3h→daily aggregation, plus `LiveWeatherFetchError`), `src/lib/repositories/SeededWeatherRepository.ts` (extracted from the old `WeatherRepository.ts` — Prisma implementation, byte-identical behaviour), `src/utils/sleep.ts` (promise-based `setTimeout` wrapper — extracted from the two places that duplicated it, `runWithBackoff` for OpenAI 429s and `LiveWeatherRepository` for OWM 429/5xx retries; both now import it). Modified: `src/lib/repositories/WeatherRepository.ts` (trimmed down to interface + shared row types only; concrete class moved out), `src/lib/services/WeatherService.ts` (import comment update — behaviour unchanged), `src/lib/index.ts` (`createWeatherService` env-var branch + conditional Prisma, new imports/exports), `src/evals/runWithBackoff.ts` (local `sleep` replaced with the shared import), `.env.example` (weather-source block).
+
+Three-file shape mirrors the ports-and-adapters convention: interface in `WeatherRepository.ts`, adapters each in their own file (`SeededWeatherRepository.ts`, `LiveWeatherRepository.ts`). Adding a third source (Weather.com, Tomorrow.io, whatever) is a one-file addition.
+
+---
+
 > **Note on the historical Stage narratives above:** file paths in Stages 1–7 reflect the layout at the time each stage was written. Where those don't match the current file tree, the [file index](#file-index) at the bottom of this doc is authoritative.
 
 ---
