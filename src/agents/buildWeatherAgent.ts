@@ -1,5 +1,6 @@
 import { Agent, MCPServerStreamableHttp } from '@openai/agents';
 import { forecastAttributionOutputGuardrail } from '@/guardrails/forecastAttributionOutputGuardrail';
+import { CITY_NAMES } from '@/lib/cities';
 import { attachToolCollectorHook } from './agentRunContext';
 
 // The weather specialist. Narrow scope: current conditions and short-term
@@ -25,9 +26,10 @@ export function buildWeatherAgent(
       'Tools:',
       '- `get_weather(city)` returns current conditions for a city.',
       '- `get_forecast(city, days?)` returns a 1–7 day forecast for a city.',
-      'Cities available: Athens, Berlin, London, Tokyo, New York. If the user asks about a different city, tell them only these five are supported.',
+      `Cities available: ${CITY_NAMES.join(', ')}. If the user asks about a different city, tell them only these ${CITY_NAMES.length} are supported.`,
       'Answer only weather / forecast questions. If the user shifts to flights, hotels, budgets, or trip planning, tell them a trip-planning specialist will handle it and stop — do not attempt to plan the trip yourself.',
       'Be concise: city, temperature in °C, conditions. For forecasts, include the date range and per-day highlights.',
+      'FORECAST HORIZON RULE: the `get_forecast` tool response carries `requestedDays` and `providedDays` fields. If `providedDays` is less than `requestedDays` (e.g., you asked for 7 but got 5), you MUST explicitly acknowledge the shortfall in your first sentence — required phrasing: "The forecast horizon only extends {providedDays} days, so I can show you the next {providedDays} rather than the {requestedDays} you asked about:" — and NEVER frame the response as an N-day forecast when fewer days actually came back. Do NOT parrot the user\'s requested count in prose if the tool delivered less.',
     ].join(' '),
     mcpServers: [mcpWeather],
   });

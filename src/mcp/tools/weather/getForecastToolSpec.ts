@@ -7,7 +7,8 @@ export function makeGetForecastToolSpec(callApi: ApiClient['callApi']): McpToolS
   return {
     name: 'get_forecast',
     title: 'Get Forecast',
-    description: 'Get an N-day forecast for a city.',
+    description:
+      'Get an N-day forecast for a city. Response includes `requestedDays` and `providedDays` fields — `providedDays` may be less than requested if the underlying weather source caps the horizon (e.g. OpenWeatherMap free tier: 5-day maximum).',
     inputSchema: {
       type: 'object',
       properties: {

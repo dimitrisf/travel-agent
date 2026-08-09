@@ -2969,6 +2969,62 @@ New: `src/lib/services/ServiceError.ts` (abstract base + `ServiceErrorCode` type
 
 Every HTTP status, response body, and log line is byte-identical to pre-refactor. Same 404s for not-found codes, same 409 for booking conflicts, same 400 for validation errors, same opaque 500 body for unexpected errors, same `[weather] internal error: …` style log lines. `npx tsc --noEmit` clean; behaviour verified against Stage 20's live-mode weather endpoints.
 
+### Stage 20.5 — Post-Stage-20 hygiene
+
+Two small fixes bundled together, both surfaced by the manual smoke test at the end of Stage 20's live-mode verification.
+
+#### 1. Forecast boundary-rule fix
+
+**Problem.** When the smoke test asked "give me a 7-day forecast for Tokyo," the agent returned 5 days but its prose said *"Here's the 7-day weather forecast for Tokyo"* — a lie. The Stage 20 code was correct (silently clamped at `FORECAST_CAP_DAYS=5`), and the agent's Stage 12 FORECAST BOUNDARY RULE existed — but that rule was about extrapolating to specific *dates* outside the returned range, not about the requested-days count differing from what came back. `ForecastResult` had no explicit signal for "you asked for N, I gave you M<N", so the agent just parroted the user's requested count.
+
+**Fix.** Two touches:
+
+- **Interface change.** `ForecastResult` now carries `requestedDays: number` and `providedDays: number`. `WeatherService.getForecast` computes both — `requestedDays` from the parsed input (already defaulted to 3 + clamped to 1–7), `providedDays` from `row.days.length`.
+- **Prompt tightening.**
+  - `WeatherAgent` gets a new **FORECAST HORIZON RULE** (the agent had no prior rule about this case, so the smoke test hit it): if `providedDays < requestedDays`, acknowledge the shortfall in the first sentence.
+  - `TravelAgent`'s existing **FORECAST BOUNDARY RULE** is augmented with the same days-count check at the top; the date-extrapolation content follows unchanged.
+- **MCP tool description** for `get_forecast` also updated to mention the two new fields, so the agent's LLM has schema-level awareness in addition to the prompt rule.
+
+Repository implementations are untouched — the two new fields are added at the service layer, not the row shape.
+
+#### 2. Single-source allowlist
+
+**Problem.** Four separate places in the codebase encoded "the five demo cities" (city names in three prompt strings + `CITY_LOOKUP` in the live weather repo). Adding a sixth city meant four coordinated edits, easy to miss one and drift.
+
+**Fix.** New shared module [`src/lib/cities.ts`](src/lib/cities.ts) — single source of truth for the demo city list:
+
+```ts
+export type CityMetadata = { country: string; state?: string; iata: string; };
+
+export const CITIES: Record<string, CityMetadata> = {
+  Athens: { country: 'GR', iata: 'ATH' },
+  Berlin: { country: 'DE', iata: 'BER' },
+  London: { country: 'GB', iata: 'LHR' },
+  Tokyo: { country: 'JP', iata: 'HND' },
+  'New York': { country: 'US', iata: 'JFK' },
+};
+
+export const CITY_NAMES: readonly string[] = Object.keys(CITIES);
+export const CITY_IATA_PAIRS: string = /* "Athens=ATH, Berlin=BER, ..." */;
+```
+
+Consumers wired to it:
+
+- **`LiveWeatherRepository`** drops its local `CITY_LOOKUP` + `CityKey` type; uses `CITIES` directly. Structural typing lets the extra `iata` field be silently ignored by OWM-query code.
+- **`offTopicInputGuardrail`** OFF_TOPIC_MESSAGE interpolates `${CITY_NAMES.join(', ')}` — no more hardcoded "Athens, Berlin, London, Tokyo, New York" string literal.
+- **`buildWeatherAgent`** cities-available line: same interpolation.
+- **`buildTravelAgent`** IATA line and "same N cities" reference: interpolates `${CITY_IATA_PAIRS}` + `${CITY_NAMES.length}`.
+
+Adding a sixth city (e.g. Paris) is now a **one-line edit** to `CITIES` — all four downstream sites pick it up automatically.
+
+#### File index
+
+New: `src/lib/cities.ts` (shared `CITIES`/`CITY_NAMES`/`CITY_IATA_PAIRS`/`CityMetadata`). Modified: `src/lib/services/WeatherService.ts` (`ForecastResult` gains `requestedDays`/`providedDays`), `src/lib/repositories/LiveWeatherRepository.ts` (imports `CITIES` from the shared module, drops local `CITY_LOOKUP` + `CityKey`), `src/guardrails/offTopicInputGuardrail.ts` + `src/agents/buildWeatherAgent.ts` + `src/agents/buildTravelAgent.ts` (city references interpolated from shared source; forecast horizon rules added / augmented), `src/mcp/tools/weather/getForecastToolSpec.ts` (description mentions `requestedDays`/`providedDays` fields).
+
+#### Verification
+
+`npx tsc --noEmit` clean. No behaviour change for the seeded weather path (aggregation, city guard, response shape) — the two new `ForecastResult` fields are additive. Live-mode still needs the same manual smoke test to confirm the agent now honestly acknowledges shortfalls (was the whole point).
+
 ---
 
 > **Note on the historical Stage narratives above:** file paths in Stages 1–7 reflect the layout at the time each stage was written. Where those don't match the current file tree, the [file index](#file-index) at the bottom of this doc is authoritative.

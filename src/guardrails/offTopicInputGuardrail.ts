@@ -1,5 +1,6 @@
 import type { InputGuardrail } from '@openai/agents';
 import OpenAI from 'openai';
+import { CITY_NAMES } from '@/lib/cities';
 import { extractLatestUserText } from '@/utils/extractLatestUserText';
 
 // Input guardrail that short-circuits off-topic user messages before the
@@ -20,8 +21,7 @@ const CLASSIFIER_SYSTEM = [
   'Ambiguous short follow-ups ("yes", "the second one", "book it", "when is that") are ON_TOPIC — the user is likely referring to earlier travel context.',
 ].join(' ');
 
-const OFF_TOPIC_MESSAGE =
-  'I only handle travel planning, bookings, and weather questions. Ask me about flights, hotels, trips, or the forecast for one of the demo cities (Athens, Berlin, London, Tokyo, New York).';
+const OFF_TOPIC_MESSAGE = `I only handle travel planning, bookings, and weather questions. Ask me about flights, hotels, trips, or the forecast for one of the demo cities (${CITY_NAMES.join(', ')}).`;
 
 // The Agents SDK instantiates its own OpenAI client internally; we spin up
 // our own here so the classifier call is independent of the main agent run.

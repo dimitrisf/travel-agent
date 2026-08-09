@@ -1,4 +1,5 @@
 import { sleep } from '@/utils/sleep';
+import { CITIES, type CityMetadata } from '../cities';
 import type {
   CurrentWeatherRow,
   ForecastDayRow,
@@ -13,19 +14,17 @@ import type {
 //
 // Design notes:
 //
-//   - Hardcoded city → lookup mapping. OpenWeatherMap's `q=` parameter
-//     accepts city names, but "Berlin" alone can resolve to Berlin, DE
-//     or Berlin, US. Passing `q=Berlin,DE` is unambiguous. The demo
-//     library only covers five cities so a hardcoded map is fine; a
-//     production version would use OpenWeatherMap's Geocoding API to
-//     resolve city → lat/lon first.
-//     Shape uses `Record<string, CityKey>` with an optional `state`
-//     field even though every current entry is country-only — this
-//     lets us add a US-state-disambiguated entry (e.g. `'Athens, GA':
-//     { country: 'US', state: 'GA' }`) later without touching the
-//     lookup or URL-builder code. OWM supports both `q=City,Country`
-//     and `q=City,State,Country` forms; the helper below picks based
-//     on whether `state` is set.
+//   - City → lookup mapping lives in the shared @/lib/cities module
+//     (Stage 20.5). OpenWeatherMap's `q=` parameter accepts city names,
+//     but "Berlin" alone can resolve to Berlin, DE or Berlin, US.
+//     Passing `q=Berlin,DE` is unambiguous. The demo library covers
+//     five cities so a hardcoded map is fine; a production version
+//     would use OpenWeatherMap's Geocoding API to resolve city →
+//     lat/lon first. The CityMetadata shape carries an optional
+//     `state` field (US-internal disambiguation, e.g. Athens, GA)
+//     even though every current entry is country-only — OWM supports
+//     both `q=City,Country` and `q=City,State,Country` forms; the
+//     qualifyForOwm helper below picks based on whether `state` is set.
 //   - Free-tier /forecast returns 5 days in 3-hour intervals (40 data
 //     points), not daily. We aggregate to daily min/max/mode-conditions
 //     to match the shape SeededWeatherRepository returns. This is what
@@ -44,28 +43,15 @@ import type {
 //     LiveWeatherFetchError which the service layer catches and re-
 //     wraps as WeatherServiceError.
 
-// Disambiguation key for a city entry in the lookup below. Country is
-// required; state is optional and only used for US-internal
-// disambiguation (e.g. Athens, GA vs Athens, TN — not needed today,
-// pre-installed for the next time we grow the city list).
-type CityKey = { country: string; state?: string };
-
-const CITY_LOOKUP: Record<string, CityKey> = {
-  Athens: { country: 'GR' },
-  Berlin: { country: 'DE' },
-  London: { country: 'GB' },
-  Tokyo: { country: 'JP' },
-  'New York': { country: 'US' },
-};
-
 // Build the value we pass to OpenWeatherMap's `q=` parameter.
 // - With state:    "Athens,GA,US"
 // - Without state: "Berlin,DE"
 // Extracts the leading city portion (part before the first comma) so a
 // qualified lookup key like "Athens, GA" doesn't produce "Athens, GA,GA,US".
 // Today every key is unqualified so the split is a no-op; the extraction
-// is here so future qualified entries just work.
-function qualifyForOwm(cityName: string, key: CityKey): string {
+// is here so future qualified entries just work. `iata` on the metadata
+// is ignored — it's for TravelAgent's flight-search prompts, not us.
+function qualifyForOwm(cityName: string, key: CityMetadata): string {
   const cityPart = cityName.split(',')[0].trim();
 
   return key.state
@@ -135,7 +121,7 @@ export class LiveWeatherRepository implements WeatherRepository {
     // Lookup the disambiguation key for the city. If it's not in the
     // hardcoded map, treat it as "not found" — same contract as the seeded
     // repo.
-    const key = CITY_LOOKUP[cityName];
+    const key = CITIES[cityName];
     if (!key) return null; // Same "not in library" contract as seeded.
 
     // Prefix the cache key with "current:" so it doesn't collide with the
@@ -173,7 +159,7 @@ export class LiveWeatherRepository implements WeatherRepository {
     // Lookup the disambiguation key for the city. If it's not in the
     // hardcoded map, treat it as "not found" — same contract as the seeded
     // repo.
-    const key = CITY_LOOKUP[cityName];
+    const key = CITIES[cityName];
     if (!key) return null;
 
     // Cap at free-tier's 5-day horizon regardless of what the caller
