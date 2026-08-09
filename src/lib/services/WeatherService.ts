@@ -28,6 +28,15 @@ export interface CurrentWeatherResult extends CurrentWeatherRow {
 
 export interface ForecastResult extends ForecastRow {
   units: 'celsius';
+  // What the caller asked for (post zod default + clamp to 1-7).
+  requestedDays: number;
+  // What actually came back (row.days.length). May be less than
+  // requestedDays if the underlying repo capped the horizon — e.g.
+  // LiveWeatherRepository's FORECAST_CAP_DAYS=5 on OpenWeatherMap
+  // free tier. The agent uses the (providedDays < requestedDays)
+  // signal to honestly acknowledge the shortfall to the user rather
+  // than parroting the requested count in prose.
+  providedDays: number;
 }
 
 export class WeatherService {
@@ -84,6 +93,11 @@ export class WeatherService {
         'NO_FORECAST_AVAILABLE',
       );
     }
-    return { ...row, units: 'celsius' };
+    return {
+      ...row,
+      units: 'celsius',
+      requestedDays: days,
+      providedDays: row.days.length,
+    };
   }
 }
