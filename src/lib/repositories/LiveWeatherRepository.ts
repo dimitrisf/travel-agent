@@ -51,7 +51,9 @@ import type {
 // Today every key is unqualified so the split is a no-op; the extraction
 // is here so future qualified entries just work. `iata` on the metadata
 // is ignored — it's for TravelAgent's flight-search prompts, not us.
-function qualifyForOwm(cityName: string, key: CityMetadata): string {
+// Exported for unit tests (Stage 23). Not part of the public library
+// surface — do not import from outside this file or its test.
+export function qualifyForOwm(cityName: string, key: CityMetadata): string {
   const cityPart = cityName.split(',')[0].trim();
 
   return key.state
@@ -65,13 +67,15 @@ const CURRENT_TTL_MS = 5 * 60 * 1000; // 5 min
 const FORECAST_TTL_MS = 60 * 60 * 1000; // 1 hour
 
 // Shapes OpenWeatherMap actually returns. Only the fields we consume are
-// typed; the rest of their (large) response goes unread.
-interface OwmCurrentResponse {
+// typed; the rest of their (large) response goes unread. Exported so
+// unit tests (Stage 23) can construct fixtures typed against the same
+// shape aggregateToDaily consumes.
+export interface OwmCurrentResponse {
   main: { temp: number };
   weather: Array<{ description: string }>;
 }
 
-interface OwmForecastResponse {
+export interface OwmForecastResponse {
   list: Array<{
     dt_txt: string; // "2026-08-08 12:00:00" — UTC per OWM docs.
     main: { temp: number };
@@ -91,7 +95,8 @@ export class LiveWeatherFetchError extends Error {
   }
 }
 
-type CacheEntry<T> = { value: T; expiresAt: number };
+// Exported for unit tests (Stage 23). Not part of the public surface.
+export type CacheEntry<T> = { value: T; expiresAt: number };
 
 export class LiveWeatherRepository implements WeatherRepository {
   private readonly apiKey: string;
@@ -203,7 +208,9 @@ export class LiveWeatherRepository implements WeatherRepository {
 // `maxDays` entries, ordered by date ascending. If a day has no data
 // points (shouldn't happen with cnt = days × 8, but defend anyway),
 // it's dropped from the output.
-function aggregateToDaily(
+//
+// Exported for unit tests (Stage 23).
+export function aggregateToDaily(
   list: OwmForecastResponse['list'],
   maxDays: number,
 ): ForecastDayRow[] {
@@ -276,7 +283,8 @@ function aggregateToDaily(
 // E.g., modeString(["clear sky", "few clouds", "clear sky"]) → "clear sky"
 // E.g., modeString(["few clouds", "scattered clouds", "few clouds"]) → "few clouds"
 // E.g., modeString(["clear sky", "few clouds", "scattered clouds"]) → "clear sky" (first occurrence of a tie)
-function modeString(values: string[]): string {
+// Exported for unit tests (Stage 23).
+export function modeString(values: string[]): string {
   const counts = new Map<string, number>();
 
   let bestValue = values[0] ?? 'unknown';
@@ -320,7 +328,10 @@ function maskApiKey(url: string): string {
 // Return type is `Response | null` because 404 is a semantically
 // meaningful "not found" that maps to the same behaviour the seeded
 // repo's `null` returns.
-async function fetchWithRetries(url: string): Promise<Response | null> {
+// Exported for unit tests (Stage 23).
+export async function fetchWithRetries(
+  url: string,
+): Promise<Response | null> {
   for (let attempt = 0; attempt <= 2; attempt++) {
     let res: Response;
 
@@ -391,7 +402,8 @@ async function fetchWithRetries(url: string): Promise<Response | null> {
   throw new LiveWeatherFetchError('fetchWithRetries: unreachable');
 }
 
-function readCache<T>(
+// Exported for unit tests (Stage 23).
+export function readCache<T>(
   cache: Map<string, CacheEntry<T>>,
   key: string,
 ): T | null {
@@ -406,7 +418,8 @@ function readCache<T>(
   return entry.value;
 }
 
-function writeCache<T>(
+// Exported for unit tests (Stage 23).
+export function writeCache<T>(
   cache: Map<string, CacheEntry<T>>,
   key: string,
   value: T,
