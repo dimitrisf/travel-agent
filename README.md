@@ -3082,6 +3082,77 @@ Runtime: ~1 second cold, faster on watch. All 70 tests pass; typecheck (`npx tsc
 
 New: `vitest.config.mts` (config; `.mts` extension so ESM syntax is parsed correctly without setting `"type": "module"` on the whole Next.js project), and eight colocated `*.test.ts` files listed in the table above. Modified: `package.json` (`test` + `test:watch` scripts, `vitest` devDependency), `src/lib/repositories/LiveWeatherRepository.ts` (six internal helpers + three types marked `export` for test access, each with a "not part of the public library surface" comment).
 
+### Stage 23 — Unit tests (Phase 2: services + CI)
+
+Follow-up to Phase 1's pure-logic tests. Phase 2 adds two things: coverage of the five service classes (via mocked repositories), and a GitHub Action that runs the whole suite on every push and PR — so the tests actually gate merges instead of only running when someone remembers.
+
+#### Why services next, and why with mocked repos
+
+Phase 1 covered the leaf-level helpers. Services are the next layer up: they own the business logic that composes those helpers into feature behaviour (Zod input validation, wrapping repository errors as `INTERNAL_ERROR` with cause preservation, cross-tenant guards, per-code status mapping upstream from the OO refactor). Repositories are shallow — they mostly translate service calls into Prisma queries — so most of the interesting bugs live at the service layer.
+
+Mocked-repo tests hit the sweet spot: they exercise the full service code path (input parse → repo call → response shape) without pulling in a real database or Prisma runtime. Fast (~milliseconds per test), stable (no flaky I/O), and every service becomes a single clean file. Repository tests against a real DB are still worth doing — but they answer a different question ("does Prisma actually return the shape my repo claims?") and belong in Phase 2b.
+
+#### What the suite adds (5 files, 65 tests)
+
+| Test file | Method surface | Test count |
+|---|---|---|
+| [`src/lib/services/WeatherService.test.ts`](src/lib/services/WeatherService.test.ts) | `getCurrentWeather` + `getForecast` with Zod validation, `CITY_NOT_FOUND` / `NO_FORECAST_AVAILABLE` mapping, `INTERNAL_ERROR` wrapping with cause preservation, Stage 20.5's `requestedDays`/`providedDays` computation including the shortfall case. | 13 |
+| [`src/lib/services/FlightService.test.ts`](src/lib/services/FlightService.test.ts) | `searchFlights` round-trip vs. one-way, `INVALID_DATE_RANGE`, `AIRPORT_NOT_FOUND` (both origin + destination arms), cabin multiplier (business = 3× base), `max_price` post-multiplier filter, IATA uppercase normalization, Zod validation. | 12 |
+| [`src/lib/services/HotelService.test.ts`](src/lib/services/HotelService.test.ts) | `searchHotels` happy path, `INVALID_DATE_RANGE`, `CITY_NOT_FOUND`, both repo-throws-INTERNAL_ERROR branches, `requiredAmenities` composition from `breakfast_required` + `pet_friendly` flags, Zod validation. | 9 |
+| [`src/lib/services/BookingService.test.ts`](src/lib/services/BookingService.test.ts) | `getBooking` + `getBookingByReference`: owner-only access, cross-tenant returns `BOOKING_NOT_FOUND` (same shape as truly-missing — no info leak), anon booking (userId: null) readable by anyone, `INTERNAL_ERROR` wrapping. **`proposeBooking` / `confirmBooking` / `cancelBooking` deferred** — they use `this.prisma.$transaction()` directly with deeply nested reads/writes; mocking Prisma's transaction runtime is more brittle than it's worth, so they wait for Phase 2b (real Prisma test DB). | 11 |
+| [`src/lib/services/ConversationService.test.ts`](src/lib/services/ConversationService.test.ts) | `loadForViewer` (owner vs. shared vs. private, anon vs. signed-in), `assertOwnership` (owner allowed, cross-tenant returns `CONVERSATION_NOT_FOUND`), `setShared` (owner-only), `create` including title-derivation edge cases (first user message, long-text truncation, whitespace collapse, assistant-only fallback), `appendTurn` (empty no-op vs. non-empty batch), `listForUser` pass-through. | 20 |
+
+Total: **135 tests across 13 files**, ~1.7s cold runtime.
+
+#### The mock-repo pattern
+
+Small per-test helper wraps `vi.fn()` stubs into a repository-shaped object:
+
+```ts
+function mockRepo(overrides: Partial<FlightRepository> = {}): FlightRepository {
+  return {
+    airportExists: vi.fn(),
+    findInstances: vi.fn(),
+    ...overrides,
+  } as unknown as FlightRepository;
+}
+```
+
+`WeatherRepository` is an interface, so the cast is unnecessary there. The other four repositories are classes; the `as unknown as` cast is the standard TypeScript escape hatch (structural typing accepts anything with the right shape at runtime).
+
+Individual tests override just the methods they use:
+
+```ts
+const repo = mockRepo({
+  airportExists: vi.fn().mockResolvedValue(true),
+  findInstances: vi.fn().mockRejectedValue(new Error('DB down')),
+});
+```
+
+For row shapes that need multiple realistic fields (`FlightSearchRow`, `HotelSearchRow`, `ConversationWithMessages`, `BookingWithRelations`), each test file has a small `row(overrides)` factory so tests only spell out the fields they care about.
+
+#### CI workflow
+
+New `.github/workflows/unit-tests.yml`. Structure:
+
+- **Triggers on every push and PR.** No draft-PR gate. Unlike the eval suite in `evals.yml`, unit tests are free (no OpenAI budget) and fast (~seconds), so gating on `draft == false` would be pure friction.
+- **Concurrency-cancel per branch.** Same shape as `evals.yml` — iterative pushes on a PR cancel earlier runs; parallel branches run in parallel.
+- **No secrets, no DB.** `OPENAI_API_KEY`, `DATABASE_URL`, `AUTH_SECRET` — none of them are declared. Unit tests don't touch any of that. Nothing to leak, nothing to configure.
+- **Steps.** Checkout → setup Node 20 → `npm ci` → `npx prisma generate` → `npm test`. Prisma generate is needed even without a DB because `@prisma/client` types are referenced through the repository/service layer at test-import time; skipping it makes the test files fail to load.
+- **Timeout 5 minutes.** Generous cap for what usually takes ~30 seconds cold on GitHub's runner. A hung test still fails loudly.
+
+Once this lands, the unit-tests check will appear on every PR. Recommendation: after 2-3 stable runs on real PRs, flip it to a required check in branch protection — matches the strategy documented for the eval check in Stage 18.
+
+#### Deferred to Phase 2b (and beyond)
+
+- **Repository tests with a real Prisma DB.** Still the big remaining piece. Requires a test-DB decision (Neon test branch vs. Docker Postgres vs. Prisma's SQLite driver) with real ops trade-offs. Would also unblock testing `BookingService.proposeBooking` / `confirmBooking` / `cancelBooking`, which are transaction-heavy and shouldn't be mocked.
+- **Coverage reporting** (`@vitest/coverage-v8` + a coverage step in CI). Simple to add; deferred until we're actually using coverage numbers to spot gaps.
+- **React component tests.** UI is small and stable; nothing has surfaced that needs component-level testing yet.
+
+#### File index
+
+New: `.github/workflows/unit-tests.yml` (CI workflow), and five colocated `*.test.ts` files (`WeatherService`, `FlightService`, `HotelService`, `BookingService`, `ConversationService`, all under `src/lib/services/`). No source-code changes this stage — all five services already had testable shapes from prior stages.
+
 ---
 
 > **Note on the historical Stage narratives above:** file paths in Stages 1–7 reflect the layout at the time each stage was written. Where those don't match the current file tree, the [file index](#file-index) at the bottom of this doc is authoritative.
