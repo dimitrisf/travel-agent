@@ -3025,6 +3025,63 @@ New: `src/lib/cities.ts` (shared `CITIES`/`CITY_NAMES`/`CITY_IATA_PAIRS`/`CityMe
 
 `npx tsc --noEmit` clean. No behaviour change for the seeded weather path (aggregation, city guard, response shape) — the two new `ForecastResult` fields are additive. Live-mode still needs the same manual smoke test to confirm the agent now honestly acknowledges shortfalls (was the whole point).
 
+### Stage 23 — Unit tests (Phase 1: pure logic)
+
+The project's first non-eval automated tests. Vitest + colocated `*.test.ts` files targeting pure server-side logic — the surface that landed with Stages 17.6, 20, and the OO error-taxonomy refactor. Repository/service/component tests, coverage reporting, and CI integration are deferred to Phase 2.
+
+#### Why Vitest, why Phase 1 is just pure logic
+
+The eval suite already covers end-to-end agent behaviour, but it costs ~$0.50 and 5-8 minutes per run — too slow for the "seconds after typing" feedback that unit tests give. Filling that gap first with pure-logic tests hits the highest signal-to-effort ratio: the helpers (`aggregateToDaily`, `fetchWithRetries`, `runWithBackoff`, the cache helpers, `CodedServiceError`'s template method) are self-contained, mock-free (or one-mock-away), and freshly written — testing them while the intent is still fresh is easier than reverse-engineering it from tests written months later.
+
+Vitest was the framework choice: modern default for Vite/Next.js projects, near-zero config, native TypeScript + ESM, and `vi.useFakeTimers()` / `vi.stubGlobal()` cover almost every mocking need without extra libraries.
+
+#### What the suite covers (8 files, 70 tests, ~1 second runtime)
+
+| Test file | What it verifies |
+|---|---|
+| [`src/utils/sleep.test.ts`](src/utils/sleep.test.ts) | Fake-timer resolution — proves the pattern for later time-sensitive tests. |
+| [`src/evals/runWithBackoff.test.ts`](src/evals/runWithBackoff.test.ts) | 429 detection (both `429` AND `Rate limit` required — false-positive guard), `try again in Xms` / `Xs` parsing with buffer, exponential fallback with mocked `Math.random`, `maxRetries` bound, `onRetry` callback firing. |
+| [`src/lib/repositories/LiveWeatherRepository.test.ts`](src/lib/repositories/LiveWeatherRepository.test.ts) | Six describe blocks. `qualifyForOwm` shape (country-only, city+state+country, qualified-key stripping); `modeString` mode-of-values with tie-breaking + empty-list fallback; `aggregateToDaily` bucketing + rounding + `maxDays` clamp + date-sort + missing-conditions fallback; `fetchWithRetries` full status-code matrix (200/404/401/429/5xx/other-4xx/network) with mocked `global.fetch`; `readCache`/`writeCache` TTL semantics including exact-boundary expiry. |
+| [`src/lib/services/ServiceError.test.ts`](src/lib/services/ServiceError.test.ts) | `new.target.name` auto-population, cross-subclass name distinction, `cause` passthrough, `instanceof` chain. |
+| [`src/lib/services/CodedServiceError.test.ts`](src/lib/services/CodedServiceError.test.ts) | Template-method `toApiResponse()` via a tiny in-file `TestCodedError` subclass: domain-code status resolution, shared `INTERNAL_ERROR:500` handled by the base, `[prefix] internal error:` log conditional (fires on INTERNAL_ERROR only). |
+| [`src/lib/services/ZodValidationError.test.ts`](src/lib/services/ZodValidationError.test.ts) | 400 response with `{ error, issues }`, wraps a real `z.ZodError` (built via `z.object({ city: z.string().min(1) }).parse({ city: '' })`), preserves the source via `.cause` and `.zodError`. |
+| [`src/lib/services/UnexpectedError.test.ts`](src/lib/services/UnexpectedError.test.ts) | 500 opaque `{ error }` body (no `code`, no cause leak), server-side log fires with the raw cause, tolerates any thrown value shape (string, number, null, object, `Error`). |
+| [`src/utils/apiErrorResponse.test.ts`](src/utils/apiErrorResponse.test.ts) | The three `classify()` branches observed through the public function: `ServiceError` passthrough (using `WeatherServiceError`), `ZodError` → `ZodValidationError` wrap, unknown → `UnexpectedError`. Plus a "no double-wrap" test that a pre-wrapped `ZodValidationError` renders identically to a raw `ZodError`. |
+
+#### One nudge to test-ability: internal helpers exported
+
+`aggregateToDaily`, `modeString`, `qualifyForOwm`, `fetchWithRetries`, `readCache`, `writeCache`, plus the `CacheEntry`/`OwmForecastResponse`/`OwmCurrentResponse` types were previously module-private in `LiveWeatherRepository.ts`. All are now marked `export` with a `// Exported for unit tests (Stage 23). Not part of the public library surface.` comment. Alternative would have been white-box test-only import tricks (e.g. `__test__` re-exports) or testing everything through the class's public methods — both add ceremony for no real gain. Bare exports with a naming/comment convention are lighter.
+
+#### What's mocked and what isn't
+
+- **`global.fetch`** — mocked via `vi.stubGlobal('fetch', spy)` in the `fetchWithRetries` block. Each test hands the mock the status codes it should return, in order (`mockFetch(429, 429)` for a two-call scenario).
+- **`Date.now`** — spied in cache tests to advance "time" without waiting.
+- **`Math.random`** — spied in the `runWithBackoff` fallback test to make jitter deterministic.
+- **Timers** — `vi.useFakeTimers()` + `vi.advanceTimersByTimeAsync()` in every test that involves a `sleep()` (retry helpers, cache expiry).
+- **`console.error`** — spied and asserted-against in tests that expect logging (`INTERNAL_ERROR` in coded errors, `UnexpectedError`). No log leaks into test output.
+- **`NextResponse.json`** — not mocked. `NextResponse` extends the Fetch API's standard `Response`, which is a Node 20+ global. Tests read `response.status` and `await response.json()` directly.
+
+#### Running the tests
+
+```bash
+npm test              # one-shot run (used in CI later)
+npm run test:watch    # watch mode for local iteration
+```
+
+Runtime: ~1 second cold, faster on watch. All 70 tests pass; typecheck (`npx tsc --noEmit`) also clean.
+
+#### Deferred to Phase 2
+
+- **Repository tests with a real Prisma DB.** Requires deciding between a dedicated Neon branch or a local Docker Postgres, plus a per-test database-reset strategy.
+- **Service tests with mocked repositories.** Straightforward but needs an ergonomic mock pattern (probably `vi.fn()` per-method against the repository interface).
+- **CI integration.** Add a `unit-tests-on-PR` GitHub Action — fast enough to run on every push, unlike the eval suite. Separate from the evals workflow, no draft-PR gate.
+- **Coverage reporting.** `@vitest/coverage-v8` + a coverage step in CI, once CI exists.
+- **React component tests.** Would add jsdom + `@testing-library/react`. Deferred until the UI grows enough that component-level bugs become a real risk.
+
+#### File index
+
+New: `vitest.config.mts` (config; `.mts` extension so ESM syntax is parsed correctly without setting `"type": "module"` on the whole Next.js project), and eight colocated `*.test.ts` files listed in the table above. Modified: `package.json` (`test` + `test:watch` scripts, `vitest` devDependency), `src/lib/repositories/LiveWeatherRepository.ts` (six internal helpers + three types marked `export` for test access, each with a "not part of the public library surface" comment).
+
 ---
 
 > **Note on the historical Stage narratives above:** file paths in Stages 1–7 reflect the layout at the time each stage was written. Where those don't match the current file tree, the [file index](#file-index) at the bottom of this doc is authoritative.
