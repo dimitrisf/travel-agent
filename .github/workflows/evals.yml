@@ -1,8 +1,11 @@
 name: Evals
 
-# Run the full eval suite on every non-draft PR. Reports pass/fail as a
-# GitHub Check on the PR page so a red suite blocks merge (once we flip
-# the check to "required" in branch protection).
+# Run the full eval suite. Manual trigger only right now (see the
+# "Manual trigger only" note below) — PR-auto-trigger is commented out
+# to control OpenAI spend. Reports pass/fail as a GitHub Check when
+# fired, so once the pull_request trigger is re-enabled a red suite
+# will block merge (once we flip the check to "required" in branch
+# protection).
 #
 # Design notes:
 #
@@ -21,22 +24,39 @@ name: Evals
 #     The branch is a copy of dev at branch-creation time, seeded and
 #     schema-migrated already; migrate-deploy is a no-op guard for
 #     future schema drift.
+# Manual trigger only. Automatic PR-triggered runs are disabled while
+# the OpenAI budget is tight — a full-suite run costs ~$0.50, which
+# adds up across iterative PRs. Re-enable the pull_request trigger
+# when the budget allows, or when the check needs to be Required in
+# branch protection. When re-enabling, also extend the job's if: gate
+# (see comment on the evals job below).
 on:
-  pull_request:
-    types: [opened, synchronize, reopened, ready_for_review]
+  workflow_dispatch:
+  # pull_request:
+  #   types: [opened, synchronize, reopened, ready_for_review]
 
 concurrency:
   # One group per branch — parallel PRs on different branches run
   # concurrently, but iterative pushes on the same PR cancel earlier
-  # runs. github.head_ref is the source branch of the PR.
-  group: evals-${{ github.head_ref }}
+  # runs. github.head_ref is set only for pull_request events; falls
+  # back to github.ref (branch/tag ref like refs/heads/main) for
+  # workflow_dispatch so cross-branch manual runs don't cancel each
+  # other by sharing an empty "evals-" group.
+  group: evals-${{ github.head_ref || github.ref }}
   cancel-in-progress: true
 
 jobs:
   evals:
-    # Skip drafts entirely — cost mitigation. Flip PR to "Ready for
-    # review" to trigger a run.
-    if: github.event.pull_request.draft == false
+    # Only workflow_dispatch is enabled right now (pull_request
+    # trigger is commented out above). When you re-enable that
+    # trigger, ALSO extend this if: to skip drafts:
+    #   if: github.event_name == 'workflow_dispatch' || github.event.pull_request.draft == false
+    # The event_name guard is required in that combined form: on
+    # workflow_dispatch there is no PR context, so
+    # `github.event.pull_request.draft` evaluates to null and
+    # `null == false` is false — without the guard, manual runs would
+    # be silently skipped.
+    if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     # Full suite runs in ~5-8 min locally; 20 gives headroom for cold
     # starts + retries in runWithBackoff.
