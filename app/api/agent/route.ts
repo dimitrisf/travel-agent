@@ -12,6 +12,7 @@ import { rebuildCollectorFromHistory } from '@/agents/agentRunContext';
 import type { AgentRunContext } from '@/agents/agentRunContext';
 import { getCurrentUser } from '@/lib/auth/session';
 import { ConversationServiceError, createConversationService } from '@/lib';
+import { getDefaultAppBase } from '@/utils/appBase';
 import { unwrapToolOutput } from '@/utils/toolOutput';
 import { userFacingGuardrailErrorMessage } from '@/utils/userFacingGuardrailErrorMessage';
 
@@ -45,8 +46,7 @@ function getOrInitMcps(): Promise<McpBundle> {
       // Both MCP endpoints live inside the same Next.js process, one path
       // segment apart. The URL can be overridden per-server via env var when
       // deploying MCPs as separate services.
-      const appBase =
-        process.env.APP_BASE ?? `http://localhost:${process.env.PORT ?? 3000}`;
+      const appBase = process.env.APP_BASE ?? getDefaultAppBase();
       const mcpTravel = new MCPServerStreamableHttp({
         name: 'travel',
         url: process.env.TRAVEL_MCP_URL ?? `${appBase}/api/mcp/travel`,
