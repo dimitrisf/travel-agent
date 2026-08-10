@@ -1,0 +1,21 @@
+# Files that don't belong in the Vercel deploy artifact. Vercel's
+# function bundler only includes reachable code anyway, so this list
+# is mostly about keeping the deployment upload smaller and cleaner —
+# it isn't a security boundary.
+
+# Ported-away code, kept for historical reference only.
+legacy/
+
+# Test files and configs — Vitest runs in CI (unit-tests.yml), not
+# on Vercel.
+**/*.test.ts
+vitest.config.mts
+
+# Eval harness — runs in CI only.
+src/evals/
+
+# CI configs.
+.github/
+
+# Documentation source that isn't consumed at runtime.
+docs/
