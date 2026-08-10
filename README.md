@@ -3153,6 +3153,137 @@ Once this lands, the unit-tests check will appear on every PR. Recommendation: a
 
 New: `.github/workflows/unit-tests.yml` (CI workflow), and five colocated `*.test.ts` files (`WeatherService`, `FlightService`, `HotelService`, `BookingService`, `ConversationService`, all under `src/lib/services/`). No source-code changes this stage — all five services already had testable shapes from prior stages.
 
+### Stage 22 — Deploy to Vercel
+
+First public deploy. Everything below Stage 5 had been a "clone the repo and boot it locally" story; this stage puts it behind a shareable URL running on Vercel Hobby (free tier), backed by a dedicated Neon prod branch, with real Google OAuth callbacks. Smoke-tested end-to-end (all six layers of the test plan passed). Deploy remains live between demo sessions — Vercel confirms idle deployments cost $0 on Hobby.
+
+The `<vercel-project-url>` used for the initial deploy was `travel-agent-eight-wine.vercel.app`. Treat that specific URL as ephemeral — if the Vercel project is ever recreated, the random word suffix (`eight-wine`) may change. The redeploy recipe below covers the setup dance for any future rebuild.
+
+#### What ships (Phase A code changes)
+
+Small surface — the app was designed serverless-friendly from the start (Next.js App Router, Prisma, Node runtime for MCP, no filesystem writes). Only four categories of change were needed for Vercel readiness:
+
+- **Shared `getDefaultAppBase()` helper** ([`src/utils/appBase.ts`](src/utils/appBase.ts)). MCP endpoints and the agent route need to loopback to `/api/mcp/travel`, `/api/mcp/weather`, and other API routes on the same deployment. Locally that's `http://localhost:${PORT}`; on Vercel it's `https://${VERCEL_URL}` (auto-populated per-deployment). Helper picks based on which env is defined. Wired into three existing loopback sites — explicit `WEATHER_API_BASE`, `TRAVEL_API_BASE`, `APP_BASE`, `TRAVEL_MCP_URL`, `WEATHER_MCP_URL` env-var overrides still win if set (kept for the "split MCPs into separate services" future).
+- **Prisma `binaryTargets`** in [`prisma/schema.prisma`](prisma/schema.prisma). Added `["native", "rhel-openssl-3.0.x"]`. Without the `rhel-openssl-3.0.x` target, the Prisma query engine binary is missing at runtime on Vercel's Amazon Linux 2 / OpenSSL 3 serverless environment and every request throws.
+- **`postinstall` script** in [`package.json`](package.json). Runs `prisma generate` after `npm install`. Vercel runs `npm install` on every build, so `postinstall` guarantees the Prisma client is fresh for the deployed code. Without this, the build could ship a stale (or missing) client and fail at first request.
+- **`.vercelignore`** ([`.vercelignore`](.vercelignore)). Excludes `legacy/`, test files, `vitest.config.mts`, `src/evals/`, `.github/`, `docs/` from the deploy artifact. Vercel's function bundler is already reachability-based so most of these don't ship anyway; this is cosmetic + a tiny upload-size win.
+
+All four are additive — every helper falls back to its previous behavior when the Vercel-specific env vars aren't set. Local `npm run dev` behaves exactly as before.
+
+#### Vercel setup — the recipe that worked
+
+1. **Vercel account:** connected via GitHub OAuth. Hobby (free) tier, requires the source repo to be public.
+2. **Import project:** Vercel dashboard → Add New → Project → import `travel-agent` from GitHub. Framework preset autodetected as Next.js. Root directory `/`, build command `npm run build` (default). Node runtime.
+3. **Environment variables (six):**
+   - `DATABASE_URL` — Neon `vercel-prod` branch **pooled** URL. Hostname must contain `-pooler` (e.g. `ep-cool-name-12345-pooler.eu-central-1.aws.neon.tech`). The non-pooled URL blows up under any concurrency because Vercel serverless functions each open their own connection.
+   - `OPENAI_API_KEY` — from the OpenAI dashboard. Only used in seeded-weather mode for agent turns; not weather-facing.
+   - `AUTH_SECRET` — 32+ byte base64. **Different from your local dev `AUTH_SECRET`** — sharing means a leak of local `.env` compromises prod sessions too.
+   - `AUTH_GOOGLE_ID` + `AUTH_GOOGLE_SECRET` — from Google Cloud OAuth client.
+   - `USE_SEEDED_WEATHER=1` — locks the deploy to the seeded weather path. No OpenWeatherMap key needed, deterministic responses, zero external-API budget burn.
+4. **Do NOT set:** `OPENWEATHERMAP_API_KEY` (unused in seeded mode); `APP_BASE` / `WEATHER_API_BASE` / `TRAVEL_API_BASE` / `TRAVEL_MCP_URL` / `WEATHER_MCP_URL` (the `getDefaultAppBase()` fallback handles these via `VERCEL_URL`); `AUTH_URL` / `AUTH_TRUST_HOST` (NextAuth v5 auto-detects Vercel); `PORT` (Vercel manages it).
+
+#### Neon setup
+
+- **Dedicated `vercel-prod` branch.** Copy-on-write from the existing local-dev branch (`production` in the Neon UI, confusingly named — it was originally the local dev DB). Isolates prod data from anything you do locally.
+- **Auto-delete: Never** — production DBs must persist.
+- **Pooled URL** copied from Neon's Connect modal (with the "Connection pooling" toggle enabled). This is the URL that goes into Vercel's `DATABASE_URL`.
+- **Schema + seed applied locally** with `DATABASE_URL` pointed at the pooled prod URL:
+  ```powershell
+  $env:DATABASE_URL = "<vercel-prod pooled URL>"
+  npx prisma migrate deploy
+  npx prisma db seed
+  Remove-Item Env:\DATABASE_URL
+  ```
+  The `Remove-Item` at the end is important — otherwise your next `npm run dev` hits prod.
+
+**Seed data note:** `FlightInstance` rows are dated relative to when seed ran (next 14 days from that moment). Any Neon branch created as a copy of an older branch inherits stale `FlightInstance` rows pointing to past dates. If flight searches return empty on a fresh deploy, re-run `prisma db seed` against `vercel-prod` — that regenerates the current-window instances. Discovered during Layer 5 of the smoke test.
+
+#### Google OAuth setup
+
+Add the Vercel URL to your existing OAuth 2.0 Client's **Authorized redirect URIs**:
+
+```
+https://<vercel-project-url>/api/auth/callback/google
+```
+
+**Keep** the localhost redirect URI (`http://localhost:3000/api/auth/callback/google`) — it's still needed for local dev. Google OAuth propagation is usually seconds but can take up to 5 minutes; if the first sign-in attempt after saving fails with `redirect_uri_mismatch`, wait and retry.
+
+#### First-deploy gotcha — Vercel Deployment Protection
+
+Vercel Hobby's default **"Standard Protection"** setting protects per-deployment URLs (the ugly `travel-agent-{hash}-{account}.vercel.app` variants) behind Vercel SSO, even for the current production deploy. The stable alias (`travel-agent-eight-wine.vercel.app`) stays public.
+
+This causes a 500 on the agent route on first use: the agent route's MCP-server init tries to POST to the per-deployment URL (via `VERCEL_URL`), Vercel intercepts with a 401 "Protected deployment" JSON payload, and MCP init throws.
+
+**Fix used:** disable Vercel Authentication entirely (**Settings → Deployment Protection → Vercel Authentication → Disabled**). No redeploy needed — the change is runtime-only.
+
+**Not-used-here but documented as an alternative:** update `getDefaultAppBase()` to prefer `VERCEL_PROJECT_PRODUCTION_URL` (the always-public stable alias) over `VERCEL_URL` (the per-deployment protected URL). Would keep Vercel Auth on for the per-deployment URLs. Skipped because Standard Protection on Hobby doesn't actually restrict public access to the production URL — only the per-deployment URLs, which nobody sees anyway. See "Hobby-tier lockdown limitations" below.
+
+#### Smoke-test outcomes
+
+Six layers, executed in order against the live URL. All essentially passed; three non-blocking issues logged for future work.
+
+| Layer | Target | Outcome |
+|---|---|---|
+| 1 — Page loads | Chat UI renders | ✅ |
+| 2 — API health (`/api/weather/current?city=Athens`) | Direct-to-Prisma sanity | ✅ Returns `{ city: "Athens", tempC: 32, conditions: "sunny", units: "celsius" }` from seeded row |
+| 3 — Agent chat (weather) | Agent + OpenAI + MCP end-to-end | ✅ After Deployment Protection fix (see above) |
+| 4 — OAuth sign-in | Google → callback → session | ✅ After Google Cloud redirect-URI setup |
+| 5 — Booking flow | search → propose → confirm | ✅ End-to-end round-trip booking created and PAID (BKG-2026-1D9701 verified in DB after smoke test) |
+| 6 — Conversation persistence | Header dropdown + history reload | ✅ First turn preserved cleanly; second turn missing due to a persistence gap (see backlog) |
+
+#### Backlog items surfaced during smoke test
+
+Not Stage 22 blockers — but real issues the deploy exposed. Filed for future stages:
+
+- **`bookingCrossReferenceOutputGuardrail` false-positive on hotel subtotals.** When the agent quoted the hotel-stay subtotal (`€188.60`) as a shorthand for "the hotel part" of a booking, the guardrail flagged it as a fabricated total (since `€188.60 ≠ €471.60 trip total`). Prose was blocked and replaced with a safety message; the tool call still succeeded so the booking was created and the BookingCard rendered. Fix: tighten the classifier to distinguish "subtotal quoted for a line item" from "grand-total claimed for the booking." Stage-21-ish scope.
+- **`appendTurn` skips guardrail-tripped turns.** The route handler's `conversationService.appendTurn(newItems)` only runs on successful completion; when the output guardrail tripwire fires, the exception path bypasses it. Result: any turn that trips a guardrail is silently absent from persisted conversation history, even though the tools it called executed for real (see the missing turn-2 in the smoke-test conversation). Fix: persist newItems even on guardrail trip. Stage-17-Phase-3.7-ish scope.
+- **`BookingCard` doesn't rehydrate from persisted history.** Live during a turn, the `propose_booking` tool output triggers a `BookingCard` component render. On page-reload rehydration, the same output isn't recognized by the client's history-replay code — the card doesn't reappear. Would need `hydrateChatMessages` or `MessageBubble` to run the same rich-render logic on rehydration that the live event handler does. Stage-17-Phase-3-follow-up scope.
+
+#### Cost story
+
+Total marginal cost of running this deploy at rest: **$0**.
+
+- **Vercel Hobby:** free tier, generous limits for personal projects. Idle deployments don't count against any limit (per Vercel's own note in the delete-deployment dialog).
+- **Neon:** the `vercel-prod` branch's compute autoscales down to zero when idle; storage costs are pennies at this size. Free tier is currently at 0.04 / 0.5 GB storage and 1.2 / 100 CU-hrs compute.
+- **OpenAI:** only spends when the agent is actually invoked. Protected by a **hard `$10 / month` spend cap** on the OpenAI org limits page (`platform.openai.com/settings/organization/limits`). Requests fail at cap — mathematical worst-case damage even if the URL gets abused.
+- **Google OAuth:** free.
+
+The Vercel + Neon combo means the deploy can sit indefinitely between demo sessions with zero baseline cost, so there's no incentive to take it down.
+
+#### Hobby-tier lockdown limitations
+
+The demo URL is technically publicly reachable. That was an intentional choice given:
+
+- The `.vercel.app` random-word suffix makes the URL undiscoverable via enumeration (Vercel `.vercel.app` sites are `noindex` by default — not indexed by Google).
+- The URL is not published anywhere.
+- The OpenAI cap is the mathematical damage limiter regardless of who visits.
+
+If stricter lockdown ever becomes worth doing, the options are:
+
+- **Vercel Pro tier** (`$150/month`) unlocks Deployment Protection's "Protect All Deployments" and Password Protection — both would gate the stable alias too. Overkill for a portfolio demo.
+- **App-level auth gate** (Stage 22.5 candidate) — modify `/api/agent` to require an authenticated session. Kills the "anonymous chat" UX (Stage 17 Phase 3.5 built the anon-to-signed-in bridge specifically to preserve it), but limits agent spend to authenticated users only. Optionally allowlist specific email addresses.
+- **Env-var kill switch** — middleware that checks a `SITE_OFFLINE` env var and serves a static "offline" page for all routes. Toggle via Vercel dashboard.
+- **Delete the deploy between demo sessions** — nuclear, works, adds ~10 minutes of re-setup per future demo.
+
+#### Redeploy recipe
+
+For future rebuilds (fresh Vercel project, or after infrastructure churn):
+
+1. Vercel dashboard → Add New → Project → import `travel-agent`.
+2. Framework preset: Next.js (autodetected).
+3. Add the 6 env vars from the "Vercel setup" section above.
+4. Click Deploy. Get the new URL from Vercel's confirmation page.
+5. If URL differs from before: add the new callback to Google Cloud OAuth client (`https://<new-URL>/api/auth/callback/google`). Keep the old one for a grace period if desired.
+6. Verify seed data currency: hit `/api/flights?origin=ATH&destination=BER&departure_date=<today-plus-4>`. Empty result → re-run `prisma db seed` against the vercel-prod branch (recipe under "Neon setup" above).
+7. Disable Vercel Authentication in Deployment Protection settings.
+8. Smoke-test Layers 1-6 (see the plan in this section's Smoke-test outcomes table).
+
+Realistic total: 10-15 minutes end-to-end assuming env-var values are saved somewhere retrievable (password manager entry).
+
+#### File index
+
+New: `src/utils/appBase.ts` (Vercel-URL-aware loopback base), `.vercelignore`. Modified: `app/api/mcp/weather/route.ts`, `app/api/mcp/travel/route.ts`, `app/api/agent/route.ts` (import `getDefaultAppBase`, replace hardcoded localhost fallbacks); `prisma/schema.prisma` (`binaryTargets`); `package.json` (`postinstall` script). No changes to services, repositories, agent code, guardrails, or eval harness — the app was already deploy-shaped.
+
 ---
 
 > **Note on the historical Stage narratives above:** file paths in Stages 1–7 reflect the layout at the time each stage was written. Where those don't match the current file tree, the [file index](#file-index) at the bottom of this doc is authoritative.
