@@ -311,19 +311,68 @@ export async function POST(req: NextRequest) {
         // instead of a red failure. userFacingGuardrailErrorMessage
         // handles both cases — same friendly text, just a different
         // frame type carrying it.
-        if (err instanceof InputGuardrailTripwireTriggered) {
-          send({
-            type: 'guardrail_blocked',
-            kind: 'input',
-            message: userFacingGuardrailErrorMessage(err),
-          });
-        } else if (err instanceof OutputGuardrailTripwireTriggered) {
-          send({
-            type: 'guardrail_blocked',
-            kind: 'output',
-            message: userFacingGuardrailErrorMessage(err),
-          });
+        if (
+          err instanceof InputGuardrailTripwireTriggered ||
+          err instanceof OutputGuardrailTripwireTriggered
+        ) {
+          const kind =
+            err instanceof InputGuardrailTripwireTriggered ? 'input' : 'output';
+          const message = userFacingGuardrailErrorMessage(err);
+
+          // Backlog #2 — persist the turn so refresh doesn't lose it.
+          // Without this, the whole turn (user msg + assistant reply)
+          // disappears from history because the throw jumps past the
+          // appendTurn call in the success path. We rebuild the items
+          // manually: user message + any tool items that ran before the
+          // trip (output guardrails only; input trips fire before any
+          // tool call) + a synthetic assistant message carrying the
+          // guardrail's friendly text. The offending final assistant
+          // text (if any) is deliberately dropped — the client replaced
+          // it with the notice live, so refresh shouldn't show it
+          // either. Refresh will render this as a plain assistant
+          // bubble (no soft "policy notice" styling) — that's Option A
+          // of the fix; distinct-styling-on-refresh is backlog #2a.
+          // Best-effort: a persistence failure gets logged, not
+          // surfaced, so the user still sees the guardrail_blocked
+          // frame land in the UI.
+          if (conversationService && conversationId) {
+            // stream.history is the full conversation history including this turn. history is the conversation history before this turn. We slice stream.history from history.length to get only the new items added during this turn. This includes the user's message and any tool calls that were made before the guardrail was triggered.
+            const streamNew = (stream.history ?? []).slice(history.length);
+
+            // We filter the new items to include only tool calls and tool call results. This allows us to persist the user's message, any tool calls that were made before the guardrail was triggered, and a synthetic assistant message with the guardrail notice. We exclude any partial or invalid assistant messages that may have been generated before the guardrail was triggered.
+            const toolItems = streamNew.filter((item) => {
+              const t = (item as { type?: string }).type;
+              return t === 'function_call' || t === 'function_call_result';
+            });
+
+            // We construct the persisted items for the conversation. This includes the user's message, any tool calls that were made before the guardrail was triggered, and a synthetic assistant message with the guardrail notice. We use the userInput from the request body as the user's message, and we create a new assistant message with the guardrail notice as its content.
+            const persistedItems: AgentInputItem[] = [
+              { role: 'user', content: userInput } as AgentInputItem,
+              ...toolItems,
+              {
+                role: 'assistant',
+                content: [{ type: 'output_text', text: message }],
+              } as AgentInputItem,
+            ];
+
+            // We call appendTurn to persist the new items to the conversation in the database. This allows us to maintain a complete record of the conversation across turns, even when a guardrail is triggered. If an error occurs during persistence, we log it but do not interrupt the stream, allowing the user to continue interacting with the agent.
+            try {
+              await conversationService.appendTurn({
+                conversationId,
+                newItems: persistedItems,
+              });
+            } catch (persistErr) {
+              console.error(
+                '[api/agent] guardrail-blocked persistence failed:',
+                persistErr,
+              );
+            }
+          }
+
+          // We send a "guardrail_blocked" event to the client with the kind of guardrail (input or output) and the user-facing message. The client can use this to display a policy notice to the user, indicating that their input or the agent's output was blocked by a guardrail.
+          send({ type: 'guardrail_blocked', kind, message });
         } else {
+          // Unexpected error — let the stream fail and log it, but don't return a 500 to the client. The client will see the stream close and can retry. We rethrow the error so it gets logged by Next.js.
           console.error('[api/agent] error:', err);
           send({
             type: 'error',
