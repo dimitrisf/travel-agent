@@ -17,7 +17,11 @@ import type { AgentRunContext, ToolCallRecord } from '@/agents/agentRunContext';
 //   (a) Fabricated reference     — agent quotes a `BKG-YYYY-XXXXXX`
 //       token that no `propose_booking` output ever produced.
 //   (b) Wrong booking total      — agent quotes a € figure in booking
-//       context that doesn't match any real `totalPriceEUR` (±€1).
+//       context that doesn't match any real `totalPriceEUR` from a
+//       `propose_booking` response — grand total OR any per-leg /
+//       per-stay line-item total (±€1). The line-item widening (Stage
+//       22 backlog) prevents the guardrail from misfiring on legitimate
+//       subtotal quotes like "Hotel total: €188.60".
 //   (c) Booking-without-call     — agent talks about a booking as if
 //       it exists, but no `propose_booking` has ever succeeded in this
 //       conversation.
@@ -81,16 +85,21 @@ export const bookingCrossReferenceOutputGuardrail: OutputGuardrail = {
 
     // (b) Wrong booking total
 
-    // E.g., text = "Your booking reference is BKG-2023-ABCD. The total for your booking is €150."
-    // proposeBookingResults = [{ reference: 'BKG-2023-ABCD', totalPriceEUR: 138 }]
-    // wrongTotal = findWrongBookingTotal(text, proposeBookingResults) => { claimed: "140", actualTotals: ["€138"] }
-    const wrongTotal = findWrongBookingTotal(text, proposeBookingResults);
+    // Widened from just the booking's grand total to include every
+    // `totalPriceEUR` in the propose_booking response — grand total AND
+    // every per-leg / per-stay line item. Fixes the false-positive where
+    // the agent legitimately quotes a subtotal (e.g. "Hotel total:
+    // €188.60") that doesn't equal the grand total (€471.60).
+    const knownBookingFigures = collectKnownBookingPriceFigures(
+      ctx.toolCallCollector,
+    );
+    const wrongTotal = findWrongBookingTotal(text, knownBookingFigures);
 
     if (wrongTotal) {
       return trip(
-        `A total I quoted (€${wrongTotal.claimed}) doesn't match any of the real booking totals. Please refer to the booking card for the correct amount.`,
+        `A total I quoted (€${wrongTotal.claimed}) doesn't match any real booking figure. Please refer to the booking card for the correct amount.`,
         'wrong-booking-total',
-        `claimed=€${wrongTotal.claimed}, actual totals=[${wrongTotal.actualTotals.join(', ')}]`,
+        `claimed=€${wrongTotal.claimed}, known figures=[${wrongTotal.knownFigures.join(', ')}]`,
       );
     }
 
@@ -115,11 +124,11 @@ export const bookingCrossReferenceOutputGuardrail: OutputGuardrail = {
 };
 
 // Minimal shape of what a propose_booking parsedResult carries that we
-// care about here. Anything richer stays out — cross-reference only
-// needs `reference` (for check a) and `totalPriceEUR` (for check b).
+// care about here. Cross-reference only needs `reference` for check (a);
+// check (b) collects `totalPriceEUR` values via a walk (see
+// `collectKnownBookingPriceFigures` below) so no fixed shape is required.
 type BookingLike = {
   reference?: unknown;
-  totalPriceEUR?: unknown;
 };
 
 // Reference format is `BKG-YYYY-XXXXXX` per the Stage 8 spec. Regex is
@@ -170,17 +179,20 @@ function findFabricatedReference(
 const BOOKING_TOTAL_PATTERN =
   /(?:booking\s+total|total\s+for\s+(?:the|your)\s+booking|trip\s+total|grand\s+total|total(?:\s+price)?)[^€\d\n]{0,30}€\s*([\d,]+(?:\.\d+)?)/gi;
 
-// Returns the first claimed booking total in `text` that doesn't match any
-// real booking total in `bookings`. Returns null if all claimed totals are
-// real, or if no totals are claimed. ±€1 slack absorbs cent-rounding
+// Returns the first claimed booking total in `text` that doesn't match
+// any known real figure. `knownFigures` is the union of every
+// `totalPriceEUR` value the propose_booking response carried (grand
+// total + line items) — see `collectKnownBookingPriceFigures`.
+//
+// Returns null if every claimed total matches something real (±€1
+// slack), or if no totals are claimed at all. ±€1 absorbs cent-rounding
 // differences (some places display integer euros, others 2-decimal).
-// E.g., text = "Your booking reference is BKG-2023-ABCD. The total for your booking is €138.", bookings = [{ reference: 'BKG-2023-ABCD', totalPriceEUR: 138 }] returns null (match)
-// E.g., text = "Your booking reference is BKG-2023-ABCD. The total for your booking is €139.", bookings = [{ reference: 'BKG-2023-ABCD', totalPriceEUR: 138 }] returns { claimed: "139", actualTotals: ["€138"] } (mismatch)
+// E.g., text = "Your booking reference is BKG-2023-ABCD. The total for your booking is €138.", knownFigures = [138] returns null (match). If knownFigures = [139], returns { claimed: "138", knownFigures: ["€139"] } (mismatch).
 function findWrongBookingTotal(
   text: string,
-  bookings: BookingLike[],
-): { claimed: string; actualTotals: string[] } | null {
-  if (bookings.length === 0) return null; // check (c) handles this branch
+  knownFigures: number[],
+): { claimed: string; knownFigures: string[] } | null {
+  if (knownFigures.length === 0) return null; // check (c) handles this branch
 
   // E.g., text = "Your booking reference is BKG-2023-ABCD. The total for your booking is €138." => claimed = [138]
   // Looks for phrases like "booking total €138", "total for your booking €138", "trip total €138", "grand total €138", etc. The regex captures the numeric part after the € symbol, allowing for commas and optional decimal points.
@@ -189,33 +201,99 @@ function findWrongBookingTotal(
   );
   if (claimed.length === 0) return null;
 
-  // E.g., bookings = [{ reference: 'BKG-2023-ABCD', totalPriceEUR: 138 }] => actual = [138]
-  const actual = bookings
-    .map((b) => (typeof b.totalPriceEUR === 'number' ? b.totalPriceEUR : null))
-    .filter((n): n is number => n !== null);
-  if (actual.length === 0) return null;
+  // Returns true if the claimed value `v` is within ±€1 of any known figure. This allows for minor rounding differences between what the agent claims and what the booking system reports.
+  const matches = (v: number) => knownFigures.some((a) => Math.abs(a - v) <= 1);
 
-  // ±€1 slack absorbs cent-rounding differences (some places display
-  // integer euros, others 2-decimal). Anything looser than that becomes
-  // permissive enough to let real drift through.
-  // Returns true if any actual total is within ±€1 of the claimed value. Otherwise, returns false.
-  const matches = (v: number) => actual.some((a) => Math.abs(a - v) <= 1);
-
-  // E.g., claimed = [150], actual = [138] => Math.abs(138-150) = 12 > 1, so
-  // matches(150) is false, and we return { claimed: "150", actualTotals: ["€138"] }.
-  // If claimed were [138.5] (within the ±€1 slack), matches would return true
-  // and we'd continue to the next claimed value (if any).
+  // E.g, claimed = [138], knownFigures = [139] => matches(138) is false, so we return { claimed: "138", knownFigures: ["€139"] }. If claimed = [138], knownFigures = [138], matches(138) is true, so we continue to the next claimed value (if any). If all claimed values match known figures, we return null.
+  // E.g, claimed = [138, 200], knownFigures = [138] => matches(138) is true, so we continue to 200. matches(200) is false, so we return { claimed: "200", knownFigures: ["€138"] }.
   for (const v of claimed) {
     if (!matches(v)) {
       return {
         claimed: v.toString(),
-        actualTotals: actual.map((a) => `€${a}`),
+        knownFigures: knownFigures.map((a) => `€${a}`),
       };
     }
   }
 
-  // At this point, all claimed totals are within ±€1 of some actual total, so we return null to indicate no wrong booking total was found.
   return null;
+}
+
+// Walk every propose_booking response and collect the numeric value of
+// every `totalPriceEUR` field — at any nesting depth. That gives us the
+// booking's grand total AND every per-leg / per-stay line-item total in
+// one flat list. Anything under a different key name is ignored (keeps
+// the check focused; no false negatives from picking up unrelated
+// numbers like `flight_id`).
+//
+// The concrete bug this fixes (Stage 22 backlog):
+//
+// User books a hotel in Berlin (€188.60) + round-trip ATH↔BER (€283).
+// propose_booking returns:
+//   {
+//     reference: "BKG-2026-A9F3K2",
+//     totalPriceEUR: 471.6,                         // grand total
+//     flightBookings: [ { totalPriceEUR: 283   } ], // per-leg subtotal
+//     hotelBookings:  [ { totalPriceEUR: 188.6 } ], // per-stay subtotal
+//   }
+//
+// Agent replies honestly: "Hotel total: €188.60. Round-trip flight
+// total: €283. Trip total: €471.60." Every number is real.
+//
+// The BOOKING_TOTAL_PATTERN regex matches all three phrases — including
+// "Hotel total: €188.60" via its loose `total(?: price)?` branch — and
+// hands the amounts to check (b). Pre-fix, the "known" set was just
+// [471.6], so the €188.60 subtotal looked fabricated → guardrail
+// tripped → reply blocked, even though the number came straight from
+// the booking system.
+//
+// The fix is this walk: the known set becomes [471.6, 283, 188.6]. All
+// three claims match and pass. Fabricated numbers (e.g. "Hotel total:
+// €250") still miss the set and still trip — no coverage lost.
+// E.g., collector = [
+//   { name: 'propose_booking', args: { ... }, result: '{"reference":"BKG-2023-ABCD","totalPriceEUR":138}', parsedResult: { reference: 'BKG-2023-ABCD', totalPriceEUR: 138 } },
+//   { name: 'propose_booking', args: { ... }, result: '{"reference":"BKG-2023-EFGH","totalPriceEUR":200}', parsedResult: { reference: 'BKG-2023-EFGH', totalPriceEUR: 200 } },
+//   ...
+// ] => returns [138, 200]
+function collectKnownBookingPriceFigures(
+  collector: ToolCallRecord[],
+): number[] {
+  const values: number[] = [];
+
+  for (const record of collector) {
+    if (record.name !== 'propose_booking') continue;
+    walkForPriceFigures(record.parsedResult, values);
+  }
+  return values;
+}
+
+const KNOWN_PRICE_KEYS = new Set(['totalPriceEUR']);
+
+// Recursively walks an object or array, collecting every numeric value
+// under keys that are in KNOWN_PRICE_KEYS. The accumulator `acc` is
+// mutated in place. Non-object values are ignored. Arrays are traversed
+// recursively. Objects are traversed recursively, and if a key matches
+// KNOWN_PRICE_KEYS and its value is a number, that number is pushed to
+// `acc`.
+// E.g., value = { totalPriceEUR: 471.6, flightBookings: [ { totalPriceEUR: 283 } ], hotelBookings: [ { totalPriceEUR: 188.6 } ] }, acc = [] => acc becomes [471.6, 283, 188.6]
+// (Grand total 471.6 = flight subtotal 283 + hotel subtotal 188.6, matching the concrete-bug example above.)
+function walkForPriceFigures(value: unknown, acc: number[]): void {
+  if (value == null || typeof value !== 'object') return;
+
+  if (Array.isArray(value)) {
+    for (const el of value) walkForPriceFigures(el, acc);
+    return;
+  }
+
+  // value is an object. Iterate over its entries. If a key is in KNOWN_PRICE_KEYS and its value is a number, push that number to acc. Otherwise, recursively walk the value.
+  // E.g., value = { totalPriceEUR: 471.6, flightBookings: [ { totalPriceEUR: 283 } ], hotelBookings: [ { totalPriceEUR: 188.6 } ] }, acc = [] => acc becomes [471.6, 283, 188.6]
+  // In this particular example, the first entry is ('totalPriceEUR', 471.6), which matches KNOWN_PRICE_KEYS and is a number, so 471.6 is pushed to acc. The next entry is ('flightBookings', [ { totalPriceEUR: 283 } ]), which doesn't match KNOWN_PRICE_KEYS, so we recursively walk the array. The array has one element, { totalPriceEUR: 283 }, which is an object. Its entry ('totalPriceEUR', 283) matches KNOWN_PRICE_KEYS and is a number, so 283 is pushed to acc. The same happens for the hotelBookings entry.
+  for (const [k, v] of Object.entries(value)) {
+    if (KNOWN_PRICE_KEYS.has(k) && typeof v === 'number') {
+      acc.push(v);
+    } else {
+      walkForPriceFigures(v, acc);
+    }
+  }
 }
 
 // Finality-adjacent phrases used ONLY for check (c) — the presence of a
