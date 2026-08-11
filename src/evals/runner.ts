@@ -26,6 +26,8 @@ import { fabricatedFlightPriceTrips } from './synthetic/fabricatedFlightPriceTri
 import { fabricatedHotelNameTrips } from './synthetic/fabricatedHotelNameTrips';
 import { fabricatedPerNightPriceTrips } from './synthetic/fabricatedPerNightPriceTrips';
 import { fabricatedReferenceTrips } from './synthetic/fabricatedReferenceTrips';
+import { flightSubtotalQuoteAllowed } from './synthetic/flightSubtotalQuoteAllowed';
+import { hotelSubtotalQuoteAllowed } from './synthetic/hotelSubtotalQuoteAllowed';
 import { legitBookingSummaryPasses } from './synthetic/legitBookingSummaryPasses';
 import { legitPricesAllowed } from './synthetic/legitPricesAllowed';
 import { legitSearchResultsAllowed } from './synthetic/legitSearchResultsAllowed';
@@ -84,6 +86,8 @@ const SYNTHETIC_CASES: SyntheticGuardrailCase[] = [
   wrongTotalTrips,
   bookingWithoutCallTrips,
   legitBookingSummaryPasses,
+  hotelSubtotalQuoteAllowed,
+  flightSubtotalQuoteAllowed,
   novelFinalityYoureAllSetTrips,
   novelFinalitySeatsLockedInTrips,
   confirmedBookingFinalityAllowed,
