@@ -12,8 +12,9 @@ import { rebuildCollectorFromHistory } from '@/agents/agentRunContext';
 import type { AgentRunContext } from '@/agents/agentRunContext';
 import { getCurrentUser } from '@/lib/auth/session';
 import { ConversationServiceError, createConversationService } from '@/lib';
+import { buildGuardrailBlockedItems } from '@/utils/buildGuardrailBlockedItems';
 import { getDefaultAppBase } from '@/utils/appBase';
-import { unwrapToolOutput } from '@/utils/toolOutput';
+import { toSseFrame } from '@/utils/toSseFrame';
 import { userFacingGuardrailErrorMessage } from '@/utils/userFacingGuardrailErrorMessage';
 
 export const runtime = 'nodejs';
@@ -207,74 +208,21 @@ export async function POST(req: NextRequest) {
       }
 
       try {
-        // The agent's output is streamed in real-time. We can handle the streaming events as they arrive.
+        // The agent's output is streamed in real-time. Each SDK event
+        // is translated into zero or more wire-format SSE frames by the
+        // pure `toSseFrame` helper — see src/utils/toSseFrame.ts for
+        // the per-event branch logic (agent_updated_stream_event,
+        // raw_model_stream_event, run_item_stream_event → tool_call /
+        // tool_output). The loop here is just the side-effect wrapper
+        // that enqueues those frames on the SSE controller.
         //
-        // The for await (const event of stream) block does essentially what the CLI REPL did — but instead of console.log-ing tool calls and streaming to stdout, it sends SSE frames to the browser.
+        // The for await (const event of stream) block does essentially
+        // what the CLI REPL did — but instead of console.log-ing tool
+        // calls and streaming to stdout, it sends SSE frames to the
+        // browser.
         for await (const event of stream) {
-          // Agent-updated events fire when the active agent changes — i.e. after
-          // a handoff. Forward the new agent's name to the client so the UI can
-          // show which specialist is now driving.
-          if (event.type === 'agent_updated_stream_event') {
-            const agent = (event as { agent?: { name?: string } }).agent;
-            if (agent?.name) {
-              send({ type: 'agent_updated', agentName: agent.name });
-            }
-            continue;
-          }
-
-          // Handle streaming events from the agent
-          if (event.type === 'raw_model_stream_event') {
-            // The model may send partial text output in chunks; 'raw_model_stream_event' events contain these chunks. We can display them as they arrive.
-            const data = event.data as { type?: string; delta?: string };
-
-            // 'output_text_delta' events contain the actual text output from the model. We can send these chunks to the client as they arrive.
-            if (
-              data.type === 'output_text_delta' &&
-              typeof data.delta === 'string'
-            ) {
-              // We send a "text_delta" event to the client with the partial text output from the model. The client can use this to display the agent's response in real-time as it is generated.
-              send({ type: 'text_delta', delta: data.delta });
-            }
-            continue;
-          }
-
-          if (event.type === 'run_item_stream_event') {
-            // 'run_item_stream_event' events contain information about the execution of individual items in the agent's plan. We can use these events to display tool calls and their outputs in real-time.
-            const item = event.item;
-            if (item.type === 'tool_call_item') {
-              // The agent is calling a tool. We can send a "tool_call" event with the tool name and arguments to the client.
-              const raw = item.rawItem as {
-                name?: string;
-                arguments?: unknown;
-                // The raw item may have a callId, call_id, or id property that we can use to tag the event with a unique identifier for the tool call. This allows the client to match the tool output to the correct tool call, even when several calls happen in parallel.
-                // We have multiple possible property names for the call ID because different tools may use different naming conventions. We check for each one in order of preference and use the first one that exists.
-                callId?: string;
-                call_id?: string;
-                id?: string;
-              };
-              if ('name' in raw && 'arguments' in raw) {
-                const args =
-                  typeof raw.arguments === 'string'
-                    ? raw.arguments
-                    : JSON.stringify(raw.arguments);
-                const callId = raw.callId ?? raw.call_id ?? raw.id;
-                send({ type: 'tool_call', name: raw.name, args, callId });
-              }
-            } else if (item.type === 'tool_call_output_item') {
-              // The agent has received output from a tool call. We tag the event with the same callId so the client can match it to the correct tool call, even when several calls happen in parallel.
-              const outRaw = (
-                item as {
-                  rawItem?: { callId?: string; call_id?: string; id?: string };
-                }
-              ).rawItem;
-              const callId = outRaw?.callId ?? outRaw?.call_id ?? outRaw?.id;
-              send({
-                type: 'tool_output',
-                callId,
-                output: unwrapToolOutput(item.output),
-              });
-            }
-          }
+          const frame = toSseFrame(event);
+          if (frame) send(frame);
         }
 
         await stream.completed;
@@ -322,40 +270,24 @@ export async function POST(req: NextRequest) {
           // Backlog #2 — persist the turn so refresh doesn't lose it.
           // Without this, the whole turn (user msg + assistant reply)
           // disappears from history because the throw jumps past the
-          // appendTurn call in the success path. We rebuild the items
-          // manually: user message + any tool items that ran before the
-          // trip (output guardrails only; input trips fire before any
-          // tool call) + a synthetic assistant message carrying the
-          // guardrail's friendly text. The offending final assistant
-          // text (if any) is deliberately dropped — the client replaced
-          // it with the notice live, so refresh shouldn't show it
-          // either. Refresh will render this as a plain assistant
-          // bubble (no soft "policy notice" styling) — that's Option A
-          // of the fix; distinct-styling-on-refresh is backlog #2a.
-          // Best-effort: a persistence failure gets logged, not
-          // surfaced, so the user still sees the guardrail_blocked
-          // frame land in the UI.
+          // appendTurn call in the success path. Item construction —
+          // user message + tool items that ran before the trip +
+          // synthetic assistant notice — lives in the pure helper
+          // `buildGuardrailBlockedItems`; see that file for the
+          // rationale (why the offending assistant text is dropped,
+          // etc.). Refresh renders this as a plain assistant bubble
+          // (no soft "policy notice" styling) — that's Option A of the
+          // fix; distinct-styling-on-refresh is backlog #2a. Best-
+          // effort: a persistence failure gets logged, not surfaced,
+          // so the user still sees the guardrail_blocked frame land in
+          // the UI.
           if (conversationService && conversationId) {
-            // stream.history is the full conversation history including this turn. history is the conversation history before this turn. We slice stream.history from history.length to get only the new items added during this turn. This includes the user's message and any tool calls that were made before the guardrail was triggered.
-            const streamNew = (stream.history ?? []).slice(history.length);
-
-            // We filter the new items to include only tool calls and tool call results. This allows us to persist the user's message, any tool calls that were made before the guardrail was triggered, and a synthetic assistant message with the guardrail notice. We exclude any partial or invalid assistant messages that may have been generated before the guardrail was triggered.
-            const toolItems = streamNew.filter((item) => {
-              const t = (item as { type?: string }).type;
-              return t === 'function_call' || t === 'function_call_result';
+            const persistedItems = buildGuardrailBlockedItems({
+              userInput,
+              streamHistory: stream.history ?? [],
+              priorHistoryLength: history.length,
+              message,
             });
-
-            // We construct the persisted items for the conversation. This includes the user's message, any tool calls that were made before the guardrail was triggered, and a synthetic assistant message with the guardrail notice. We use the userInput from the request body as the user's message, and we create a new assistant message with the guardrail notice as its content.
-            const persistedItems: AgentInputItem[] = [
-              { role: 'user', content: userInput } as AgentInputItem,
-              ...toolItems,
-              {
-                role: 'assistant',
-                content: [{ type: 'output_text', text: message }],
-              } as AgentInputItem,
-            ];
-
-            // We call appendTurn to persist the new items to the conversation in the database. This allows us to maintain a complete record of the conversation across turns, even when a guardrail is triggered. If an error occurs during persistence, we log it but do not interrupt the stream, allowing the user to continue interacting with the agent.
             try {
               await conversationService.appendTurn({
                 conversationId,
