@@ -249,6 +249,18 @@ function findWrongBookingTotal(
 // The fix is this walk: the known set becomes [471.6, 283, 188.6]. All
 // three claims match and pass. Fabricated numbers (e.g. "Hotel total:
 // €250") still miss the set and still trip — no coverage lost.
+//
+// A second class of false-positive (Stage 22 backlog #1a) — derived
+// aggregates:
+//
+//   Round-trip flight (outbound €150, return €133) + hotel (€200).
+//   Grand total €483. The walk collects [483, 150, 133, 200]. Agent
+//   honestly says "Round-trip flight total: €283" — a legitimate sum
+//   of the two legs, but €283 isn't stored anywhere in the booking
+//   response as its own field, so the walk misses it. Adding
+//   sum-of-flight-line-totals (150 + 133 = 283) — and, symmetrically,
+//   sum-of-hotel-line-totals for multi-stay bookings — closes this
+//   gap. See `sumLineItemTotals` below.
 // E.g., collector = [
 //   { name: 'propose_booking', args: { ... }, result: '{"reference":"BKG-2023-ABCD","totalPriceEUR":138}', parsedResult: { reference: 'BKG-2023-ABCD', totalPriceEUR: 138 } },
 //   { name: 'propose_booking', args: { ... }, result: '{"reference":"BKG-2023-EFGH","totalPriceEUR":200}', parsedResult: { reference: 'BKG-2023-EFGH', totalPriceEUR: 200 } },
@@ -262,8 +274,54 @@ function collectKnownBookingPriceFigures(
   for (const record of collector) {
     if (record.name !== 'propose_booking') continue;
     walkForPriceFigures(record.parsedResult, values);
+
+    // Backlog #1a — add derived aggregates the walk misses because
+    // they aren't stored as their own fields in the booking response:
+    //   - sum-of-flight-line-totals matches "Round-trip flight total: €X"
+    //   - sum-of-hotel-line-totals  matches "Hotel total: €X" across
+    //     multi-stay bookings
+    // Silently no-op on empty arrays or non-numeric totalPriceEUR fields.
+    const bookingLike = record.parsedResult as
+      | { flightBookings?: unknown; hotelBookings?: unknown }
+      | undefined;
+    if (bookingLike) {
+      const flightSum = sumLineItemTotals(bookingLike.flightBookings);
+      if (flightSum !== null) values.push(flightSum);
+      const hotelSum = sumLineItemTotals(bookingLike.hotelBookings);
+      if (hotelSum !== null) values.push(hotelSum);
+    }
   }
   return values;
+}
+
+// Sum the `totalPriceEUR` of an array of line items (typically
+// flightBookings or hotelBookings). Returns null when the input isn't
+// a non-empty array, or when no line item carries a numeric
+// totalPriceEUR. Not recursive — the caller passes the specific
+// top-level array to sum.
+//
+// E.g., sumLineItemTotals([{ totalPriceEUR: 150 }, { totalPriceEUR: 133 }]) => 283
+// E.g., sumLineItemTotals([]) => null
+// E.g., sumLineItemTotals(undefined) => null
+// E.g., sumLineItemTotals([{ foo: 1 }]) => null
+function sumLineItemTotals(items: unknown): number | null {
+  if (!Array.isArray(items) || items.length === 0) return null;
+
+  let sum = 0;
+  let count = 0;
+
+  for (const item of items) {
+    if (item && typeof item === 'object') {
+      const val = (item as { totalPriceEUR?: unknown }).totalPriceEUR;
+
+      if (typeof val === 'number') {
+        sum += val;
+        count++;
+      }
+    }
+  }
+
+  return count > 0 ? sum : null;
 }
 
 const KNOWN_PRICE_KEYS = new Set(['totalPriceEUR']);
