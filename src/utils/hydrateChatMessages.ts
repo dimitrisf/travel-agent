@@ -1,5 +1,6 @@
 import type { AgentInputItem } from '@openai/agents';
 import type { ChatMessage } from '@/types/chat';
+import { GUARDRAIL_NOTICE_TYPE } from './guardrailNotice';
 import { unwrapToolOutput } from './toolOutput';
 
 // Convert a canonical AgentInputItem[] history into ChatMessage[] bubbles
@@ -128,7 +129,7 @@ export function hydrateChatMessages(history: AgentInputItem[]): ChatMessage[] {
       const callId =
         typeof record.callId === 'string' ? record.callId : undefined;
 
-        // The output field is expected to be an object with a type and text property. We check if the type is 'text' and if the text is a string before assigning it to the corresponding ToolCall's output. If the output is not in the expected format, we skip it.
+      // The output field is expected to be an object with a type and text property. We check if the type is 'text' and if the text is a string before assigning it to the corresponding ToolCall's output. If the output is not in the expected format, we skip it.
       const output = record.output as
         | { type?: string; text?: string }
         | undefined;
@@ -147,6 +148,29 @@ export function hydrateChatMessages(history: AgentInputItem[]): ChatMessage[] {
       continue;
     }
 
+    // ── Guardrail notice (Stage 22 backlog #2a) — our custom shape
+    // (not part of the SDK's item vocabulary) that carries the friendly
+    // policy-notice text plus the `kind` ('input' | 'output'). We treat
+    // it like an assistant message for text purposes AND set
+    // `blockedBy` on the bubble so MessageBubble renders it with the
+    // soft "policy notice" styling — same as the live experience. See
+    // src/utils/guardrailNotice.ts for the shape.
+    if (record.type === GUARDRAIL_NOTICE_TYPE) {
+      const message =
+        typeof (record as { message?: unknown }).message === 'string'
+          ? (record as { message: string }).message
+          : '';
+
+      const kind = (record as { kind?: unknown }).kind;
+
+      if (message) currentAgent.text += message;
+
+      if (kind === 'input' || kind === 'output') {
+        currentAgent.blockedBy = { kind };
+      }
+      continue;
+    }
+
     // ── Assistant turn — the SDK stores assistant messages with
     // `role: 'assistant'` and a content array; each entry has a text field
     // when it's an output_text piece. Concatenate text pieces for display.
@@ -157,7 +181,6 @@ export function hydrateChatMessages(history: AgentInputItem[]): ChatMessage[] {
         type?: string;
         text?: string;
       }>;
-
 
       const text = parts
         .filter((p) => typeof p.text === 'string')

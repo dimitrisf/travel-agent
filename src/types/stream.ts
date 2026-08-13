@@ -29,9 +29,14 @@ export type StreamEvent =
   // `message` is the friendly, user-facing text set by the guardrail's
   // outputInfo. `kind` says which layer blocked, so the UI can hint at
   // the reason if useful (input = "your input was blocked", output =
-  // "the agent's response was blocked").
+  // "the agent's response was blocked"). `conversationId` mirrors the
+  // one on `done`: set for signed-in first turns so the client can swap
+  // `/` → `/c/[id]` even when the guardrail short-circuits the run
+  // (Stage 22 backlog #2b). Undefined for anon callers and follow-ups
+  // to an already-known conversation.
   | {
       type: 'guardrail_blocked';
       kind: 'input' | 'output';
       message: string;
+      conversationId?: string;
     };

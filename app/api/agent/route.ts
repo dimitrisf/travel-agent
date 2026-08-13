@@ -14,6 +14,7 @@ import { getCurrentUser } from '@/lib/auth/session';
 import { ConversationServiceError, createConversationService } from '@/lib';
 import { buildGuardrailBlockedItems } from '@/utils/buildGuardrailBlockedItems';
 import { getDefaultAppBase } from '@/utils/appBase';
+import { stripGuardrailNoticesFromHistory } from '@/utils/guardrailNotice';
 import { toSseFrame } from '@/utils/toSseFrame';
 import { userFacingGuardrailErrorMessage } from '@/utils/userFacingGuardrailErrorMessage';
 
@@ -187,9 +188,14 @@ export async function POST(req: NextRequest) {
   // We also pass the runCtx object to the run() function, which contains the toolCallCollector. This collector is used to track the tools that have been called during the current turn, allowing the agent to enforce output guardrails based on the tools that have been used.
   // Context note: the runCtx is not persisted across turns — it is only valid for the current turn. The toolCallCollector is rebuilt from the history at the start of each turn, and it accumulates new tool calls as they occur during the turn. This allows the agent to enforce output guardrails based on the tools that have been called during the current turn.
   // More specifically, the toolCallCollector is used by the bookingCrossReferenceOutputGuardrail to check for booking-related claims in the agent's output. The guardrail uses the collector to determine if the agent has called the propose_booking tool and to cross-reference any booking references mentioned in the output against the actual results returned by the tool.
+  // Strip our custom `guardrail_notice` items (Stage 22 backlog #2a)
+  // from client-supplied history before handing to the SDK — the SDK
+  // doesn't know about that shape and may reject the whole turn.
+  // See src/utils/guardrailNotice.ts for the invariant.
+  const sdkHistory = stripGuardrailNoticesFromHistory(history);
   const stream = await run(
     agent,
-    [...history, { role: 'user', content: userInput }],
+    [...sdkHistory, { role: 'user', content: userInput }],
     { stream: true, context: runCtx },
   );
 
@@ -275,18 +281,20 @@ export async function POST(req: NextRequest) {
           // synthetic assistant notice — lives in the pure helper
           // `buildGuardrailBlockedItems`; see that file for the
           // rationale (why the offending assistant text is dropped,
-          // etc.). Refresh renders this as a plain assistant bubble
-          // (no soft "policy notice" styling) — that's Option A of the
-          // fix; distinct-styling-on-refresh is backlog #2a. Best-
-          // effort: a persistence failure gets logged, not surfaced,
-          // so the user still sees the guardrail_blocked frame land in
-          // the UI.
+          // etc.). Refresh renders this with the soft "policy notice"
+          // styling: `buildGuardrailBlockedItems` now emits a custom
+          // `guardrail_notice` item (Stage 22 backlog #2a), and the
+          // hydrator recognizes it to restore `blockedBy` on the
+          // bubble. Best-effort: a persistence failure gets logged,
+          // not surfaced, so the user still sees the guardrail_blocked
+          // frame land in the UI.
           if (conversationService && conversationId) {
             const persistedItems = buildGuardrailBlockedItems({
               userInput,
               streamHistory: stream.history ?? [],
               priorHistoryLength: history.length,
               message,
+              kind,
             });
             try {
               await conversationService.appendTurn({
@@ -302,7 +310,14 @@ export async function POST(req: NextRequest) {
           }
 
           // We send a "guardrail_blocked" event to the client with the kind of guardrail (input or output) and the user-facing message. The client can use this to display a policy notice to the user, indicating that their input or the agent's output was blocked by a guardrail.
-          send({ type: 'guardrail_blocked', kind, message });
+          // Include conversationId (Stage 22 backlog #2b): on a
+          // first-turn guardrail trip the fresh Conversation was
+          // created above (pre-run block) and its id needs to reach
+          // the client so the URL can swap from `/` to `/c/[id]` —
+          // otherwise a refresh loses the whole conversation from the
+          // user's view (it's still in the DB, just not linked).
+          // Mirrors what the `done` frame carries in the success path.
+          send({ type: 'guardrail_blocked', kind, message, conversationId });
         } else {
           // Unexpected error — let the stream fail and log it, but don't return a 500 to the client. The client will see the stream close and can retry. We rethrow the error so it gets logged by Next.js.
           console.error('[api/agent] error:', err);
