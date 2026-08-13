@@ -321,19 +321,7 @@ export function useAgentChat(opts: UseAgentChatOptions = {}) {
       // via history.replaceState (no page reload, no re-render loop) so
       // refresh + bookmarking work. Skip when the id is already set (we
       // opened /c/[id] directly) or absent (anon chat).
-      if (payload.conversationId && payload.conversationId !== conversationId) {
-        setConversationId(payload.conversationId);
-
-        // We only manipulate the URL in the browser environment (window is defined). If window is undefined, we are likely in a server-side rendering context, and we should not attempt to change the URL.
-        if (typeof window !== 'undefined') {
-          const target = `/c/${payload.conversationId}`;
-
-          // Only replace the URL if it is different from the current pathname. This prevents unnecessary history entries and avoids triggering a re-render loop. We use window.history.replaceState to change the URL without reloading the page or causing a full navigation.
-          if (window.location.pathname !== target) {
-            window.history.replaceState({}, '', target);
-          }
-        }
-      }
+      adoptConversationId(payload.conversationId);
     } else if (payload.type === 'error') {
       // Replace agent message with an error
       setMessages((prev) =>
@@ -362,6 +350,33 @@ export function useAgentChat(opts: UseAgentChatOptions = {}) {
             : m,
         ),
       );
+      // Stage 22 backlog #2b: the server sends conversationId here for
+      // the same first-turn reason `done` does. Without this, a first-
+      // turn guardrail trip leaves the URL at `/`, and refresh loses
+      // the whole conversation from the user's view.
+      adoptConversationId(payload.conversationId);
+    }
+  }
+
+  // Adopt a conversationId returned by the server (from `done` or from
+  // `guardrail_blocked`) and swap the URL to `/c/[id]` if we're not
+  // already there. No-ops for anon callers (undefined id) and for
+  // follow-up turns to an already-known conversation.
+  function adoptConversationId(newId: string | undefined) {
+    if (!newId || newId === conversationId) return;
+
+    setConversationId(newId);
+
+    // We only manipulate the URL in the browser environment (window is defined).
+    // If window is undefined, we are likely in a server-side rendering context.
+    if (typeof window !== 'undefined') {
+      const target = `/c/${newId}`;
+      // Only replace the URL if it is different from the current pathname.
+      // This prevents unnecessary history entries and avoids triggering a re-render loop.
+      // We use window.history.replaceState to change the URL without reloading the page.
+      if (window.location.pathname !== target) {
+        window.history.replaceState({}, '', target);
+      }
     }
   }
 
