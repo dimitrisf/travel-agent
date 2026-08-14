@@ -285,17 +285,28 @@ export async function POST(req: NextRequest) {
           // styling: `buildGuardrailBlockedItems` now emits a custom
           // `guardrail_notice` item (Stage 22 backlog #2a), and the
           // hydrator recognizes it to restore `blockedBy` on the
-          // bubble. Best-effort: a persistence failure gets logged,
-          // not surfaced, so the user still sees the guardrail_blocked
+          // bubble.
+          //
+          // Constructed unconditionally (not just for signed-in users)
+          // because we also send it to the client in the SSE frame
+          // below so `setHistory` can capture the blocked turn. That
+          // matters for the anon-to-signed-in bridge: without it, the
+          // client's history state stays at pre-turn and the
+          // sessionStorage auto-save skips the guardrail turn, so
+          // OAuth wipes it.
+          const persistedItems = buildGuardrailBlockedItems({
+            userInput,
+            streamHistory: stream.history ?? [],
+            priorHistoryLength: history.length,
+            message,
+            kind,
+          });
+
+          // Best-effort DB persist: only for signed-in users with a
+          // resolved conversationId. A failure gets logged, not
+          // surfaced, so the user still sees the guardrail_blocked
           // frame land in the UI.
           if (conversationService && conversationId) {
-            const persistedItems = buildGuardrailBlockedItems({
-              userInput,
-              streamHistory: stream.history ?? [],
-              priorHistoryLength: history.length,
-              message,
-              kind,
-            });
             try {
               await conversationService.appendTurn({
                 conversationId,
@@ -317,7 +328,17 @@ export async function POST(req: NextRequest) {
           // otherwise a refresh loses the whole conversation from the
           // user's view (it's still in the DB, just not linked).
           // Mirrors what the `done` frame carries in the success path.
-          send({ type: 'guardrail_blocked', kind, message, conversationId });
+          // Include the updated history too — same shape the DB would
+          // hold after appendTurn — so the client can update its own
+          // history state (needed for the anon-to-signed-in bridge to
+          // carry the blocked turn across OAuth via sessionStorage).
+          send({
+            type: 'guardrail_blocked',
+            kind,
+            message,
+            conversationId,
+            history: [...history, ...persistedItems],
+          });
         } else {
           // Unexpected error — let the stream fail and log it, but don't return a 500 to the client. The client will see the stream close and can retry. We rethrow the error so it gets logged by Next.js.
           console.error('[api/agent] error:', err);

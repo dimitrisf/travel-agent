@@ -33,10 +33,16 @@ export type StreamEvent =
   // one on `done`: set for signed-in first turns so the client can swap
   // `/` → `/c/[id]` even when the guardrail short-circuits the run
   // (Stage 22 backlog #2b). Undefined for anon callers and follow-ups
-  // to an already-known conversation.
+  // to an already-known conversation. `history` mirrors the one on
+  // `done` too: the full canonical history with this turn's items
+  // (user message + any tools that ran before the trip + the custom
+  // `guardrail_notice` item). The client persists it so refresh (via
+  // DB for signed-in) or the anon-to-signed-in bridge (via
+  // sessionStorage) can restore the blocked turn with correct styling.
   | {
       type: 'guardrail_blocked';
       kind: 'input' | 'output';
       message: string;
       conversationId?: string;
+      history: AgentInputItem[];
     };
