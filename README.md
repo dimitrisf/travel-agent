@@ -6,6 +6,7 @@ A progression from a single streaming Responses API call to a **production-shape
 
 ```bash
 npm install
+git config core.hooksPath .githooks    # enable the pre-commit hook that blocks direct-to-main commits
 cp .env.example .env    # then add OPENAI_API_KEY and DATABASE_URL
 
 npm run db:generate
