@@ -386,7 +386,10 @@ export function useAgentChat(opts: UseAgentChatOptions = {}) {
   // `blockedBy` triggers the softer chat bubble styling in MessageBubble;
   // no "Error:" prefix because this is a policy notice, not a failure.
   // Also adopts conversationId (Stage 22 backlog #2b) so a first-turn
-  // guardrail trip still swaps the URL to /c/[id].
+  // guardrail trip still swaps the URL to /c/[id]. Update history with
+  // the server-canonical shape (includes the `guardrail_notice` item)
+  // so the anon-to-signed-in bridge captures the blocked turn in
+  // sessionStorage — without this, OAuth wipes it.
   function handleGuardrailBlocked(
     agentMsgId: string,
     payload: Extract<StreamEvent, { type: 'guardrail_blocked' }>,
@@ -403,6 +406,7 @@ export function useAgentChat(opts: UseAgentChatOptions = {}) {
           : m,
       ),
     );
+    setHistory(payload.history);
     adoptConversationId(payload.conversationId);
   }
 
