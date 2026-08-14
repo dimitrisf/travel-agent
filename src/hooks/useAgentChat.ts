@@ -234,128 +234,176 @@ export function useAgentChat(opts: UseAgentChatOptions = {}) {
     }
   }
 
-  function applyEvent(agentMsgId: string, payload: StreamEvent) {
-    // We update the messages state based on the type of event received from the agent API. Each event type has different fields and requires different updates to the messages state.
-
-    // We find the agent message in the messages state by its id (agentMsgId) and update its text, toolCalls, or pending flag based on the event type. We also update the history state when we receive a 'done' event, which includes the full conversation history so far.
-    if (payload.type === 'text_delta') {
-      // Append delta to the current agent message's text. We find the agent message in the messages state by its id (agentMsgId) and append the delta to its text. This allows us to display the agent's response in real-time as it is generated.
-      // E.g., payload = { type: 'text_delta', delta: 'Hello, ' }
-      setMessages((prev) =>
-        prev.map((m) =>
-          m.id === agentMsgId ? { ...m, text: m.text + payload.delta } : m,
-        ),
-      );
-    } else if (payload.type === 'tool_call') {
-      // Push a ToolCall { name, args } onto the current agent message's toolCalls array. We find the agent message in the messages state by its id (agentMsgId) and add a new tool call object to its toolCalls array. This allows us to track the tool calls made by the agent and display them in the UI.
-      // E.g., payload = { type: 'tool_call', name: 'search_hotels', args: '{"city":"Berlin"}', callId: '12345' }
-      setMessages((prev) =>
-        prev.map((m) =>
-          m.id === agentMsgId
-            ? {
-                ...m,
-                toolCalls: [
-                  ...m.toolCalls,
-                  {
-                    callId: payload.callId,
-                    name: payload.name,
-                    args: payload.args,
-                  },
-                ],
-              }
-            : m,
-        ),
-      );
-    } else if (payload.type === 'tool_output') {
-      // Populate the last ToolCall.output with the payload.output.
-      // We find the agent message in the messages state by its id (agentMsgId) and update the output of the tool call with the matching callId. If no callId is provided, we attach the output to the first still-pending tool call.
-      // E.g., payload = { type: 'tool_output', output: '{"hotels":[{"name":"Hotel A"}]}', callId: '12345' }
-      setMessages((prev) =>
-        prev.map((m) => {
-          // m has this shape: { id, role, text, toolCalls, pending }
-          // We find the tool call in m.toolCalls that has the same callId as the payload, and update its output with the payload.output. If no callId is provided, we attach the output to the first still-pending tool call. This allows us to match tool outputs to their corresponding tool calls, even when several calls happen in parallel.
-          // We find the agent message in the messages state by its id (agentMsgId) and update the output of the tool call with the matching callId. If no callId is provided, we attach the output to the first still-pending tool call. This allows us to match tool outputs to their corresponding tool calls, even when several calls happen in parallel.
-          if (m.id !== agentMsgId) return m;
-
-          // E.g., m.toolCalls = [{ callId: '12345', name: 'search_hotels', args: '{"city":"Berlin"}' }]
-          // We create a new array of tool calls with the updated output, and return a new message object with the updated toolCalls array. This ensures that we do not mutate the existing state directly, which is important for React state management.
-          const tc = [...m.toolCalls];
-          let idx = -1;
-          if (payload.callId) {
-            idx = tc.findIndex((c) => c.callId === payload.callId);
-          }
-          if (idx === -1) {
-            // Fallback for events without callId — attach to the first still-pending call, i.e., the first tool call that does not yet have an output. This allows us to handle tool outputs that do not include a callId, by matching them to the first tool call that is still waiting for output.
-            idx = tc.findIndex((c) => c.output === undefined);
-          }
-          // Here we update the tool call at index idx with the output from the payload. We create a new array of tool calls with the updated output, and return a new message object with the updated toolCalls array. This ensures that we do not mutate the existing state directly, which is important for React state management.
-          if (idx !== -1) {
-            // E.g., tc[idx] = { callId: '12345', name: 'search_hotels', args: '{"city":"Berlin"}' }
-            // E.g., payload.output = '{"hotels":[{"name":"Hotel A"}]}'
-            // After this line, tc[idx] will be updated to include the output from the payload, so it will look like: { callId: '12345', name: 'search_hotels', args: '{"city":"Berlin"}', output: '{"hotels":[{"name":"Hotel A"}]}' }
-            tc[idx] = { ...tc[idx], output: payload.output };
-          }
-
-          // We return a new message object with the updated toolCalls array, so that the messages state is updated with the new output for the tool call. This ensures that we do not mutate the existing state directly, which is important for React state management.
-          return { ...m, toolCalls: tc };
-        }),
-      );
-    } else if (payload.type === 'agent_updated') {
-      // Fires when the SDK hands off control to a different agent. We record
-      // the new agent's name so the UI can render a chip like
-      // "→ handed off to WeatherAgent".
-      setMessages((prev) =>
-        prev.map((m) =>
-          m.id === agentMsgId
-            ? { ...m, handoffs: [...m.handoffs, payload.agentName] }
-            : m,
-        ),
-      );
-    } else if (payload.type === 'done') {
-      // Update client-side history; unlock send button
-      // Mark the agent message as no longer pending, so the UI can stop showing the "thinking..." indicator. We find the agent message in the messages state by its id (agentMsgId) and set its pending flag to false. This indicates that the agent has finished processing the user's input and has sent a final response.
-      // E.g., payload = { type: 'done', history: [...], conversationId: 'abc123' }
-      setHistory(payload.history);
-      // Stage 17 Phase 3: if this is the first turn of a fresh signed-in
-      // conversation, the server assigned an id. Swap the URL to /c/[id]
-      // via history.replaceState (no page reload, no re-render loop) so
-      // refresh + bookmarking work. Skip when the id is already set (we
-      // opened /c/[id] directly) or absent (anon chat).
-      adoptConversationId(payload.conversationId);
-    } else if (payload.type === 'error') {
-      // Replace agent message with an error
-      setMessages((prev) =>
-        prev.map((m) =>
-          m.id === agentMsgId
-            ? { ...m, text: `Error: ${payload.message}`, pending: false }
-            : m,
-        ),
-      );
-    } else if (payload.type === 'guardrail_blocked') {
-      // A guardrail tripwire fired — replace whatever the agent had
-      // streamed so far (which may be nothing, for input trips, or
-      // partial text, for output trips) with the guardrail's friendly
-      // message. `blockedBy` triggers the softer chat bubble styling in
-      // MessageBubble; no "Error:" prefix because this is a policy
-      // notice, not a failure.
-      setMessages((prev) =>
-        prev.map((m) =>
-          m.id === agentMsgId
-            ? {
-                ...m,
-                text: payload.message,
-                blockedBy: { kind: payload.kind },
-                pending: false,
-              }
-            : m,
-        ),
-      );
-      // Stage 22 backlog #2b: the server sends conversationId here for
-      // the same first-turn reason `done` does. Without this, a first-
-      // turn guardrail trip leaves the URL at `/`, and refresh loses
-      // the whole conversation from the user's view.
-      adoptConversationId(payload.conversationId);
+  // Dispatch an SSE frame to the right handler. Switch on `payload.type`
+  // uses TypeScript's discriminated-union narrowing so each handler
+  // receives its precise payload shape. The `never` fallthrough is an
+  // exhaustiveness check — tsc errors here if StreamEvent gains a new
+  // variant and we forget to handle it.
+  function applyEvent(agentMsgId: string, payload: StreamEvent): void {
+    switch (payload.type) {
+      case 'text_delta':
+        return handleTextDelta(agentMsgId, payload);
+      case 'tool_call':
+        return handleToolCall(agentMsgId, payload);
+      case 'tool_output':
+        return handleToolOutput(agentMsgId, payload);
+      case 'agent_updated':
+        return handleAgentUpdated(agentMsgId, payload);
+      case 'done':
+        return handleDone(payload);
+      case 'error':
+        return handleError(agentMsgId, payload);
+      case 'guardrail_blocked':
+        return handleGuardrailBlocked(agentMsgId, payload);
+      default: {
+        const _exhaustive: never = payload;
+        void _exhaustive;
+      }
     }
+  }
+
+  // ── Per-frame handlers. Inner functions so they close over
+  // setMessages / setHistory / adoptConversationId without leaking
+  // those setters into the module scope. Each takes its narrowed
+  // payload variant via Extract<StreamEvent, { type: '…' }>.
+
+  // Append delta to the current agent message's text. Displays the
+  // agent's response in real-time as it is generated.
+  // E.g., payload = { type: 'text_delta', delta: 'Hello, ' }
+  function handleTextDelta(
+    agentMsgId: string,
+    payload: Extract<StreamEvent, { type: 'text_delta' }>,
+  ): void {
+    setMessages((prev) =>
+      prev.map((m) =>
+        m.id === agentMsgId ? { ...m, text: m.text + payload.delta } : m,
+      ),
+    );
+  }
+
+  // Push a ToolCall { name, args } onto the current agent message's
+  // toolCalls array. Lets the UI track the tool calls made by the agent.
+  // E.g., payload = { type: 'tool_call', name: 'search_hotels', args: '{"city":"Berlin"}', callId: '12345' }
+  function handleToolCall(
+    agentMsgId: string,
+    payload: Extract<StreamEvent, { type: 'tool_call' }>,
+  ): void {
+    setMessages((prev) =>
+      prev.map((m) =>
+        m.id === agentMsgId
+          ? {
+              ...m,
+              toolCalls: [
+                ...m.toolCalls,
+                {
+                  callId: payload.callId,
+                  name: payload.name,
+                  args: payload.args,
+                },
+              ],
+            }
+          : m,
+      ),
+    );
+  }
+
+  // Update the tool call that matches payload.callId with the incoming
+  // output. If no callId is provided (or no match), fall back to the
+  // first still-pending tool call (output === undefined). Handles the
+  // parallel-calls case where several tools are in flight at once.
+  // E.g., payload = { type: 'tool_output', output: '{"hotels":[{"name":"Hotel A"}]}', callId: '12345' }
+  function handleToolOutput(
+    agentMsgId: string,
+    payload: Extract<StreamEvent, { type: 'tool_output' }>,
+  ): void {
+    setMessages((prev) =>
+      prev.map((m) => {
+        if (m.id !== agentMsgId) return m;
+        // Copy tool calls to a new array so we don't mutate state directly.
+        const tc = [...m.toolCalls];
+        let idx = -1;
+        if (payload.callId) {
+          idx = tc.findIndex((c) => c.callId === payload.callId);
+        }
+        if (idx === -1) {
+          // Fallback for events without callId — attach to the first
+          // still-pending call.
+          idx = tc.findIndex((c) => c.output === undefined);
+        }
+        if (idx !== -1) {
+          tc[idx] = { ...tc[idx], output: payload.output };
+        }
+        return { ...m, toolCalls: tc };
+      }),
+    );
+  }
+
+  // Fires when the SDK hands off control to a different agent. We
+  // record the new agent's name so the UI can render a chip like
+  // "→ handed off to WeatherAgent".
+  function handleAgentUpdated(
+    agentMsgId: string,
+    payload: Extract<StreamEvent, { type: 'agent_updated' }>,
+  ): void {
+    setMessages((prev) =>
+      prev.map((m) =>
+        m.id === agentMsgId
+          ? { ...m, handoffs: [...m.handoffs, payload.agentName] }
+          : m,
+      ),
+    );
+  }
+
+  // Update client-side history and, on the first turn of a signed-in
+  // conversation, adopt the server-assigned conversationId (Stage 17
+  // Phase 3) — swaps the URL to /c/[id] via adoptConversationId.
+  // E.g., payload = { type: 'done', history: [...], conversationId: 'abc123' }
+  function handleDone(
+    payload: Extract<StreamEvent, { type: 'done' }>,
+  ): void {
+    setHistory(payload.history);
+    adoptConversationId(payload.conversationId);
+  }
+
+  // Replace the current agent message with an error (prefixed with
+  // "Error:" so it renders as a failure, not a policy notice).
+  function handleError(
+    agentMsgId: string,
+    payload: Extract<StreamEvent, { type: 'error' }>,
+  ): void {
+    setMessages((prev) =>
+      prev.map((m) =>
+        m.id === agentMsgId
+          ? { ...m, text: `Error: ${payload.message}`, pending: false }
+          : m,
+      ),
+    );
+  }
+
+  // A guardrail tripwire fired — replace whatever the agent had
+  // streamed so far (which may be nothing, for input trips, or partial
+  // text, for output trips) with the guardrail's friendly message.
+  // `blockedBy` triggers the softer chat bubble styling in MessageBubble;
+  // no "Error:" prefix because this is a policy notice, not a failure.
+  // Also adopts conversationId (Stage 22 backlog #2b) so a first-turn
+  // guardrail trip still swaps the URL to /c/[id].
+  function handleGuardrailBlocked(
+    agentMsgId: string,
+    payload: Extract<StreamEvent, { type: 'guardrail_blocked' }>,
+  ): void {
+    setMessages((prev) =>
+      prev.map((m) =>
+        m.id === agentMsgId
+          ? {
+              ...m,
+              text: payload.message,
+              blockedBy: { kind: payload.kind },
+              pending: false,
+            }
+          : m,
+      ),
+    );
+    adoptConversationId(payload.conversationId);
   }
 
   // Adopt a conversationId returned by the server (from `done` or from

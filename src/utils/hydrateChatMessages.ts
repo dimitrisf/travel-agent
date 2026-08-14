@@ -1,6 +1,6 @@
 import type { AgentInputItem } from '@openai/agents';
 import type { ChatMessage } from '@/types/chat';
-import { GUARDRAIL_NOTICE_TYPE } from './guardrailNotice';
+import { isGuardrailNotice } from './guardrailNotice';
 import { unwrapToolOutput } from './toolOutput';
 
 // Convert a canonical AgentInputItem[] history into ChatMessage[] bubbles
@@ -9,14 +9,16 @@ import { unwrapToolOutput } from './toolOutput';
 // derives the UI-facing bubble structure from it.
 //
 // Grouping rule: each user turn opens a new user bubble AND a new agent
-// bubble; every function_call / function_call_result / assistant message
-// that follows before the next user turn accumulates onto the current
-// agent bubble. This mirrors what useAgentChat builds up live via SSE
-// events — the loaded page should look identical to the just-chatted one.
+// bubble; every function_call / function_call_result / assistant /
+// guardrail_notice message that follows before the next user turn
+// accumulates onto the current agent bubble. This mirrors what
+// useAgentChat builds up live via SSE events — the loaded page should
+// look identical to the just-chatted one.
 //
-// UI-only concepts (handoffs, blockedBy, streaming pending state) don't
-// survive persistence — they're transient turn-metadata. Restored
-// bubbles show `handoffs: []` and `pending: false`.
+// UI-only concepts (handoffs, streaming pending state) don't survive
+// persistence — they're transient turn-metadata. Restored bubbles show
+// `handoffs: []` and `pending: false`. `blockedBy` DOES survive —
+// carried by a `guardrail_notice` item (see guardrailNotice.ts).
 //
 // Example — a simple "what's the weather in Athens?" turn:
 //
@@ -47,155 +49,215 @@ import { unwrapToolOutput } from './toolOutput';
 // Id numbering (`h-u-N` / `h-a-N`) uses `bubbles.length` at the moment
 // each bubble is created — the user bubble gets `h-u-0` (length 0 pre-push);
 // the agent bubble opens next with `h-a-1` (length 1 after the user push).
+//
+// Structure: the loop reads as a table of contents. Each branch's
+// body lives in a small named helper below (predicates + mutators) so
+// the branch logic is testable and the loop stays a list of routes.
 export function hydrateChatMessages(history: AgentInputItem[]): ChatMessage[] {
   const bubbles: ChatMessage[] = [];
-  // The current agent bubble being built up from the history. When we see a user turn, we flush the current agent bubble (if any) and start a new one. When we see an assistant message or tool call, we append to the current agent bubble. If there is no current agent bubble, we skip appending (this can happen if the history starts with a user turn).
   let currentAgent: ChatMessage | null = null;
 
-  // Push the in-progress agent bubble (if it has any content) before
-  // opening a new one. Skip empty ones — they'd render as blank bubbles
-  // which look broken.
-  const flushAgent = () => {
-    if (
-      currentAgent &&
-      (currentAgent.text.length > 0 || currentAgent.toolCalls.length > 0)
-    ) {
-      // Only push if the agent bubble has any text or tool calls. If it's empty, we skip it.
-      bubbles.push(currentAgent);
-    }
-    currentAgent = null;
-  };
-
   for (const item of history) {
-    // Discriminate on the two ways the SDK identifies items: `role` for
-    // user/assistant messages, `type` for function_call / function_call_result.
-    const record = item as {
-      role?: unknown;
-      type?: unknown;
-      content?: unknown;
-      name?: unknown;
-      arguments?: unknown;
-      callId?: unknown;
-      output?: unknown;
-    };
+    // Discriminate on the two ways items identify themselves: `role`
+    // for user/assistant messages, `type` for function_call,
+    // function_call_result, and our custom guardrail_notice.
+    const record = item as HistoryRecord;
 
-    // ── User turn — closes any open agent bubble and opens the next one.
-    if (record.role === 'user' && typeof record.content === 'string') {
-      // Flush the current agent bubble (if any) before starting a new one. This ensures that each user turn starts a new agent bubble, and any previous agent bubble is completed and added to the bubbles array.
-      flushAgent();
-
-      // Push a new user bubble with the user's message. The id is generated based on the current length of the bubbles array, ensuring uniqueness. The role is 'user', and the text is the content of the user message. Tool calls and handoffs are empty arrays, and pending is false since this is a completed message.
-      bubbles.push({
-        id: `h-u-${bubbles.length}`,
-        role: 'user',
-        text: record.content,
-        toolCalls: [],
-        handoffs: [],
-        pending: false,
-      });
-
-      // Open a new agent bubble for the next assistant response. The id is generated based on the current length of the bubbles array, ensuring uniqueness. The role is 'agent', and the text is initially empty. Tool calls and handoffs are empty arrays, and pending is false since this is a new bubble that will be filled in with the assistant's response.
-      currentAgent = {
-        id: `h-a-${bubbles.length}`,
-        role: 'agent',
-        text: '',
-        toolCalls: [],
-        handoffs: [],
-        pending: false,
-      };
+    // User turn resets the bubble pair; must run before the null guard.
+    if (isUserTurn(record)) {
+      currentAgent = openBubblesForUserTurn(record, bubbles, currentAgent);
       continue;
     }
 
-    // Nothing below makes sense without an open agent bubble — the very
-    // first history items are always a user turn.
+    // Everything below accumulates onto the current agent bubble.
+    // The very first history items are always a user turn, so a null
+    // currentAgent here means malformed history — skip silently.
     if (!currentAgent) continue;
 
-    // ── Tool call — attach a new ToolCall to the current agent bubble.
-    if (record.type === 'function_call') {
-      const args = typeof record.arguments === 'string' ? record.arguments : '';
-      currentAgent.toolCalls.push({
-        callId: typeof record.callId === 'string' ? record.callId : undefined,
-        name: typeof record.name === 'string' ? record.name : '(unknown)',
-        args,
-      });
+    if (isFunctionCall(record)) {
+      appendToolCall(record, currentAgent);
       continue;
     }
-
-    // ── Tool call result — find the matching ToolCall by callId and
-    // attach the output text. The output field is a { type: 'text' | ..., text }
-    // envelope — we only care about the text form (matches rebuildCollectorFromHistory).
-    if (record.type === 'function_call_result') {
-      // E.g, record = { type: 'function_call_result', callId: 'call_1', output: { type: 'text', text: '{"tempC":32,"conditions":"sunny"}' } }
-      const callId =
-        typeof record.callId === 'string' ? record.callId : undefined;
-
-      // The output field is expected to be an object with a type and text property. We check if the type is 'text' and if the text is a string before assigning it to the corresponding ToolCall's output. If the output is not in the expected format, we skip it.
-      const output = record.output as
-        | { type?: string; text?: string }
-        | undefined;
-      if (
-        !callId ||
-        output?.type !== 'text' ||
-        typeof output.text !== 'string'
-      ) {
-        continue;
-      }
-
-      // Find the matching ToolCall in the current agent bubble by callId and set its output to the text from the function_call_result. If no matching ToolCall is found, we skip it. This ensures that the output of the tool call is correctly associated with the corresponding tool call in the agent's response.
-      // E.g., output.text = '{"tempC":32,"conditions":"sunny"}' and callId = 'call_1' → find the ToolCall with callId 'call_1' and set its output to '{"tempC":32,"conditions":"sunny"}'.
-      const tc = currentAgent.toolCalls.find((c) => c.callId === callId);
-      if (tc) tc.output = normalizeMcpEnvelope(output.text);
+    if (isFunctionCallResult(record)) {
+      attachToolOutput(record, currentAgent);
       continue;
     }
-
-    // ── Guardrail notice (Stage 22 backlog #2a) — our custom shape
-    // (not part of the SDK's item vocabulary) that carries the friendly
-    // policy-notice text plus the `kind` ('input' | 'output'). We treat
-    // it like an assistant message for text purposes AND set
-    // `blockedBy` on the bubble so MessageBubble renders it with the
-    // soft "policy notice" styling — same as the live experience. See
-    // src/utils/guardrailNotice.ts for the shape.
-    if (record.type === GUARDRAIL_NOTICE_TYPE) {
-      const message =
-        typeof (record as { message?: unknown }).message === 'string'
-          ? (record as { message: string }).message
-          : '';
-
-      const kind = (record as { kind?: unknown }).kind;
-
-      if (message) currentAgent.text += message;
-
-      if (kind === 'input' || kind === 'output') {
-        currentAgent.blockedBy = { kind };
-      }
+    if (isGuardrailNotice(record)) {
+      applyGuardrailNotice(record, currentAgent);
       continue;
     }
-
-    // ── Assistant turn — the SDK stores assistant messages with
-    // `role: 'assistant'` and a content array; each entry has a text field
-    // when it's an output_text piece. Concatenate text pieces for display.
-    // E.g, record = { role: 'assistant', content: [{ type: 'output_text', text: "It's 32°C and sunny in Athens." }] } → currentAgent.text += "It's 32°C and sunny in Athens."
-    if (record.role === 'assistant' && Array.isArray(record.content)) {
-      // E.g., parts = [{ type: 'output_text', text: "It's 32°C and sunny in Athens." }]
-      const parts = record.content as Array<{
-        type?: string;
-        text?: string;
-      }>;
-
-      const text = parts
-        .filter((p) => typeof p.text === 'string')
-        .map((p) => p.text as string)
-        .join('');
-
-      // Now, e.g, text = "It's 32°C and sunny in Athens." and we append it to the current agent bubble's text. If there is no text, we skip appending to avoid adding empty strings.
-      if (text) currentAgent.text += text;
+    if (isAssistantTurn(record)) {
+      appendAssistantText(record, currentAgent);
       continue;
     }
   }
 
-  flushAgent();
+  flushAgentBubble(bubbles, currentAgent);
   return bubbles;
 }
+
+// ───────────────────────────────────────────────
+// Record shape + type predicates
+// ───────────────────────────────────────────────
+
+// Loose duck-typed shape we cast history items to before dispatching.
+// Everything is `unknown` — the predicates below narrow to the fields
+// they actually care about. Items arrive from JSON.parse (DB or SSE),
+// so prototype-based checks (instanceof) don't apply.
+type HistoryRecord = {
+  role?: unknown;
+  type?: unknown;
+  content?: unknown;
+  name?: unknown;
+  arguments?: unknown;
+  callId?: unknown;
+  output?: unknown;
+  message?: unknown;
+  kind?: unknown;
+};
+
+function isUserTurn(record: HistoryRecord): boolean {
+  return record.role === 'user' && typeof record.content === 'string';
+}
+
+function isFunctionCall(record: HistoryRecord): boolean {
+  return record.type === 'function_call';
+}
+
+function isFunctionCallResult(record: HistoryRecord): boolean {
+  return record.type === 'function_call_result';
+}
+
+function isAssistantTurn(record: HistoryRecord): boolean {
+  return record.role === 'assistant' && Array.isArray(record.content);
+}
+
+// ───────────────────────────────────────────────
+// Bubble-list helpers
+// ───────────────────────────────────────────────
+
+// Only push the current agent bubble if it has something to render.
+// Skip empty ones — they'd render as blank bubbles which look broken.
+// Type predicate lets callers narrow currentAgent to non-null via the
+// same check.
+function agentBubbleHasContent(
+  agent: ChatMessage | null,
+): agent is ChatMessage {
+  return (
+    agent !== null &&
+    (agent.text.length > 0 || agent.toolCalls.length > 0)
+  );
+}
+
+function flushAgentBubble(
+  bubbles: ChatMessage[],
+  currentAgent: ChatMessage | null,
+): void {
+  if (agentBubbleHasContent(currentAgent)) bubbles.push(currentAgent);
+}
+
+// ───────────────────────────────────────────────
+// Per-branch mutators
+// ───────────────────────────────────────────────
+
+// User turn — flush the in-progress agent bubble (if any), push the
+// user bubble, and return the freshly-opened agent bubble that
+// subsequent items will accumulate onto. The caller assigns the return
+// value to `currentAgent`.
+function openBubblesForUserTurn(
+  record: HistoryRecord,
+  bubbles: ChatMessage[],
+  currentAgent: ChatMessage | null,
+): ChatMessage {
+  flushAgentBubble(bubbles, currentAgent);
+  bubbles.push({
+    id: `h-u-${bubbles.length}`,
+    role: 'user',
+    // isUserTurn guarantees record.content is a string; the cast just
+    // narrows what TypeScript can't infer through the boolean predicate.
+    text: record.content as string,
+    toolCalls: [],
+    handoffs: [],
+    pending: false,
+  });
+  return {
+    id: `h-a-${bubbles.length}`,
+    role: 'agent',
+    text: '',
+    toolCalls: [],
+    handoffs: [],
+    pending: false,
+  };
+}
+
+// Attach a new ToolCall to the current agent bubble.
+function appendToolCall(
+  record: HistoryRecord,
+  currentAgent: ChatMessage,
+): void {
+  const args = typeof record.arguments === 'string' ? record.arguments : '';
+  currentAgent.toolCalls.push({
+    callId: typeof record.callId === 'string' ? record.callId : undefined,
+    name: typeof record.name === 'string' ? record.name : '(unknown)',
+    args,
+  });
+}
+
+// Find the matching ToolCall by callId and set its output text.
+// Skip silently on malformed shapes (no callId, non-text output, etc.).
+// The output field is a { type: 'text' | ..., text } envelope — we only
+// care about the text form (matches rebuildCollectorFromHistory).
+function attachToolOutput(
+  record: HistoryRecord,
+  currentAgent: ChatMessage,
+): void {
+  const callId = typeof record.callId === 'string' ? record.callId : undefined;
+  const output = record.output as
+    | { type?: string; text?: string }
+    | undefined;
+  if (!callId || output?.type !== 'text' || typeof output.text !== 'string') {
+    return;
+  }
+  const tc = currentAgent.toolCalls.find((c) => c.callId === callId);
+  if (tc) tc.output = normalizeMcpEnvelope(output.text);
+}
+
+// Guardrail notice (Stage 22 backlog #2a) — our custom shape (not part
+// of the SDK's item vocabulary) that carries the friendly policy-notice
+// text plus the `kind` ('input' | 'output'). We treat it like an
+// assistant message for text purposes AND set `blockedBy` on the
+// bubble so MessageBubble renders it with the soft "policy notice"
+// styling — same as the live experience. See guardrailNotice.ts.
+function applyGuardrailNotice(
+  record: HistoryRecord,
+  currentAgent: ChatMessage,
+): void {
+  const message = typeof record.message === 'string' ? record.message : '';
+  const kind = record.kind;
+  if (message) currentAgent.text += message;
+  if (kind === 'input' || kind === 'output') {
+    currentAgent.blockedBy = { kind };
+  }
+}
+
+// Assistant turn — the SDK stores assistant messages with
+// `role: 'assistant'` and a content array; each entry has a text field
+// when it's an output_text piece. Concatenate text pieces for display.
+function appendAssistantText(
+  record: HistoryRecord,
+  currentAgent: ChatMessage,
+): void {
+  const parts = record.content as Array<{ type?: string; text?: string }>;
+  const text = parts
+    .filter((p) => typeof p.text === 'string')
+    .map((p) => p.text as string)
+    .join('');
+  if (text) currentAgent.text += text;
+}
+
+// ───────────────────────────────────────────────
+// MCP envelope normalizer
+// ───────────────────────────────────────────────
 
 // The live agent-route SSE path unwraps MCP envelopes via unwrapToolOutput
 // before delivering to the client (see /api/agent's tool_call_output_item
