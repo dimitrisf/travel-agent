@@ -1,0 +1,19 @@
+#!/bin/sh
+# Refuse commits made directly on `main`. Feature work belongs on a
+# branch; direct-to-main commits have produced merge-blob history
+# messes when the corresponding PR is later squash-merged. To enable
+# in a fresh clone: `git config core.hooksPath .githooks`.
+branch=$(git symbolic-ref --short HEAD 2>/dev/null)
+
+if [ "$branch" = "main" ]; then
+  echo "pre-commit: refusing to commit directly to main."
+  echo ""
+  echo "Create a branch first:"
+  echo "  git checkout -b <branch-name>"
+  echo ""
+  echo "Then re-run your commit. To bypass this hook (not recommended):"
+  echo "  git commit --no-verify"
+  exit 1
+fi
+
+exit 0
