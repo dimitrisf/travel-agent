@@ -109,7 +109,16 @@ model FlightDefinition {
   stops                Int              @default(0)
   instances            FlightInstance[]
 
+  // Stage 23 — provenance for LLM-generated inventory. "seed" for rows
+  // created by db:seed; "llm" for rows created on-demand by
+  // LlmFlightSource (cache-first, generated when a user query has no
+  // seeded match). Kept as a String (not enum) so future sources
+  // ("amadeus", "duffel", ...) don't require a migration.
+  externalSource String?   @default("seed")
+  generatedAt    DateTime?
+
   @@unique([airlineId, flightNumber])
+  @@index([externalSource])
 }
 
 model FlightInstance {
@@ -125,8 +134,17 @@ model FlightInstance {
 
   flightBookings FlightBooking[]
 
+  // Stage 23 — same provenance fields as FlightDefinition. Tracked
+  // per-instance (not just per-definition) so that a seeded
+  // FlightDefinition can still gain LLM-generated instances on
+  // demand: e.g. a user searches a date beyond the seeded 14-day
+  // window on an otherwise-seeded route.
+  externalSource String?   @default("seed")
+  generatedAt    DateTime?
+
   @@unique([flightDefinitionId, departureDatetime])
   @@index([departureDatetime])
+  @@index([externalSource])
 }
 
 // ───────────────────────────────────────────────
@@ -148,8 +166,16 @@ model Hotel {
   hotelAmenities     HotelAmenity[]
   cancellationPolicy CancellationPolicy?
 
+  // Stage 23 — provenance for LLM-generated hotels. See FlightDefinition
+  // for the rationale. The composite unique @@unique([cityId, name])
+  // prevents duplicates when the LLM generates a hotel name that
+  // already exists in the same city — upsert must key on this.
+  externalSource String?   @default("seed")
+  generatedAt    DateTime?
+
   @@unique([cityId, name])
   @@index([cityId])
+  @@index([externalSource])
 }
 
 model RoomType {
@@ -165,7 +191,14 @@ model RoomType {
   availability  Availability[]
   hotelBookings HotelBooking[]
 
+  // Stage 23 — provenance for LLM-generated room types. Kept per-row
+  // (not just inherited from Hotel) so that a seeded Hotel could gain
+  // LLM-generated RoomTypes if we ever want to enrich existing rows.
+  externalSource String?   @default("seed")
+  generatedAt    DateTime?
+
   @@unique([hotelId, name])
+  @@index([externalSource])
 }
 
 model Availability {
