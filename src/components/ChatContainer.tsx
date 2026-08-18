@@ -306,6 +306,7 @@ export function ChatContainer({
         <IconButton
           type="submit"
           color="primary"
+          aria-label="Send message"
           disabled={pending || !input.trim() || readOnly}
         >
           {pending ? <CircularProgress size={20} /> : <SendIcon />}
