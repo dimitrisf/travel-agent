@@ -187,6 +187,64 @@ describe('FlightRepository.findInstances', () => {
     expect(mocks.flightDefinition.upsert).not.toHaveBeenCalled();
   });
 
+  it('skips FlightInstance upsert when an existing FlightDefinition on that (airline, flightNumber) is for a different route', async () => {
+    // Regression: FlightDefinition.@@unique is (airlineId, flightNumber) —
+    // route is NOT part of the key. If seed (or a prior LLM call) has
+    // LH 1234 as ATH→FRA and the LLM now emits LH 1234 for ATH→BER, the
+    // find-or-create upsert returns the ATH→FRA row. We must NOT then
+    // create a FlightInstance under that mismatched definition — doing
+    // so would surface the fabricated instance under the wrong route on
+    // later queries.
+    const { prisma, mocks } = makeMockPrisma();
+    const { source, generateFlightsForRoute } = makeMockLlmSource();
+    mocks.flightInstance.findMany
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([]);
+    mocks.airport.findUnique
+      .mockResolvedValueOnce({
+        id: 1,
+        iataCode: 'ATH',
+        city: { name: 'Athens' },
+      })
+      .mockResolvedValueOnce({
+        id: 2,
+        iataCode: 'BER',
+        city: { name: 'Berlin' },
+      });
+    mocks.airline.findMany.mockResolvedValueOnce([
+      { id: 10, iataCode: 'LH', name: 'Lufthansa' },
+    ]);
+    generateFlightsForRoute.mockResolvedValueOnce({
+      flights: [
+        {
+          airlineIata: 'LH',
+          flightNumber: '1234',
+          departureTimeHHMM: '08:00',
+          durationMinutes: 175,
+          basePriceEUR: 187.5,
+          stops: 0,
+          aircraft: 'A320',
+          seatsAvailable: 42,
+        },
+      ],
+    });
+    // Pre-existing definition is ATH(1)→FRA(3), NOT the requested
+    // ATH(1)→BER(2). Upsert returns the collision row unchanged.
+    mocks.flightDefinition.upsert.mockResolvedValueOnce({
+      id: 555,
+      airlineId: 10,
+      flightNumber: '1234',
+      originAirportId: 1,
+      destinationAirportId: 3,
+    });
+    const repo = new FlightRepository(prisma, source);
+
+    await repo.findInstances({ ...VALID_OPTS });
+
+    expect(mocks.flightDefinition.upsert).toHaveBeenCalledTimes(1);
+    expect(mocks.flightInstance.upsert).not.toHaveBeenCalled();
+  });
+
   it('calls LLM with correct args on cache miss + upserts + re-queries', async () => {
     const { prisma, mocks } = makeMockPrisma();
     const { source, generateFlightsForRoute } = makeMockLlmSource();
@@ -211,7 +269,14 @@ describe('FlightRepository.findInstances', () => {
       { id: 11, iataCode: 'A3', name: 'Aegean Airlines' },
     ]);
     generateFlightsForRoute.mockResolvedValueOnce(VALID_LLM_OUTPUT);
-    mocks.flightDefinition.upsert.mockResolvedValue({ id: 999 });
+    // Return matches the requested route (ATH id=1 → BER id=2) so the
+    // route-mismatch guard in upsertOffer does not skip the FlightInstance
+    // step.
+    mocks.flightDefinition.upsert.mockResolvedValue({
+      id: 999,
+      originAirportId: 1,
+      destinationAirportId: 2,
+    });
     mocks.flightInstance.upsert.mockResolvedValue({ id: 1000 });
     const repo = new FlightRepository(prisma, source);
 
