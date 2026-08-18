@@ -244,6 +244,7 @@ describe('HotelRepository.findAvailable', () => {
     mocks.roomType.upsert.mockResolvedValue({
       id: 888,
       defaultRoomsAvailable: 20,
+      basePrice: 145,
     });
     mocks.availability.upsert.mockResolvedValue({ id: 777 });
     const repo = new HotelRepository(prisma, source);
@@ -277,6 +278,69 @@ describe('HotelRepository.findAvailable', () => {
     expect(rows[0].hotelName).toBe('Existing Athens Hotel');
   });
 
+  it('anchors Availability.price to RoomType.basePrice, not the LLM re-fabricated basePriceEUR', async () => {
+    // Regression: without the anchor, a second LLM call that reuses an
+    // existing RoomType (hotelId_name collision) would write new
+    // Availability rows priced at the LLM's fresh value, diverging from
+    // the canonical RoomType.basePrice set on first create. This
+    // mirrors the roomsAvailable anchor pattern already in place.
+    const { prisma, mocks } = makeMockPrisma();
+    const { source, generateHotelsForCity } = makeMockLlmSource();
+    mocks.hotel.findMany
+      .mockResolvedValueOnce([]) // cache lookup
+      .mockResolvedValueOnce([]) // existing-names for avoid list
+      .mockResolvedValueOnce([]); // re-query
+    mocks.city.findUnique.mockResolvedValueOnce({ id: 1 });
+    // Single hotel, single room type, single night — keeps the assertion tight.
+    generateHotelsForCity.mockResolvedValueOnce({
+      hotels: [
+        {
+          name: 'Syntagma Grand',
+          address: 'Vasilissis Amalias 15, 10557 Athens',
+          stars: 4,
+          rating: 8.7,
+          latitude: 37.9756,
+          longitude: 23.7348,
+          amenities: [],
+          cancellationPolicy: { freeCancellation: true, description: '24h' },
+          roomTypes: [
+            {
+              name: 'Standard Double',
+              maxGuests: 2,
+              beds: 1,
+              basePriceEUR: 150, // LLM's fresh value on this call
+              roomsAvailable: 15,
+            },
+          ],
+        },
+      ],
+    });
+    mocks.hotel.upsert.mockResolvedValue({ id: 999 });
+    // Existing RoomType anchor: basePrice was set to 120 on a prior LLM
+    // call. This upsert (find-or-create) returns the pre-existing row
+    // unchanged — NOT the LLM's fresh 150.
+    mocks.roomType.upsert.mockResolvedValue({
+      id: 888,
+      defaultRoomsAvailable: 20,
+      basePrice: 120,
+    });
+    mocks.availability.upsert.mockResolvedValue({ id: 777 });
+    const repo = new HotelRepository(prisma, source);
+
+    await repo.findAvailable({
+      ...VALID_OPTS,
+      checkinDate: '2026-08-25',
+      checkoutDate: '2026-08-26',
+    });
+
+    expect(mocks.availability.upsert).toHaveBeenCalledTimes(1);
+    const call = mocks.availability.upsert.mock.calls[0][0] as {
+      create: { price: number; roomsAvailable: number };
+    };
+    expect(call.create.price).toBe(120); // anchor, not 150
+    expect(call.create.roomsAvailable).toBe(20); // symmetric anchor
+  });
+
   it('persists CancellationPolicy + HotelAmenity rows for each LLM hotel', async () => {
     // Guards the bug where upsertHotels used to only write Hotel /
     // RoomType / Availability and skip amenities + cancellation —
@@ -299,6 +363,7 @@ describe('HotelRepository.findAvailable', () => {
     mocks.roomType.upsert.mockResolvedValue({
       id: 888,
       defaultRoomsAvailable: 20,
+      basePrice: 145,
     });
     mocks.availability.upsert.mockResolvedValue({ id: 777 });
     // Amenity.findMany resolves the LLM's names to the corresponding

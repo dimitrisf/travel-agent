@@ -320,6 +320,16 @@ export class HotelRepository {
         // - If existed and defaultRoomsAvailable is somehow NULL (seeded RoomType without one) → fall through to LLM's fresh value.
         const capacity = roomType.defaultRoomsAvailable ?? rt.roomsAvailable;
 
+        // Same anchoring rule for nightly price: RoomType.basePrice is
+        // the canonical value set on first create; on later LLM calls
+        // that reuse this RoomType (hotelId_name collision), the LLM
+        // re-fabricates a fresh basePriceEUR — using that here would
+        // let Availability.price drift across separate calls for the
+        // same room (e.g. €120 on 08-20 and €150 on 08-25). basePrice
+        // is non-nullable in the schema, so no fallback is needed —
+        // unlike defaultRoomsAvailable above.
+        const price = roomType.basePrice;
+
         // Upsert Availability rows for each date in the stay's range. Each row is find-or-create, so existing bookings and decrements are preserved.
         for (const date of dates) {
           await this.prisma.availability.upsert({
@@ -328,7 +338,7 @@ export class HotelRepository {
               roomTypeId: roomType.id,
               date,
               roomsAvailable: capacity,
-              price: rt.basePriceEUR,
+              price,
             },
             update: {},
           });
