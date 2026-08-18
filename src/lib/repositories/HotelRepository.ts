@@ -231,7 +231,7 @@ export class HotelRepository {
     const generatedAt = new Date();
 
     for (const offer of hotels) {
-      // E.g., offer = { name: 'Athens Grand Hotel', address: '123 Main St, Athens', stars: 4, rating: 8.5, latitude: 37.9838, longitude: 23.7275, roomTypes: [ { name: 'Standard Double', maxGuests: 2, beds: 1, basePriceEUR: 120, roomsAvailable: 10 }, ... ] }
+      // E.g., offer = { name: 'Athens Grand Hotel', address: '123 Main St, Athens', stars: 4, rating: 8.5, latitude: 37.9838, longitude: 23.7275, amenities: ['Free WiFi', 'Breakfast'], cancellationPolicy: { freeCancellation: true, description: 'Free cancellation up to 24 hours before check-in.' }, roomTypes: [ { name: 'Standard Double', maxGuests: 2, beds: 1, basePriceEUR: 120, roomsAvailable: 10 }, ... ] }
       const hotel = await this.prisma.hotel.upsert({
         where: { cityId_name: { cityId, name: offer.name } },
         create: {
@@ -247,6 +247,47 @@ export class HotelRepository {
         },
         update: {},
       });
+
+      // CancellationPolicy is 1:1 with Hotel (@unique on hotelId).
+      // Find-or-create — never overwrite an existing policy, matching
+      // the same "reuse pre-existing state" contract the rest of
+      // upsertHotels follows for RoomType/Availability. Without this
+      // write, queryDb's freeCancellationRequired filter and the
+      // freeCancellation projection would silently exclude every LLM
+      // hotel on the post-upsert re-query.
+      await this.prisma.cancellationPolicy.upsert({
+        where: { hotelId: hotel.id },
+        create: {
+          hotelId: hotel.id,
+          freeCancellation: offer.cancellationPolicy.freeCancellation,
+          description: offer.cancellationPolicy.description,
+        },
+        update: {},
+      });
+
+      // HotelAmenity join rows. Amenity names come from the fixed
+      // AMENITY_NAMES enum (enforced by the schema), so every Amenity
+      // row is guaranteed to exist in the DB from seed. Look them up
+      // in a single findMany, then upsert one join row per hotel.
+      // Missing Amenity rows are skipped defensively (would only
+      // happen if the DB has been reseeded without the amenity list
+      // in sync).
+      if (offer.amenities.length > 0) {
+        const amenityRows = await this.prisma.amenity.findMany({
+          where: { name: { in: offer.amenities } },
+          select: { id: true },
+        });
+
+        for (const { id: amenityId } of amenityRows) {
+          await this.prisma.hotelAmenity.upsert({
+            where: {
+              hotelId_amenityId: { hotelId: hotel.id, amenityId },
+            },
+            create: { hotelId: hotel.id, amenityId },
+            update: {},
+          });
+        }
+      }
 
       // Upsert each room type for this hotel, then upsert per-date Availability rows for the stay's date range. The Availability.roomsAvailable anchor is either the RoomType.defaultRoomsAvailable (if it exists) or the LLM's fresh value (if not). This preserves canonical capacity across separate LLM calls while still allowing seeded RoomTypes to provide a starting point.
       for (const rt of offer.roomTypes) {

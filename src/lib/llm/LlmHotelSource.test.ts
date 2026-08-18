@@ -28,6 +28,11 @@ const VALID_PARSED_RESPONSE = {
       rating: 8.7,
       latitude: 37.9756,
       longitude: 23.7348,
+      amenities: ['Breakfast', 'Free WiFi', 'Gym', 'Air Conditioning'],
+      cancellationPolicy: {
+        freeCancellation: true,
+        description: 'Free cancellation up to 24 hours before check-in.',
+      },
       roomTypes: [
         { name: 'Standard Double', maxGuests: 2, beds: 1, basePriceEUR: 145, roomsAvailable: 20 },
         { name: 'Deluxe Twin', maxGuests: 2, beds: 2, basePriceEUR: 185, roomsAvailable: 12 },
@@ -40,6 +45,11 @@ const VALID_PARSED_RESPONSE = {
       rating: 9.1,
       latitude: 37.9791,
       longitude: 23.7418,
+      amenities: ['Free WiFi', 'Spa', 'Swimming Pool', 'Breakfast'],
+      cancellationPolicy: {
+        freeCancellation: false,
+        description: 'Non-refundable — cancellations forfeit the full stay cost.',
+      },
       roomTypes: [
         { name: 'Executive King', maxGuests: 2, beds: 1, basePriceEUR: 320, roomsAvailable: 5 },
       ],
@@ -51,6 +61,11 @@ const VALID_PARSED_RESPONSE = {
       rating: 8.2,
       latitude: 37.976,
       longitude: 23.726,
+      amenities: ['Free WiFi', 'Pet Friendly'],
+      cancellationPolicy: {
+        freeCancellation: true,
+        description: 'Free cancellation up to 48 hours before check-in.',
+      },
       roomTypes: [
         { name: 'Standard Double', maxGuests: 2, beds: 1, basePriceEUR: 95, roomsAvailable: 15 },
       ],

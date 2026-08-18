@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { AMENITY_NAMES } from '../amenities';
 
 // The LLM output contract for LlmHotelSource. Simpler than
 // FlightGenerationSchema because hotels aren't constrained to a
@@ -10,6 +11,12 @@ import { z } from 'zod';
 // `existingHotelNames` which is passed to the LLM in the prompt as
 // "avoid these names." The schema itself doesn't enforce this — it's
 // a soft constraint enforced by prompt + post-upsert deduplication.
+//
+// Amenities ARE constrained via z.enum(AMENITY_NAMES). The
+// requiredAmenities filter in HotelRepository joins on Amenity rows
+// that only exist for the seed-known set, so any invented name would
+// silently drop on upsert and the hotel would then fail the filter
+// on the post-upsert re-query — exactly the bug we don't want.
 
 export interface HotelGenerationInput {
   cityName: string;
@@ -51,6 +58,16 @@ const RoomTypeOfferSchema = z.object({
   roomsAvailable: z.number().int().min(1).max(50),
 });
 
+const CancellationPolicyOfferSchema = z.object({
+  // If true, HotelRepository's freeCancellationRequired filter accepts
+  // this hotel. Mix true/false in the prompt so the filter is meaningful.
+  freeCancellation: z.boolean(),
+  // Short human-readable description shown in HotelSearchRow — the
+  // caller may render it verbatim, so keep it plausible ("Free
+  // cancellation up to 24 hours before check-in.", "Non-refundable.").
+  description: z.string().min(10).max(200),
+});
+
 const HotelOfferSchema = z.object({
   // Realistic hotel name for the given city. Prompt instructs to
   // avoid names in `existingHotelNames`; upsert will handle any
@@ -69,6 +86,18 @@ const HotelOfferSchema = z.object({
   longitude: z.number().min(-180).max(180),
   // 1-3 room types per hotel.
   roomTypes: z.array(RoomTypeOfferSchema).min(1).max(3),
+  // Amenities from the fixed set (matches Amenity rows created in
+  // prisma/seed.ts). HotelRepository.upsertHotels resolves these to
+  // HotelAmenity join rows; anything outside the enum would fail
+  // resolution and drop, so keep this as a strict z.enum.
+  amenities: z
+    .array(z.enum(AMENITY_NAMES as unknown as [string, ...string[]]))
+    .min(1)
+    .max(AMENITY_NAMES.length),
+  // Per-hotel cancellation policy. Written as a CancellationPolicy row
+  // (1:1 with Hotel). Without this, HotelRepository's
+  // freeCancellationRequired filter would exclude every LLM hotel.
+  cancellationPolicy: CancellationPolicyOfferSchema,
 });
 
 export const HotelGenerationResponseSchema = z.object({

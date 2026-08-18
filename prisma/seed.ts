@@ -1,5 +1,6 @@
 import 'dotenv/config';
 import { PrismaClient } from '@prisma/client';
+import { AMENITY_NAMES, type AmenityName } from '../src/lib/amenities';
 
 const prisma = new PrismaClient();
 
@@ -243,17 +244,6 @@ const FLIGHT_DEFS: {
   },
 ];
 
-const AMENITIES = [
-  'Breakfast',
-  'Free WiFi',
-  'Swimming Pool',
-  'Pet Friendly',
-  'Parking',
-  'Gym',
-  'Air Conditioning',
-  'Spa',
-] as const;
-
 type RoomSeed = {
   name: string;
   maxGuests: number;
@@ -269,7 +259,7 @@ type HotelSeed = {
   rating: number;
   lat: number;
   lon: number;
-  amenities: (typeof AMENITIES)[number][];
+  amenities: AmenityName[];
   cancellation: { free: boolean; description: string };
   rooms: RoomSeed[];
 };
@@ -735,7 +725,7 @@ async function main() {
 
   console.log('Seeding amenities…');
   const amenityIdByName = new Map<string, number>();
-  for (const name of AMENITIES) {
+  for (const name of AMENITY_NAMES) {
     const row = await prisma.amenity.upsert({
       where: { name },
       update: {},
