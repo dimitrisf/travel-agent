@@ -305,6 +305,20 @@ export class FlightRepository {
       update: {}, // find-or-create; never overwrite existing.
     });
 
+    // FlightDefinition is uniquely keyed on (airlineId, flightNumber) —
+    // route is NOT part of the key. If a pre-existing row (seed or prior
+    // LLM output) has the same airline+flightNumber but a different
+    // route, the upsert above reused it. Attaching a new FlightInstance
+    // would misfile it under the wrong route: the immediate re-query
+    // would miss it, and a future search on the OTHER route would surface
+    // this fabricated instance as if it were a real flight there. Skip.
+    if (
+      flightDefinition.originAirportId !== originAirportId ||
+      flightDefinition.destinationAirportId !== destinationAirportId
+    ) {
+      return;
+    }
+
     await this.prisma.flightInstance.upsert({
       where: {
         flightDefinitionId_departureDatetime: {
