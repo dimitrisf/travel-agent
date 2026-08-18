@@ -1,4 +1,6 @@
 import { PrismaClient } from '@prisma/client';
+import { LlmFlightSource } from './llm/LlmFlightSource';
+import { LlmHotelSource } from './llm/LlmHotelSource';
 import { BookingRepository } from './repositories/BookingRepository';
 import { BookingService } from './services/BookingService';
 import { ConversationRepository } from './repositories/ConversationRepository';
@@ -91,10 +93,7 @@ export {
 // wrappers cover errors we don't own (ZodError) and everything
 // unclassified (UnexpectedError). See utils/apiErrorResponse.ts for
 // the classifier.
-export {
-  ServiceError,
-  type ServiceErrorCode,
-} from './services/ServiceError';
+export { ServiceError, type ServiceErrorCode } from './services/ServiceError';
 export { CodedServiceError } from './services/CodedServiceError';
 export { ZodValidationError } from './services/ZodValidationError';
 export { UnexpectedError } from './services/UnexpectedError';
@@ -134,14 +133,27 @@ export function createWeatherService(prisma?: PrismaClient): WeatherService {
   return new WeatherService(new LiveWeatherRepository({ apiKey }));
 }
 
+// Stage 23 — LLM inventory generation is opt-in via USE_LLM_GENERATION=1.
+// Default off keeps evals, unit tests, and fresh dev installs on the
+// deterministic seeded-only path (no OpenAI dependency at repo layer).
+// When enabled, FlightRepository / HotelRepository fall back to an
+// LlmFlightSource / LlmHotelSource on cache miss and upsert the result
+// into the local DB — see those repo files for the cache-first flow.
+function llmGenerationEnabled(): boolean {
+  return process.env.USE_LLM_GENERATION === '1';
+}
+
 export function createFlightService(prisma?: PrismaClient): FlightService {
   const client = prisma ?? getSharedPrisma();
-  return new FlightService(new FlightRepository(client));
+  const llmSource = llmGenerationEnabled() ? new LlmFlightSource() : undefined;
+
+  return new FlightService(new FlightRepository(client, llmSource));
 }
 
 export function createHotelService(prisma?: PrismaClient): HotelService {
   const client = prisma ?? getSharedPrisma();
-  return new HotelService(new HotelRepository(client));
+  const llmSource = llmGenerationEnabled() ? new LlmHotelSource() : undefined;
+  return new HotelService(new HotelRepository(client, llmSource));
 }
 
 export function createBookingService(prisma?: PrismaClient): BookingService {
@@ -155,4 +167,3 @@ export function createConversationService(
   const client = prisma ?? getSharedPrisma();
   return new ConversationService(new ConversationRepository(client));
 }
-

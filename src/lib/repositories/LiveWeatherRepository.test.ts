@@ -16,29 +16,51 @@ import type { CityMetadata } from '../cities';
 
 describe('qualifyForOwm', () => {
   it('formats country-only entries as "City,Country"', () => {
-    const key: CityMetadata = { country: 'DE', iata: 'BER' };
+    const key: CityMetadata = {
+      country: 'DE',
+      iata: 'BER',
+      center: { latitude: 52.52, longitude: 13.405 },
+    };
     expect(qualifyForOwm('Berlin', key)).toBe('Berlin,DE');
   });
 
   it('formats US-state entries as "City,State,Country"', () => {
-    const key: CityMetadata = { country: 'US', state: 'GA', iata: 'AHN' };
+    const key: CityMetadata = {
+      country: 'US',
+      state: 'GA',
+      iata: 'AHN',
+      center: { latitude: 33.9519, longitude: -83.3576 },
+    };
     expect(qualifyForOwm('Athens', key)).toBe('Athens,GA,US');
   });
 
   it('strips a leading qualified suffix from the city name before joining', () => {
     // Guards against future qualified lookup keys like "Athens, GA"
     // producing malformed output like "Athens, GA,GA,US".
-    const key: CityMetadata = { country: 'US', state: 'GA', iata: 'AHN' };
+    const key: CityMetadata = {
+      country: 'US',
+      state: 'GA',
+      iata: 'AHN',
+      center: { latitude: 33.9519, longitude: -83.3576 },
+    };
     expect(qualifyForOwm('Athens, GA', key)).toBe('Athens,GA,US');
   });
 
   it('handles multi-word city names', () => {
-    const key: CityMetadata = { country: 'US', iata: 'JFK' };
+    const key: CityMetadata = {
+      country: 'US',
+      iata: 'JFK',
+      center: { latitude: 40.7128, longitude: -74.006 },
+    };
     expect(qualifyForOwm('New York', key)).toBe('New York,US');
   });
 
   it('ignores extra fields on the metadata (iata is not part of the OWM query)', () => {
-    const key: CityMetadata = { country: 'JP', iata: 'HND' };
+    const key: CityMetadata = {
+      country: 'JP',
+      iata: 'HND',
+      center: { latitude: 35.6762, longitude: 139.6503 },
+    };
     // iata is present but unused — result is city,country only.
     expect(qualifyForOwm('Tokyo', key)).toBe('Tokyo,JP');
   });

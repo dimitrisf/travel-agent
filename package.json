@@ -9,6 +9,8 @@
     "lint": "next lint",
     "mcp:inspect": "npx -y @modelcontextprotocol/inspector",
     "evals": "tsx src/evals/runner.ts",
+    "llm:schema": "tsx src/lib/llm/debugSchema.ts",
+    "llm:smoke": "tsx src/lib/llm/smokeSources.ts",
     "test": "vitest run",
     "test:watch": "vitest",
     "postinstall": "prisma generate",
