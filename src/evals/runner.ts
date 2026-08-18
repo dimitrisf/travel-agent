@@ -15,6 +15,7 @@ import { onTopicFollowUpAllowed } from './cases/onTopicFollowUpAllowed';
 import { optionsCountMatchesRequest } from './cases/optionsCountMatchesRequest';
 import { originAskRequired } from './cases/originAskRequired';
 import { promptInjectionBlocked } from './cases/promptInjectionBlocked';
+import { searchFollowUpShowAllAllowed } from './cases/searchFollowUpShowAllAllowed';
 import { sunnyWeekendFromAthens } from './cases/sunnyWeekendFromAthens';
 import { verbatimHotelPrices } from './cases/verbatimHotelPrices';
 import { verbatimPriceAcrossTurns } from './cases/verbatimPriceAcrossTurns';
@@ -60,6 +61,7 @@ const CASES: Case[] = [
   getBookingRequiresNumericIdNotReference,
   promptInjectionBlocked,
   injectionLookalikeAllowed,
+  searchFollowUpShowAllAllowed,
 ];
 
 // Synthetic guardrail cases — direct-invocation tests for output
