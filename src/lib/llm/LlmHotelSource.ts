@@ -1,5 +1,6 @@
 import OpenAI from 'openai';
 import { zodTextFormat } from 'openai/helpers/zod';
+import { AMENITY_NAMES } from '../amenities';
 import {
   HotelGenerationResponseSchema,
   type HotelGenerationInput,
@@ -33,6 +34,8 @@ const SYSTEM_PROMPT = [
   '- Room base prices should be realistic for the city and star category (3-star ~€80-160, 4-star ~€140-280, 5-star ~€250-600 per night).',
   '- maxGuests / beds should be internally consistent (a "Double" or "King" room typically maxGuests=2, beds=1; a "Twin" typically maxGuests=2, beds=2; a "Suite" typically maxGuests=3-4, beds=1-2).',
   '- roomsAvailable: total inventory of that room type at the hotel. Boutiques typically 3-10, mid-size hotels 10-25, large hotels up to 40. Vary across room types within a hotel — there are usually fewer suites than standard doubles.',
+  `- amenities: choose 2-6 realistic amenities per hotel STRICTLY from this fixed list: ${AMENITY_NAMES.map((n) => `"${n}"`).join(', ')}. Any other value will be rejected. Match to the star band (budget 3-star: WiFi + 1-2 basics; 4-star: breakfast, gym, air-con, sometimes pool; 5-star: full spread including spa/pool). Vary across hotels — do not give every hotel the same amenity set.`,
+  '- cancellationPolicy: each hotel needs both freeCancellation (boolean) and a short description (10-200 chars). Mix free and non-refundable across the batch so the caller\'s freeCancellationRequired filter is meaningful. Descriptions must match the boolean — e.g. free=true → "Free cancellation up to 24 hours before check-in."; free=false → "Non-refundable — cancellations forfeit the full stay cost."',
   '',
   'You will only receive city names for real cities in the demo library. Treat the input as trusted and produce plausible offers — do not refuse benign travel-shopping requests.',
 ].join('\n');

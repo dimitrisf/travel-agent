@@ -32,6 +32,15 @@ function makeMockPrisma() {
     availability: {
       upsert: vi.fn(),
     },
+    amenity: {
+      findMany: vi.fn().mockResolvedValue([]),
+    },
+    hotelAmenity: {
+      upsert: vi.fn(),
+    },
+    cancellationPolicy: {
+      upsert: vi.fn(),
+    },
   };
   return { prisma: prisma as unknown as PrismaClient, mocks: prisma };
 }
@@ -51,6 +60,11 @@ const VALID_LLM_OUTPUT: HotelGenerationResponse = {
       rating: 8.7,
       latitude: 37.9756,
       longitude: 23.7348,
+      amenities: ['Breakfast', 'Free WiFi', 'Gym', 'Air Conditioning'],
+      cancellationPolicy: {
+        freeCancellation: true,
+        description: 'Free cancellation up to 24 hours before check-in.',
+      },
       roomTypes: [
         {
           name: 'Standard Double',
@@ -68,6 +82,11 @@ const VALID_LLM_OUTPUT: HotelGenerationResponse = {
       rating: 8.2,
       latitude: 37.976,
       longitude: 23.726,
+      amenities: ['Free WiFi', 'Pet Friendly'],
+      cancellationPolicy: {
+        freeCancellation: false,
+        description: 'Non-refundable — cancellations forfeit the full stay cost.',
+      },
       roomTypes: [
         {
           name: 'Standard Double',
@@ -85,6 +104,11 @@ const VALID_LLM_OUTPUT: HotelGenerationResponse = {
       rating: 9.1,
       latitude: 37.9791,
       longitude: 23.7418,
+      amenities: ['Free WiFi', 'Spa', 'Swimming Pool', 'Breakfast'],
+      cancellationPolicy: {
+        freeCancellation: true,
+        description: 'Free cancellation up to 48 hours before check-in.',
+      },
       roomTypes: [
         {
           name: 'Executive King',
@@ -244,9 +268,77 @@ describe('HotelRepository.findAvailable', () => {
     expect(mocks.hotel.upsert).toHaveBeenCalledTimes(3);
     expect(mocks.roomType.upsert).toHaveBeenCalledTimes(3);
     expect(mocks.availability.upsert).toHaveBeenCalledTimes(6);
+    // One CancellationPolicy per LLM hotel, so the freeCancellation
+    // filter and projection on the post-upsert re-query has data.
+    expect(mocks.cancellationPolicy.upsert).toHaveBeenCalledTimes(3);
 
     // Return is the re-query result.
     expect(rows).toHaveLength(1);
     expect(rows[0].hotelName).toBe('Existing Athens Hotel');
+  });
+
+  it('persists CancellationPolicy + HotelAmenity rows for each LLM hotel', async () => {
+    // Guards the bug where upsertHotels used to only write Hotel /
+    // RoomType / Availability and skip amenities + cancellation —
+    // which made the freeCancellationRequired and requiredAmenities
+    // filters on the post-upsert re-query filter out every LLM hotel.
+    const { prisma, mocks } = makeMockPrisma();
+    const { source, generateHotelsForCity } = makeMockLlmSource();
+    mocks.hotel.findMany
+      .mockResolvedValueOnce([]) // cache lookup
+      .mockResolvedValueOnce([]) // existing-names for avoid list
+      .mockResolvedValueOnce([SAMPLE_HOTEL_ROW]); // re-query
+    mocks.city.findUnique.mockResolvedValueOnce({ id: 1 });
+    generateHotelsForCity.mockResolvedValueOnce(VALID_LLM_OUTPUT);
+    // Return a distinct hotel id per upsert call so we can verify the
+    // join rows carry the right hotelId.
+    mocks.hotel.upsert
+      .mockResolvedValueOnce({ id: 101 })
+      .mockResolvedValueOnce({ id: 102 })
+      .mockResolvedValueOnce({ id: 103 });
+    mocks.roomType.upsert.mockResolvedValue({
+      id: 888,
+      defaultRoomsAvailable: 20,
+    });
+    mocks.availability.upsert.mockResolvedValue({ id: 777 });
+    // Amenity.findMany resolves the LLM's names to the corresponding
+    // Amenity rows in the DB — one row per unique name in the offer.
+    mocks.amenity.findMany
+      .mockResolvedValueOnce([{ id: 1 }, { id: 2 }, { id: 3 }, { id: 4 }])
+      .mockResolvedValueOnce([{ id: 2 }, { id: 5 }])
+      .mockResolvedValueOnce([{ id: 2 }, { id: 6 }, { id: 7 }, { id: 1 }]);
+    const repo = new HotelRepository(prisma, source);
+
+    await repo.findAvailable(VALID_OPTS);
+
+    // 3 hotels → 3 cancellation policies with the LLM's booleans/descriptions.
+    expect(mocks.cancellationPolicy.upsert).toHaveBeenCalledTimes(3);
+    const policyCalls = mocks.cancellationPolicy.upsert.mock.calls.map(
+      (c: unknown[]) => c[0] as { where: { hotelId: number }; create: { freeCancellation: boolean; description: string } },
+    );
+    expect(policyCalls[0].where.hotelId).toBe(101);
+    expect(policyCalls[0].create.freeCancellation).toBe(true);
+    expect(policyCalls[1].where.hotelId).toBe(102);
+    expect(policyCalls[1].create.freeCancellation).toBe(false);
+    expect(policyCalls[2].where.hotelId).toBe(103);
+    expect(policyCalls[2].create.freeCancellation).toBe(true);
+
+    // HotelAmenity join rows: 4 + 2 + 4 = 10 (matches Amenity.findMany results).
+    expect(mocks.amenity.findMany).toHaveBeenCalledTimes(3);
+    expect(mocks.hotelAmenity.upsert).toHaveBeenCalledTimes(10);
+    // Amenity.findMany is called with the LLM's amenity names for each hotel.
+    const amenityLookups = mocks.amenity.findMany.mock.calls.map(
+      (c: unknown[]) => c[0] as { where: { name: { in: string[] } } },
+    );
+    expect(amenityLookups[0].where.name.in).toEqual([
+      'Breakfast',
+      'Free WiFi',
+      'Gym',
+      'Air Conditioning',
+    ]);
+    expect(amenityLookups[1].where.name.in).toEqual([
+      'Free WiFi',
+      'Pet Friendly',
+    ]);
   });
 });
