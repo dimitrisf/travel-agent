@@ -197,6 +197,18 @@ model RoomType {
   externalSource String?   @default("seed")
   generatedAt    DateTime?
 
+  // Stage 23 — canonical capacity for LLM-generated RoomTypes.
+  // Populated once from RoomTypeOfferSchema.roomsAvailable at creation
+  // and never overwritten thereafter. When HotelRepository extends
+  // Availability to new date ranges (PR #2b Option Y), it reads this
+  // value so the same RoomType doesn't drift to different capacities
+  // across separate LLM calls (the LLM re-fabricates numbers per call
+  // — 20 rooms today, 30 next week, 100 next month — without an
+  // anchor). Parallel to RoomType.basePrice as the template that
+  // Availability.price is derived from. NULL for seeded rows —
+  // seeded data has consistent per-date Availability by construction.
+  defaultRoomsAvailable Int?
+
   @@unique([hotelId, name])
   @@index([externalSource])
 }
