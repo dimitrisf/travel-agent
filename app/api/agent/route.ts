@@ -17,6 +17,7 @@ import { getDefaultAppBase } from '@/utils/appBase';
 import { stripGuardrailNoticesFromHistory } from '@/utils/guardrailNotice';
 import { toSseFrame } from '@/utils/toSseFrame';
 import { userFacingGuardrailErrorMessage } from '@/utils/userFacingGuardrailErrorMessage';
+import { sanitizeAgentError } from '@/utils/sanitizeAgentError';
 
 export const runtime = 'nodejs';
 // This route is a streaming endpoint, so we force dynamic to avoid caching issues
@@ -340,11 +341,16 @@ export async function POST(req: NextRequest) {
             history: [...history, ...persistedItems],
           });
         } else {
-          // Unexpected error — let the stream fail and log it, but don't return a 500 to the client. The client will see the stream close and can retry. We rethrow the error so it gets logged by Next.js.
+          // Unexpected error — log the raw error server-side (with full
+          // detail for debugging) and send a sanitized generic message
+          // to the client. Never surface `err.message` verbatim: it can
+          // contain provider-specific internals (masked API key fragments,
+          // status codes, docs URLs) that leaked into the UI in Stage 23's
+          // E1 test with a corrupted OPENAI_API_KEY.
           console.error('[api/agent] error:', err);
           send({
             type: 'error',
-            message: userFacingGuardrailErrorMessage(err),
+            message: sanitizeAgentError(),
           });
         }
       } finally {
