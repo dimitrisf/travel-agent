@@ -42,7 +42,7 @@ export function Header() {
       <Toolbar>
         <Typography
           variant="h6"
-          component={Link}
+          component="a"
           href="/"
           sx={{
             flexGrow: 1,
@@ -75,7 +75,7 @@ function SignedInControls() {
   return (
     <Stack direction="row" spacing={1} alignItems="center">
       <Button
-        component={Link}
+        component="a"
         href="/"
         size="small"
         startIcon={<AddIcon />}
