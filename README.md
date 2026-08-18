@@ -3305,6 +3305,122 @@ Verified across all three persistence paths: live SSE, DB refresh, `sessionStora
 
 **New / modified files (follow-ups).** New: [src/utils/toSseFrame.ts](src/utils/toSseFrame.ts) + test (pure SDK-event → SSE-frame converter, extracted from `route.ts`); [src/utils/buildGuardrailBlockedItems.ts](src/utils/buildGuardrailBlockedItems.ts) + test (pure item builder for guardrail-blocked persistence); [src/utils/guardrailNotice.ts](src/utils/guardrailNotice.ts) + test (custom `AgentInputItem` shape + strip helper for the SDK invariant); [src/evals/synthetic/hotelSubtotalQuoteAllowed.ts](src/evals/synthetic/hotelSubtotalQuoteAllowed.ts), [flightSubtotalQuoteAllowed.ts](src/evals/synthetic/flightSubtotalQuoteAllowed.ts), [flightAggregateQuoteAllowed.ts](src/evals/synthetic/flightAggregateQuoteAllowed.ts) (regression evals for the guardrail fixes); [.githooks/pre-commit](.githooks/pre-commit); [.gitattributes](.gitattributes). Modified: [src/guardrails/bookingCrossReferenceOutputGuardrail.ts](src/guardrails/bookingCrossReferenceOutputGuardrail.ts) (walks booking tree; recognizes derived aggregates); [src/utils/hydrateChatMessages.ts](src/utils/hydrateChatMessages.ts) (`guardrail_notice` branch; extracted helpers); [src/hooks/useAgentChat.ts](src/hooks/useAgentChat.ts) (extracted `applyEvent` handlers; `setHistory` on guardrail; `adoptConversationId` helper); [src/types/stream.ts](src/types/stream.ts) (`guardrail_blocked` gains `conversationId` and `history` fields); [app/api/agent/route.ts](app/api/agent/route.ts) (guardrail-tripped persistence; `guardrail_notice` strip; `toSseFrame` extraction; frame carries history); README (Quick start hook config).
 
+### Stage 23 — LLM-generated flight + hotel inventory
+
+*Note: this section shares its number with the earlier "Stage 23 — Unit tests (Phase 1/2)" sections above — both were labelled Stage 23 during their respective work windows. Content is different; they're independent features.*
+
+Seed data covers 5 cities and a handful of routes. Any search outside that scope (Athens → Reykjavik, Tokyo hotels next November) returned empty and the agent had to tell the user "no results" — even for perfectly reasonable requests. This stage adds an on-demand LLM inventory generator that fires on cache miss, upserts the result into the local DB, and re-queries. Gated behind `USE_LLM_GENERATION=1` — default off keeps evals + fresh dev installs deterministic.
+
+Shipped across two PRs: **#20** added dormant provenance columns (`externalSource` + `generatedAt` on `FlightDefinition`, `FlightInstance`, `Hotel`, `RoomType`); **#21** added the LLM sources, cache-first repositories, the `RoomType.defaultRoomsAvailable` anchor migration, integration tests, and the env-toggle wiring.
+
+#### The gap: seeded coverage
+
+Seed data is fixed at prep time: 5 cities (Athens, Berlin, London, Tokyo, New York), a handful of routes between them, per-date flight/hotel/availability rows for a ~2 week window ahead of the seed run. Any search outside those axes (unseeded route, unseeded city, date range past the seed window) short-circuits to "no results." Seeding more was rejected: seed size grows quadratically with cities × dates, and hardcoding "realistic" airline schedules for every route is prompt tuning of the worst kind (in code, not in the model).
+
+The fix: keep seed data as-is for regression + eval determinism, but on cache miss let an LLM fabricate plausible offers on demand and persist them. Subsequent searches for the same route/date/city hit the DB and skip the LLM entirely — cost and latency stay bounded to the first search per new query dimension.
+
+#### Design: cache-first repositories with LLM fallback
+
+`FlightRepository.findInstances` and `HotelRepository.findAvailable` gain an optional `LlmFlightSource` / `LlmHotelSource` injected via constructor. Flow:
+
+1. Query DB for matching rows (existing pre-Stage-23 behavior).
+2. If rows exist OR no LLM source injected → return the DB result (early exit, no LLM cost).
+3. Scope B guard: verify both airports / the city are seeded (see below).
+4. Ask the LLM source for offers.
+5. Upsert each offer via `upsert with update: {}` (find-or-create).
+6. Re-run step 1 — newly-upserted rows now show up, and any pre-existing rows join them in a single JOIN-projected result.
+
+The re-query is one extra DB round-trip. The alternative — transforming LLM output into the same projection shape inline — would duplicate the queryDb JOIN + filter logic. Not worth the complexity at demo scale.
+
+#### Why OpenAI Responses API + structured outputs
+
+`client.responses.parse` + `zodTextFormat(schema, name)` from `openai/helpers/zod`. The API guarantees the response conforms to a JSON Schema derived from the Zod schema — invalid tokens are filtered during generation (constrained decoding), so `output_parsed` is either exactly the shape we asked for or `null`. No post-hoc `zod.safeParse()`, no "the LLM returned free-form JSON that mostly parses" fragility.
+
+Chose Responses over `client.beta.chat.completions.parse` for consistency: this repo is a Responses learning journey, `@openai/agents` is Responses-based, and Responses is what current OpenAI docs recommend for new projects. The `.beta` on chat completions was another sign — kept moving.
+
+Rejected alternatives:
+
+- **Free-form JSON prompt + Zod validation post-hoc.** Works but leaks the model's occasional malformed output up the stack. Constrained decoding does this at the token level instead.
+- **Amadeus / Duffel real APIs.** Explored: Amadeus's self-service portal was decommissioned in July 2026; Duffel's test mode covers airlines only, no hotels. Neither fit a demo built around free-tier infrastructure. LLM-generated data is a plausible-enough stand-in with zero third-party signup.
+
+Model default: `gpt-4o-mini` (cheap, structured-outputs works well). Overridable via constructor options. Observed against the live API: ~3 s latency per generation, ~$0.002 per call.
+
+#### Scope B: per-call Zod schemas constrain the LLM to seeded airports/cities
+
+Constraint: the LLM must not invent airport codes, airline codes, or cities the DB doesn't know about. Otherwise its output can't join back to the seeded reference tables and the upsert chain breaks.
+
+For flights this is handled by building the Zod schema **per call**: `airlineIata: z.enum(allowedAirlineIatas)` where `allowedAirlineIatas` is fetched from the DB right before the LLM call. Constrained decoding enforces this at the token level — the model literally cannot produce an unknown airline code. `FlightRepository` also fetches origin + destination airports before calling the LLM; if either is unseeded, the LLM path short-circuits.
+
+For hotels, the city itself is the constraint (a fresh city has no seeded `Airport` for the LLM to invent flights between anyway). `HotelRepository` checks the city is present in the `CITIES` demo library AND in the DB before calling the LLM. Unknown city → short-circuit, agent gets an empty result and reports "not covered."
+
+Cities gained a required `center: { latitude, longitude }` field to give `LlmHotelSource` a location anchor — airports are 10-30 km outside the city and the wrong anchor for hotel geography. The system prompt asks the LLM for coords within ~5 km of the given center.
+
+#### The drift problem: `RoomType.defaultRoomsAvailable` anchor
+
+Bare LLM output is not idempotent. Ask for Berlin hotels twice for different date ranges and each call fabricates fresh numbers: "Kaiserhof Berlin has 20 Standard Doubles" one call, "30" the next, "100" the third. Persisting whatever the last call said would drift the DB to absurd values and break bookings.
+
+New column `RoomType.defaultRoomsAvailable Int?` (migration `20260815222654_add_room_type_default_capacity`) is the anchor. Populated once when the RoomType is first created from an LLM response, then every subsequent LLM call for the same hotel finds the existing RoomType via composite unique key `(hotelId, name)`, the upsert becomes a find-or-create no-op, and the anchor is preserved untouched. Per-date `Availability.roomsAvailable` seeds from the anchor, not from the fresh LLM value.
+
+Bookings decrement `Availability.roomsAvailable` atomically via `BookingService`'s compare-and-swap `updateMany` pattern — independent per date, immune to LLM re-calls.
+
+#### Upsert semantics: find-or-create everywhere
+
+Every LLM-generated write uses `prisma.model.upsert({ where: <composite unique>, create: {...}, update: {} })`. The empty `update: {}` is the whole point — if the row already exists, do nothing. Never overwrite:
+
+- Bookings' decrements on `Availability.roomsAvailable`.
+- The `defaultRoomsAvailable` anchor on `RoomType`.
+- Any seeded row that happens to share a composite unique key with the LLM's fabricated output.
+
+Composite keys are Prisma's auto-generated ones (fields joined with underscores in declaration order): `airlineId_flightNumber` on `FlightDefinition`, `flightDefinitionId_departureDatetime` on `FlightInstance`, `cityId_name` on `Hotel`, `hotelId_name` on `RoomType`, `roomTypeId_date` on `Availability`.
+
+Provenance columns `externalSource` (`'llm'` for LLM writes, `'seed'` for seeded rows, NULL otherwise) + `generatedAt` timestamp landed in Phase 1 (PR #20) and get populated on the create branch only. A single `const generatedAt = new Date()` per upsert batch means all rows from one LLM call share an identical timestamp — makes "which LLM call produced this?" trivially answerable via `GROUP BY generatedAt`.
+
+#### `USE_LLM_GENERATION` toggle
+
+`createFlightService` / `createHotelService` wire an `LlmFlightSource` / `LlmHotelSource` only when `process.env.USE_LLM_GENERATION === '1'`. Default off. Rationale:
+
+- **Evals stay deterministic.** The eval suite runs against seeded data — introducing an LLM call in the flight/hotel search path would make every eval nondeterministic and expensive.
+- **Fresh dev installs work without a repo-layer OpenAI dependency.** The top-level agent still needs `OPENAI_API_KEY`; the repositories don't.
+- **Cost is opt-in.** Anyone cloning the repo doesn't get a surprise ~$0.002-per-search bill.
+
+Two dev-only utility scripts help with iteration:
+
+- `npm run llm:schema` — prints the JSON Schema that OpenAI actually receives (via `zodTextFormat`), useful for debugging Zod-to-JSON-Schema translation surprises.
+- `npm run llm:smoke` — hits the real API with sample inputs (ATH→BER flights + Athens hotels), verifies end-to-end wiring works, ~$0.002 per run.
+
+#### Live-testing outcomes
+
+Six-part live test plan against the real OpenAI API + real Neon Postgres. All passed:
+
+| Part | Target | Outcome |
+|---|---|---|
+| R (regression, 3 tests) | Seeded flight/hotel search + booking flow unchanged with `USE_LLM_GENERATION` unset | ✅ Pre-Stage-23 behavior intact |
+| L (LLM path, 7 tests) | Cache-miss fires LLM; cache-hit skips it; Scope B guards block unknown airports/cities; `existingHotelNames` prompt-constraint prevents name collisions across date ranges | ✅ All 7 |
+| B (booking, 4 tests) | Booking flow works against LLM-generated rows; atomic decrements target only booked (row, date) | ✅ Verified against Mitte Boutique double-booking — 2× decrement applied correctly, zero bleed to other rows |
+| V (DB state, 5 SQL queries) | `externalSource` + `generatedAt` populated correctly; `defaultRoomsAvailable` set on every LLM RoomType; L3 hotels' `generatedAt` untouched after L5's upsert | ✅ 30/32 Availability rows undecremented, 2 correctly decremented by 2 |
+| E1 (fail-open) | Corrupted `OPENAI_API_KEY`; server stays up; guardrail classifiers fail-open | ✅ Server did not crash; guardrails logged 401s and passed messages through; top-level agent surfaced raw 401 to UI (see backlog) |
+| E2, E3 (skipped) | Empty airlines table; concurrent upsert race | Destructive/fiddly; already covered by unit tests; low ROI for live testing |
+
+One **non-issue** surfaced: LLM generated 5 flight offers for HND→JFK, but the agent's response summarized only 3. Initially looked like a filter bug. DB inspection confirmed all 5 rows correctly persisted; the agent was condensing its own summary. Documented in backlog.
+
+#### Backlog items surfaced during live testing
+
+Not Stage 23 blockers — real issues live testing exposed. Filed for future work:
+
+- **Agent condenses tool-result lists.** Flights (5→3) and hotels (8→3) both shown fewer options than the tool returned. Fix: agent system prompt should include "always present every option the tool returned; if condensing, name the count you dropped." Phase 8 prompt-tuning scope.
+- **Jailbreak classifier false-positives on "show me all / don't skip any."** Legitimate search-result follow-ups were blocked as instruction-override attempts. The classifier evaluates messages statelessly; it can't see that "show all" is a natural continuation of a search-result presentation. Fix: add a search-result-context carve-out to the classifier prompt. Guardrails PR scope.
+- **UI leaks raw agent errors.** When the top-level agent throws (E1's corrupted API key), the raw 401 message — including a partially-masked API key fragment — flows to the chat UI. Should catch and render "sorry, temporarily unavailable" instead. UX-polish PR scope.
+- **New Conversation button broken.** Discovered during B2 setup. Click handler is not firing; workaround was hard-refresh. Pre-existing, unrelated to Stage 23.
+- **No UI test coverage.** Related to the button bug: zero tests exercise the client-side surface (buttons, session handling, message rendering). All existing tests are backend-only. RTL + jsdom setup would catch this class of silent regression. Deferred to a UI-tests PR.
+
+#### File index
+
+New: [`src/lib/llm/flightGenerationSchema.ts`](src/lib/llm/flightGenerationSchema.ts) and [`hotelGenerationSchema.ts`](src/lib/llm/hotelGenerationSchema.ts) (Zod schemas; flight schema built per-call for the airline `z.enum`); [`src/lib/llm/LlmFlightSource.ts`](src/lib/llm/LlmFlightSource.ts) + [`.test.ts`](src/lib/llm/LlmFlightSource.test.ts) and [`LlmHotelSource.ts`](src/lib/llm/LlmHotelSource.ts) + [`.test.ts`](src/lib/llm/LlmHotelSource.test.ts) (source classes with mocked-client tests, options-object constructors); [`src/lib/llm/debugSchema.ts`](src/lib/llm/debugSchema.ts) + [`.test.ts`](src/lib/llm/debugSchema.test.ts) (`npm run llm:schema` dev utility); [`src/lib/llm/smokeSources.ts`](src/lib/llm/smokeSources.ts) (`npm run llm:smoke` dev utility, ~$0.002 per run); [`src/lib/repositories/FlightRepository.test.ts`](src/lib/repositories/FlightRepository.test.ts) and [`HotelRepository.test.ts`](src/lib/repositories/HotelRepository.test.ts) (integration tests with mocked Prisma + mocked LlmSource, 6 tests each); [`prisma/migrations/20260815222654_add_room_type_default_capacity/migration.sql`](prisma/migrations/20260815222654_add_room_type_default_capacity/migration.sql).
+
+Modified: [`prisma/schema.prisma`](prisma/schema.prisma) (`RoomType.defaultRoomsAvailable Int?`); [`src/lib/repositories/FlightRepository.ts`](src/lib/repositories/FlightRepository.ts) and [`HotelRepository.ts`](src/lib/repositories/HotelRepository.ts) (cache-first flow + upsert); [`src/lib/index.ts`](src/lib/index.ts) (`USE_LLM_GENERATION` env toggle + factory wiring + LlmSource re-exports); [`src/lib/cities.ts`](src/lib/cities.ts) (required `center` coord field); [`src/lib/repositories/LiveWeatherRepository.test.ts`](src/lib/repositories/LiveWeatherRepository.test.ts) (5 fixtures updated for new `center` field); [`package.json`](package.json) (`llm:schema` + `llm:smoke` scripts).
+
+Test totals after this stage: **188 tests across 25 files, ~1.9 s cold runtime**. All pass; `npx tsc --noEmit` clean.
+
 ---
 
 > **Note on the historical Stage narratives above:** file paths in Stages 1–7 reflect the layout at the time each stage was written. Where those don't match the current file tree, the [file index](#file-index) at the bottom of this doc is authoritative.
