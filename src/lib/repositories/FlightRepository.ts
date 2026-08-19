@@ -159,29 +159,33 @@ export class FlightRepository {
     // E.g, airlineByIata = Map { 'A3' => { id: 1, iataCode: 'A3', name: 'Aegean Airlines' }, 'LH' => { id: 2, iataCode: 'LH', name: 'Lufthansa' }, 'BA' => { id: 3, iataCode: 'BA', name: 'British Airways' }, ... }
     const airlineByIata = new Map(airlines.map((a) => [a.iataCode, a]));
 
-    for (const offer of result.flights) {
-      // E.g., offer = { airlineIata: 'A3', flightNumber: '824',  departureTimeHHMM: '07:15', durationMinutes: 165, basePriceEUR: 145, stops: 0, aircraft: 'A320', seatsAvailable: 42 }
-      // Extend LlmFlightSource's fail-open contract (see that class's
-      // header) to persistence: an isolated Prisma failure on one offer
-      // (connection blip, statement timeout, FK race, etc.) must not
-      // sink the whole search. Log and skip — surviving offers still
-      // land, and the caller gets whatever the post-upsert re-query
-      // finds instead of an INTERNAL_ERROR.
-      try {
-        await this.upsertOffer({
-          offer,
-          airlineId: airlineByIata.get(offer.airlineIata)!.id,
-          originAirportId: origin.id,
-          destinationAirportId: destination.id,
-          departureDate: opts.departureDate,
-        });
-      } catch (err) {
-        console.error(
-          `[FlightRepository] upsert failed for ${offer.airlineIata} ${offer.flightNumber} on ${opts.originIata}→${opts.destinationIata} ${opts.departureDate}:`,
-          err,
-        );
-      }
-    }
+    // Fire per-offer upserts in parallel — each offer targets a
+    // distinct (airlineId, flightNumber) FlightDefinition and a
+    // distinct (flightDefinitionId, departureDatetime) FlightInstance,
+    // so there is no cross-offer contention. Runs inside a
+    // user-visible cache-miss path where LLM latency already dominates;
+    // serial per-offer round-trips add avoidable milliseconds.
+    // Per-offer try/catch preserves the fail-open contract: an isolated
+    // Prisma failure on one offer must not sink the whole search.
+    await Promise.all(
+      result.flights.map(async (offer) => {
+        // E.g., offer = { airlineIata: 'A3', flightNumber: '824', departureTimeHHMM: '07:15', durationMinutes: 165, basePriceEUR: 145, stops: 0, aircraft: 'A320', seatsAvailable: 42 }
+        try {
+          await this.upsertOffer({
+            offer,
+            airlineId: airlineByIata.get(offer.airlineIata)!.id,
+            originAirportId: origin.id,
+            destinationAirportId: destination.id,
+            departureDate: opts.departureDate,
+          });
+        } catch (err) {
+          console.error(
+            `[FlightRepository] upsert failed for ${offer.airlineIata} ${offer.flightNumber} on ${opts.originIata}→${opts.destinationIata} ${opts.departureDate}:`,
+            err,
+          );
+        }
+      }),
+    );
 
     // Re-query so the newly-upserted rows join any prior dbRows rows,
     // and so the return shape (JOIN-projected FlightSearchRow) is
