@@ -68,6 +68,17 @@ export class HotelRepository {
     const dbRows = await this.queryDb(opts);
     if (dbRows.length > 0 || !this.llmSource) return dbRows;
 
+    // dbRows may be empty because the user's optional filters
+    // (minStars, maxPricePerNight, requiredAmenities,
+    // freeCancellationRequired) excluded every cached row — NOT because
+    // this (city, dateRange, guests) has never been generated. Firing
+    // the LLM again in that case burns tokens/latency on every filter
+    // combination for a city+range that is already fully populated.
+    // Check for any cached Availability that matches the LLM's own
+    // generation tuple (city, date range, guests) first; if one exists,
+    // return the filtered dbRows unchanged.
+    if (await this.hasCityDateCoverage(opts)) return dbRows;
+
     // DB miss + LLM fallback wired. Scope B: only proceed if the
     // city is one of the demo library's known cities (we need center
     // coords to give the LLM a location anchor).
@@ -114,6 +125,31 @@ export class HotelRepository {
 
     // Re-query the DB after the upsert to return the final results. This ensures that we return the canonical data from the DB, including any adjustments made during the upsert process (e.g., availability, pricing).
     return this.queryDb(opts);
+  }
+
+  // Cache-population probe: is there any Availability at all for a
+  // RoomType with enough capacity for `opts.guests` in this city,
+  // within the requested date range? Deliberately ignores minStars /
+  // maxPricePerNight / requiredAmenities / freeCancellationRequired —
+  // those are user-preference filters, not signals that the LLM has
+  // yet to be called for the (city, dateRange, guests) tuple.
+  private async hasCityDateCoverage(
+    opts: HotelSearchOptions,
+  ): Promise<boolean> {
+    const checkin = new Date(`${opts.checkinDate}T00:00:00.000Z`);
+    const checkout = new Date(`${opts.checkoutDate}T00:00:00.000Z`);
+
+    const count = await this.prisma.availability.count({
+      where: {
+        date: { gte: checkin, lt: checkout },
+        roomType: {
+          maxGuests: { gte: opts.guests },
+          hotel: { city: { name: opts.cityName } },
+        },
+      },
+    });
+
+    return count > 0;
   }
 
   // Existing DB query — unchanged behavior, extracted so findAvailable

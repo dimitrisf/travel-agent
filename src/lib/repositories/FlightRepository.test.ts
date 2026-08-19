@@ -24,6 +24,7 @@ function makeMockPrisma() {
     flightInstance: {
       findMany: vi.fn(),
       upsert: vi.fn(),
+      count: vi.fn(),
     },
     airport: {
       findUnique: vi.fn(),
@@ -147,6 +148,7 @@ describe('FlightRepository.findInstances', () => {
     const { prisma, mocks } = makeMockPrisma();
     const { source, generateFlightsForRoute } = makeMockLlmSource();
     mocks.flightInstance.findMany.mockResolvedValueOnce([]);
+    mocks.flightInstance.count.mockResolvedValueOnce(0); // no cache coverage → LLM path
     // Origin missing.
     mocks.airport.findUnique
       .mockResolvedValueOnce(null)
@@ -163,6 +165,7 @@ describe('FlightRepository.findInstances', () => {
     const { prisma, mocks } = makeMockPrisma();
     const { source, generateFlightsForRoute } = makeMockLlmSource();
     mocks.flightInstance.findMany.mockResolvedValueOnce([]);
+    mocks.flightInstance.count.mockResolvedValueOnce(0);
     mocks.airport.findUnique
       .mockResolvedValueOnce({
         id: 1,
@@ -187,6 +190,29 @@ describe('FlightRepository.findInstances', () => {
     expect(mocks.flightDefinition.upsert).not.toHaveBeenCalled();
   });
 
+  it('does not call LLM when (route, date) is already cached but the user filters excluded every row', async () => {
+    // Regression: dbRows is post-filter. A prior LLM call may have
+    // populated ATH→BER on 2026-08-20 with only stops=1 offers; a
+    // follow-up query with nonstopOnly=true would filter all of them
+    // out. Without a filter-independent coverage check, that miss
+    // would re-fire the LLM on every distinct filter combination.
+    const { prisma, mocks } = makeMockPrisma();
+    const { source, generateFlightsForRoute } = makeMockLlmSource();
+    mocks.flightInstance.findMany.mockResolvedValueOnce([]); // filtered miss
+    mocks.flightInstance.count.mockResolvedValueOnce(4); // route/date IS populated
+    const repo = new FlightRepository(prisma, source);
+
+    const rows = await repo.findInstances({
+      ...VALID_OPTS,
+      nonstopOnly: true,
+      airlineCodes: ['A3'],
+    });
+
+    expect(rows).toEqual([]);
+    expect(generateFlightsForRoute).not.toHaveBeenCalled();
+    expect(mocks.airport.findUnique).not.toHaveBeenCalled();
+  });
+
   it('skips FlightInstance upsert when an existing FlightDefinition on that (airline, flightNumber) is for a different route', async () => {
     // Regression: FlightDefinition.@@unique is (airlineId, flightNumber) —
     // route is NOT part of the key. If seed (or a prior LLM call) has
@@ -200,6 +226,7 @@ describe('FlightRepository.findInstances', () => {
     mocks.flightInstance.findMany
       .mockResolvedValueOnce([])
       .mockResolvedValueOnce([]);
+    mocks.flightInstance.count.mockResolvedValueOnce(0);
     mocks.airport.findUnique
       .mockResolvedValueOnce({
         id: 1,
@@ -253,6 +280,7 @@ describe('FlightRepository.findInstances', () => {
     mocks.flightInstance.findMany
       .mockResolvedValueOnce([])
       .mockResolvedValueOnce([SAMPLE_FLIGHT_ROW]);
+    mocks.flightInstance.count.mockResolvedValueOnce(0);
     mocks.airport.findUnique
       .mockResolvedValueOnce({
         id: 1,

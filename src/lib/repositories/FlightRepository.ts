@@ -69,6 +69,18 @@ export class FlightRepository {
     const dbRows = await this.queryDb(opts);
     if (dbRows.length > 0 || !this.llmSource) return dbRows;
 
+    // At this point, we have a DB miss AND an LLM fallback is wired.
+
+    // dbRows may be empty because the user's optional filters
+    // (nonstopOnly, airlineCodes) excluded every cached row — NOT
+    // because this (route, date) has never been generated. Firing
+    // the LLM again in that case burns tokens/latency on every filter
+    // combination for a route that is already fully populated. Check
+    // for any cached FlightInstance on this (route, date) first,
+    // ignoring the filter fields; if one exists, return the filtered
+    // dbRows unchanged.
+    if (await this.hasRouteDateCoverage(opts)) return dbRows;
+
     // DB miss + LLM fallback wired. Only proceed if BOTH airports
     // are seeded — Scope B constrains generation to routes between
     // existing airports (LLM must not invent airports / cities).
@@ -158,6 +170,32 @@ export class FlightRepository {
     // 2. Newly upserted rows join any pre-existing cached rows in a single query — the user sees a coherent result.
     // Cost: one extra DB round-trip. Trivial at demo scale.
     return this.queryDb(opts);
+  }
+
+  // Cache-population probe: is there any FlightInstance at all on this
+  // (originIata, destinationIata, departureDate)? Deliberately ignores
+  // nonstopOnly / airlineCodes — those are user-preference filters, not
+  // signals that the LLM has yet to be called for the route.
+  private async hasRouteDateCoverage(
+    opts: FlightSearchOptions,
+  ): Promise<boolean> {
+    const dayStart = new Date(`${opts.departureDate}T00:00:00.000Z`);
+    const dayEnd = new Date(dayStart.getTime() + 24 * 60 * 60_000);
+
+    // Count any FlightInstance on this (route, date) — ignore the user's optional filters (nonstopOnly, airlineCodes) because those are user-preference filters, not signals that the LLM has yet to be called for the route.
+    // If count > 0, the LLM has already been called for this route/date and the DB is populated; return true so findInstances returns the filtered dbRows unchanged.
+    // If count = 0, the LLM has never been called for this route/date; return false so findInstances calls the LLM to generate offers.
+    const count = await this.prisma.flightInstance.count({
+      where: {
+        departureDatetime: { gte: dayStart, lt: dayEnd },
+        flightDefinition: {
+          originAirport: { iataCode: opts.originIata },
+          destinationAirport: { iataCode: opts.destinationIata },
+        },
+      },
+    });
+
+    return count > 0;
   }
 
   // Existing DB query — unchanged behavior. Extracted so findInstances

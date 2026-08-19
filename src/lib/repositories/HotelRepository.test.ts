@@ -31,6 +31,7 @@ function makeMockPrisma() {
     },
     availability: {
       upsert: vi.fn(),
+      count: vi.fn(),
     },
     amenity: {
       findMany: vi.fn().mockResolvedValue([]),
@@ -200,6 +201,7 @@ describe('HotelRepository.findAvailable', () => {
     const { prisma, mocks } = makeMockPrisma();
     const { source, generateHotelsForCity } = makeMockLlmSource();
     mocks.hotel.findMany.mockResolvedValueOnce([]);
+    mocks.availability.count.mockResolvedValueOnce(0); // no cache coverage → falls through to Scope B
     const repo = new HotelRepository(prisma, source);
 
     const rows = await repo.findAvailable({
@@ -217,6 +219,7 @@ describe('HotelRepository.findAvailable', () => {
     const { prisma, mocks } = makeMockPrisma();
     const { source, generateHotelsForCity } = makeMockLlmSource();
     mocks.hotel.findMany.mockResolvedValueOnce([]);
+    mocks.availability.count.mockResolvedValueOnce(0);
     mocks.city.findUnique.mockResolvedValueOnce({ id: 1 });
     mocks.hotel.findMany.mockResolvedValueOnce([]); // existing-names query
     generateHotelsForCity.mockResolvedValueOnce(null);
@@ -238,6 +241,7 @@ describe('HotelRepository.findAvailable', () => {
       .mockResolvedValueOnce([]) // cache lookup
       .mockResolvedValueOnce([]) // existing-names for avoid list
       .mockResolvedValueOnce([SAMPLE_HOTEL_ROW]); // re-query
+    mocks.availability.count.mockResolvedValueOnce(0);
     mocks.city.findUnique.mockResolvedValueOnce({ id: 1 });
     generateHotelsForCity.mockResolvedValueOnce(VALID_LLM_OUTPUT);
     mocks.hotel.upsert.mockResolvedValue({ id: 999 });
@@ -278,6 +282,31 @@ describe('HotelRepository.findAvailable', () => {
     expect(rows[0].hotelName).toBe('Existing Athens Hotel');
   });
 
+  it('does not call LLM when (city, dateRange, guests) is already cached but the user filters excluded every row', async () => {
+    // Regression: dbRows is post-filter. A prior LLM call may have
+    // populated Athens 2026-08-20..22 with 3-star hotels only; a
+    // follow-up query with minStars=5 would filter all of them out.
+    // Without a filter-independent coverage check, that miss would
+    // re-fire the LLM on every distinct filter combination.
+    const { prisma, mocks } = makeMockPrisma();
+    const { source, generateHotelsForCity } = makeMockLlmSource();
+    mocks.hotel.findMany.mockResolvedValueOnce([]); // filtered miss
+    mocks.availability.count.mockResolvedValueOnce(6); // city+range IS populated
+    const repo = new HotelRepository(prisma, source);
+
+    const rows = await repo.findAvailable({
+      ...VALID_OPTS,
+      minStars: 5,
+      maxPricePerNight: 100,
+      requiredAmenities: ['Spa'],
+      freeCancellationRequired: true,
+    });
+
+    expect(rows).toEqual([]);
+    expect(generateHotelsForCity).not.toHaveBeenCalled();
+    expect(mocks.city.findUnique).not.toHaveBeenCalled();
+  });
+
   it('anchors Availability.price to RoomType.basePrice, not the LLM re-fabricated basePriceEUR', async () => {
     // Regression: without the anchor, a second LLM call that reuses an
     // existing RoomType (hotelId_name collision) would write new
@@ -290,6 +319,7 @@ describe('HotelRepository.findAvailable', () => {
       .mockResolvedValueOnce([]) // cache lookup
       .mockResolvedValueOnce([]) // existing-names for avoid list
       .mockResolvedValueOnce([]); // re-query
+    mocks.availability.count.mockResolvedValueOnce(0);
     mocks.city.findUnique.mockResolvedValueOnce({ id: 1 });
     // Single hotel, single room type, single night — keeps the assertion tight.
     generateHotelsForCity.mockResolvedValueOnce({
@@ -352,6 +382,7 @@ describe('HotelRepository.findAvailable', () => {
       .mockResolvedValueOnce([]) // cache lookup
       .mockResolvedValueOnce([]) // existing-names for avoid list
       .mockResolvedValueOnce([SAMPLE_HOTEL_ROW]); // re-query
+    mocks.availability.count.mockResolvedValueOnce(0);
     mocks.city.findUnique.mockResolvedValueOnce({ id: 1 });
     generateHotelsForCity.mockResolvedValueOnce(VALID_LLM_OUTPUT);
     // Return a distinct hotel id per upsert call so we can verify the
