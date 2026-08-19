@@ -153,13 +153,26 @@ export class FlightRepository {
 
     for (const offer of result.flights) {
       // E.g., offer = { airlineIata: 'A3', flightNumber: '824',  departureTimeHHMM: '07:15', durationMinutes: 165, basePriceEUR: 145, stops: 0, aircraft: 'A320', seatsAvailable: 42 }
-      await this.upsertOffer({
-        offer,
-        airlineId: airlineByIata.get(offer.airlineIata)!.id,
-        originAirportId: origin.id,
-        destinationAirportId: destination.id,
-        departureDate: opts.departureDate,
-      });
+      // Extend LlmFlightSource's fail-open contract (see that class's
+      // header) to persistence: an isolated Prisma failure on one offer
+      // (connection blip, statement timeout, FK race, etc.) must not
+      // sink the whole search. Log and skip — surviving offers still
+      // land, and the caller gets whatever the post-upsert re-query
+      // finds instead of an INTERNAL_ERROR.
+      try {
+        await this.upsertOffer({
+          offer,
+          airlineId: airlineByIata.get(offer.airlineIata)!.id,
+          originAirportId: origin.id,
+          destinationAirportId: destination.id,
+          departureDate: opts.departureDate,
+        });
+      } catch (err) {
+        console.error(
+          `[FlightRepository] upsert failed for ${offer.airlineIata} ${offer.flightNumber} on ${opts.originIata}→${opts.destinationIata} ${opts.departureDate}:`,
+          err,
+        );
+      }
     }
 
     // Re-query so the newly-upserted rows join any prior dbRows rows,
