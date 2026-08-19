@@ -2,6 +2,7 @@ import type { AgentInputItem } from '@openai/agents';
 import type { ChatMessage } from '@/types/chat';
 import { isGuardrailNotice } from './guardrailNotice';
 import { unwrapToolOutput } from './toolOutput';
+import { userTurnContentText } from './userTurnContentText';
 
 // Convert a canonical AgentInputItem[] history into ChatMessage[] bubbles
 // for display. Used when loading /c/[id] — the DB stores the canonical
@@ -116,8 +117,18 @@ type HistoryRecord = {
   kind?: unknown;
 };
 
+// A user turn's content comes in two SDK shapes: a bare string (older
+// @openai/agents) or an array of typed content parts (newer @openai/agents
+// and the Responses API's native shape, e.g.
+// `[{ type: 'input_text', text: 'plan a trip' }, ...]`). If we only
+// accepted the string shape, an entire user turn from a newer-SDK client
+// would fail this predicate — openBubblesForUserTurn would never fire,
+// currentAgent would stay null, and every downstream tool_call /
+// assistant / guardrail item that belongs to that turn would be silently
+// dropped by the `if (!currentAgent) continue` guard in the main loop.
 function isUserTurn(record: HistoryRecord): boolean {
-  return record.role === 'user' && typeof record.content === 'string';
+  if (record.role !== 'user') return false;
+  return typeof record.content === 'string' || Array.isArray(record.content);
 }
 
 function isFunctionCall(record: HistoryRecord): boolean {
@@ -144,8 +155,7 @@ function agentBubbleHasContent(
   agent: ChatMessage | null,
 ): agent is ChatMessage {
   return (
-    agent !== null &&
-    (agent.text.length > 0 || agent.toolCalls.length > 0)
+    agent !== null && (agent.text.length > 0 || agent.toolCalls.length > 0)
   );
 }
 
@@ -173,9 +183,11 @@ function openBubblesForUserTurn(
   bubbles.push({
     id: `h-u-${bubbles.length}`,
     role: 'user',
-    // isUserTurn guarantees record.content is a string; the cast just
-    // narrows what TypeScript can't infer through the boolean predicate.
-    text: record.content as string,
+    // Handle both content shapes isUserTurn accepts: bare string OR
+    // array of typed parts. For the array shape, concatenate every
+    // part with a `text: string` field (skips input_image and other
+    // typed parts) so a multi-part user message renders as one bubble.
+    text: userTurnContentText(record.content),
     toolCalls: [],
     handoffs: [],
     pending: false,
@@ -212,9 +224,7 @@ function attachToolOutput(
   currentAgent: ChatMessage,
 ): void {
   const callId = typeof record.callId === 'string' ? record.callId : undefined;
-  const output = record.output as
-    | { type?: string; text?: string }
-    | undefined;
+  const output = record.output as { type?: string; text?: string } | undefined;
   if (!callId || output?.type !== 'text' || typeof output.text !== 'string') {
     return;
   }

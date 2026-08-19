@@ -5,6 +5,7 @@ import type {
   ConversationSummary,
   ConversationWithMessages,
 } from '../repositories/ConversationRepository';
+import { userTurnContentText } from '../../utils/userTurnContentText';
 import { ConversationServiceError } from './ConversationServiceError';
 
 // Public shape of a loaded conversation — metadata + a decoded history
@@ -35,37 +36,42 @@ const TITLE_MAX_LENGTH = 60;
 // then returns 'Hello'. If the first user message is longer than TITLE_MAX_LENGTH, it truncates and adds an ellipsis.
 function deriveTitle(items: AgentInputItem[]): string | null {
   for (const item of items) {
-    if (isUserTurn(item)) {
-      // First, collapse whitespace and trim so we don't return a title of just spaces or newlines. Then, if the text is too long, truncate and add an ellipsis.
-      const text = item.content.replace(/\s+/g, ' ').trim();
-      if (!text) continue;
+    const raw = extractUserTurnText(item);
+    if (raw === null) continue;
+    // First, collapse whitespace and trim so we don't return a title of just spaces or newlines. Then, if the text is too long, truncate and add an ellipsis.
+    const text = raw.replace(/\s+/g, ' ').trim();
+    if (!text) continue;
 
-      // Iterate by code point (Array.from uses the string iterator) —
-      // NOT by UTF-16 code unit. `text.slice(0, N)` operates on code
-      // units and can split a surrogate pair mid-emoji, leaving a lone
-      // high-surrogate at the end. That surfaces as `�` in the header
-      // dropdown and gets rejected by strict JSON serializers. Length
-      // check moves to codePoints.length for the same reason. Complex
-      // grapheme clusters (ZWJ sequences, flag emojis) can still split,
-      // but no invalid code unit ever ships.
-      const codePoints = Array.from(text);
-      return codePoints.length > TITLE_MAX_LENGTH
-        ? codePoints.slice(0, TITLE_MAX_LENGTH - 1).join('') + '…'
-        : text;
-    }
+    // Iterate by code point (Array.from uses the string iterator) —
+    // NOT by UTF-16 code unit. `text.slice(0, N)` operates on code
+    // units and can split a surrogate pair mid-emoji, leaving a lone
+    // high-surrogate at the end. That surfaces as `�` in the header
+    // dropdown and gets rejected by strict JSON serializers. Length
+    // check moves to codePoints.length for the same reason. Complex
+    // grapheme clusters (ZWJ sequences, flag emojis) can still split,
+    // but no invalid code unit ever ships.
+    const codePoints = Array.from(text);
+    return codePoints.length > TITLE_MAX_LENGTH
+      ? codePoints.slice(0, TITLE_MAX_LENGTH - 1).join('') + '…'
+      : text;
   }
   return null;
 }
 
-// Narrow AgentInputItem to the user-turn shape. The SDK's union is loose
-// (any object with a `role` field, roughly) — this filter is what lets
-// deriveTitle safely reach into `.content` as a string.
-function isUserTurn(
-  item: AgentInputItem,
-): item is { role: 'user'; content: string } {
-  if (!item || typeof item !== 'object') return false;
+// Wraps the shared content-text helper (see userTurnContentText.ts) with
+// the role check and null semantics deriveTitle wants. Reading through
+// `unknown` deliberately avoids coupling to AgentInputItem's user-turn
+// variant — the SDK's typed content union changes across versions.
+function extractUserTurnText(item: AgentInputItem): string | null {
+  if (!item || typeof item !== 'object') return null;
+
   const shape = item as { role?: unknown; content?: unknown };
-  return shape.role === 'user' && typeof shape.content === 'string';
+
+  if (shape.role !== 'user') return null;
+
+  const text = userTurnContentText(shape.content);
+
+  return text.length > 0 ? text : null;
 }
 
 export class ConversationService {
