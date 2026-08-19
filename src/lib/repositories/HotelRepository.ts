@@ -86,20 +86,26 @@ export class HotelRepository {
 
     // At this point, we have a DB miss, an LLM fallback, and a known city. Ask the LLM for hotels, upsert them into the DB, and re-query.
 
-    // First fetch the city ID from the DB so we can pass it to the LLM and use it for upserts. If the city isn't in the DB, we can't proceed (the LLM needs a cityId to upsert hotels into the DB).
-    const city = await this.prisma.city.findUnique({
-      where: { name: opts.cityName },
-      select: { id: true },
-    });
+    // Fetch two independent things in parallel: (1) the city row (we
+    // need city.id for the LLM input and the upsert path), and (2) the
+    // avoid-list of existing hotel names in this city (soft prompt hint
+    // — LlmHotelSource treats it as a hard rule in the system prompt,
+    // so keep populating it even though upsert-with-update:{} would
+    // silently absorb a collision). The hotel query keys off the city
+    // relation (`city: { name }`) rather than city.id so it does not
+    // depend on the city.findUnique result, letting Promise.all shave
+    // one DB round-trip off the user-visible cache-miss path.
+    const [city, existingHotels] = await Promise.all([
+      this.prisma.city.findUnique({
+        where: { name: opts.cityName },
+        select: { id: true },
+      }),
+      this.prisma.hotel.findMany({
+        where: { city: { name: opts.cityName } },
+        select: { name: true },
+      }),
+    ]);
     if (!city) return dbRows;
-
-    // Fetch existing hotel names for this city so the LLM can avoid
-    // them (unique-constraint collision reduction — see the prompt
-    // in LlmHotelSource for the soft-constraint phrasing).
-    const existingHotels = await this.prisma.hotel.findMany({
-      where: { cityId: city.id },
-      select: { name: true },
-    });
 
     // Ask the LLM for hotels, upsert them into the DB, and re-query.
     const result = await this.llmSource.generateHotelsForCity({
@@ -443,11 +449,11 @@ export class HotelRepository {
 // E.g., checkinDate = '2024-07-01', checkoutDate = '2024-07-05' yields
 // [ 2024-07-01T00:00:00.000Z, 2024-07-02T00:00:00.000Z, 2024-07-03T00:00:00.000Z, 2024-07-04T00:00:00.000Z ]
 function enumerateDatesUtc(checkinDate: string, checkoutDate: string): Date[] {
-  const start = new Date(`${checkinDate}T00:00:00.000Z`);
-  const end = new Date(`${checkoutDate}T00:00:00.000Z`);
+  const startMs = new Date(`${checkinDate}T00:00:00.000Z`).getTime();
+  const endMs = new Date(`${checkoutDate}T00:00:00.000Z`).getTime();
   const dates: Date[] = [];
-  for (let d = start; d < end; d = new Date(d.getTime() + 24 * 60 * 60_000)) {
-    dates.push(new Date(d.getTime()));
+  for (let ms = startMs; ms < endMs; ms += 24 * 60 * 60_000) {
+    dates.push(new Date(ms));
   }
   return dates;
 }

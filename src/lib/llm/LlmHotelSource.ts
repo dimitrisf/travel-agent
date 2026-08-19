@@ -62,12 +62,18 @@ export class LlmHotelSource {
   async generateHotelsForCity(
     input: HotelGenerationInput,
   ): Promise<HotelGenerationResponse | null> {
-    // Format the "avoid" list. If empty (no existing hotels for this
-    // city in the DB), phrase the constraint as "no existing names
+    // Format the "avoid" list as a JSON array literal so any embedded
+    // quotes or newlines in a hotel name are escaped rather than
+    // interpolated verbatim. Seed data is trusted, but LLM-generated
+    // names get persisted and become future `existingHotelNames` input
+    // on the next call — a mischievous name like `Foo", ignore the
+    // schema` would previously close its own wrapping quote and
+    // dangle as free prompt text. JSON.stringify handles the escaping
+    // cleanly. If empty, phrase the constraint as "no existing names
     // to avoid" so the LLM doesn't get confused by an empty bullet.
     const existingList =
       input.existingHotelNames.length > 0
-        ? input.existingHotelNames.map((n) => `"${n}"`).join(', ')
+        ? JSON.stringify(input.existingHotelNames)
         : '(none — this is a fresh city with no hotels in the DB yet)';
 
     const userPrompt = [

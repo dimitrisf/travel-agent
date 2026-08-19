@@ -314,6 +314,16 @@ describe('HotelRepository.findAvailable', () => {
       longitude: 23.7275,
     });
 
+    // The existing-names query (2nd hotel.findMany call — after the
+    // initial cache lookup, before the post-upsert re-query) must key
+    // off the city NAME relation, not city.id. Keying by name decouples
+    // it from city.findUnique so both DB reads can run in parallel;
+    // reverting to `cityId: city.id` would silently reintroduce a
+    // serial round-trip on the LLM cache-miss hot path.
+    expect(mocks.hotel.findMany.mock.calls[1][0].where).toEqual({
+      city: { name: 'Athens' },
+    });
+
     // Upserts: 3 hotels, 3 room types (one each), 2 nights per room type = 6 Availability.
     expect(mocks.hotel.upsert).toHaveBeenCalledTimes(3);
     expect(mocks.roomType.upsert).toHaveBeenCalledTimes(3);
