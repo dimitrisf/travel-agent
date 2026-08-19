@@ -368,4 +368,37 @@ describe('FlightRepository.findInstances', () => {
     expect(rows).toHaveLength(1);
     expect(mocks.flightInstance.findMany).toHaveBeenCalledTimes(2);
   });
+
+  it('threads caller filters (nonstopOnly + airlineCodes) into LLM callerPreferences', async () => {
+    // Regression: without these hints the LLM has no visibility into
+    // the caller's filters and can produce offers the queryDb filter
+    // throws away — burning tokens for no visible UX.
+    const { prisma, mocks } = makeMockPrisma();
+    const { source, generateFlightsForRoute } = makeMockLlmSource();
+    mocks.flightInstance.findMany
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([]);
+    mocks.flightInstance.count.mockResolvedValueOnce(0);
+    mocks.airport.findUnique
+      .mockResolvedValueOnce({ id: 1, iataCode: 'ATH', city: { name: 'Athens' } })
+      .mockResolvedValueOnce({ id: 2, iataCode: 'BER', city: { name: 'Berlin' } });
+    mocks.airline.findMany.mockResolvedValueOnce([
+      { id: 10, iataCode: 'LH', name: 'Lufthansa' },
+      { id: 11, iataCode: 'A3', name: 'Aegean Airlines' },
+    ]);
+    generateFlightsForRoute.mockResolvedValueOnce({ flights: [] });
+    const repo = new FlightRepository(prisma, source);
+
+    await repo.findInstances({
+      ...VALID_OPTS,
+      nonstopOnly: true,
+      airlineCodes: ['A3'],
+    });
+
+    const llmArgs = generateFlightsForRoute.mock.calls[0][0];
+    expect(llmArgs.callerPreferences).toEqual({
+      nonstopOnly: true,
+      preferredAirlineCodes: ['A3'],
+    });
+  });
 });

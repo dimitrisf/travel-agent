@@ -122,6 +122,14 @@ export class FlightRepository {
         iataCode: a.iataCode,
         name: a.name,
       })),
+      // Thread the caller's optional filters through as soft prompt
+      // hints so the LLM biases toward offers the queryDb filter will
+      // actually keep — not schema-enforced, so the cache still gets
+      // some diversity for later callers with different filters.
+      callerPreferences: {
+        nonstopOnly: opts.nonstopOnly,
+        preferredAirlineCodes: opts.airlineCodes,
+      },
     });
     if (!result) return dbRows;
 
