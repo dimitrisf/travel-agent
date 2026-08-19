@@ -581,16 +581,47 @@ export class BookingService {
           });
         }
 
-        // Finally, mark the booking as CANCELLED and set cancelledAt to the current date. We also store the cancellation reason if provided. This indicates that the booking has been successfully cancelled and all inventory has been restored. We return the updated BookingWithRelations, which includes all related data.
-        return tx.booking.update({
-          where: { id: booking.id },
+        // Finally, mark the booking as CANCELLED and set cancelledAt to
+        // the current date. Same compare-and-swap pattern as
+        // confirmBooking's final transition, but keyed on the status we
+        // observed at the top of the transaction — `booking.status`.
+        // Under Postgres READ COMMITTED (Prisma's default), our snapshot
+        // of `booking.status` can go stale before we commit:
+        //  - Confirm-vs-cancel race: we read PROPOSED and branched
+        //    wasReserved=false (skipping refund + inventory restore),
+        //    but a concurrent confirm slipped in and flipped the row to
+        //    PAID. Without a status guard, we'd overwrite PAID→CANCELLED
+        //    while leaving the SUCCEEDED Payment live and the seats
+        //    reserved.
+        //  - Cancel-vs-cancel race on a PAID booking: both readers see
+        //    PAID, both restore inventory, both refund. Inventory would
+        //    double-increment (Payment refund is idempotent on the
+        //    SUCCEEDED filter, but inventory writes are not).
+        // Guarding on `id` AND the observed `booking.status` forces the
+        // losing side to count===0 → throw INVALID_STATE → rollback of
+        // its inventory / refund writes.
+        const claimed = await tx.booking.updateMany({
+          where: { id: booking.id, status: booking.status },
           data: {
             status: 'CANCELLED',
             cancelledAt: new Date(),
             cancellationReason: reason?.trim() || null,
           },
+        });
+        if (claimed.count === 0) {
+          throw new BookingServiceError(
+            `Booking ${id} was concurrently modified by another request.`,
+            'INVALID_STATE',
+          );
+        }
+        // updateMany doesn't accept `include`; re-read for the return
+        // shape. Non-null: we just CAS-updated this row inside the same
+        // transaction, so it is visible.
+        const cancelled = await tx.booking.findUnique({
+          where: { id: booking.id },
           include: bookingInclude,
         });
+        return cancelled!;
       });
     } catch (err) {
       if (err instanceof BookingServiceError) throw err;
