@@ -278,7 +278,9 @@ export class BookingService {
         // Now that we have all the flight and hotel rows and the total price, we can create the Booking row. userId + customerName/Email are OPTIONAL — anon PROPOSED rows carry null values and get filled when someone signs in and confirms.
         const created = await tx.booking.create({
           data: {
-            // Generate a random 8-character alphanumeric reference for the booking. This will be used as a human-readable identifier for the booking. It is not guaranteed to be unique, but the idempotency key ensures that retries do not create duplicate bookings.
+            // Human-readable booking id (BKG-YYYY-XXXXXXXXXXXX). See
+            // generateReference for the entropy rationale — 12 hex
+            // chars keep P2002 collisions vanishingly unlikely.
             reference: generateReference(),
             idempotencyKey: parsed.idempotency_key,
             userId: parsed.user_id ?? null,
@@ -712,8 +714,21 @@ export class BookingService {
 // ───────────────────────────────────────────────
 
 function generateReference(): string {
+  // Booking.reference is @unique, so a collision surfaces as Prisma
+  // P2002 (unique-constraint violation) inside tx.booking.create and
+  // gets re-wrapped as an opaque INTERNAL_ERROR — no automatic
+  // retry-with-new-reference, and re-calling proposeBooking with the
+  // same idempotency_key doesn't help (the failed create rolled back,
+  // so findByIdempotencyKey still returns null). At 3 bytes / 6 hex
+  // chars (~16.7M values) birthday-collision probability crossed 50%
+  // at ~4.8K bookings/year — too tight. 6 bytes / 12 hex chars gives
+  // ~281 trillion values (birthday-50% at ~20M/year), so the collision
+  // path stays vanishingly unlikely at any realistic scale and we
+  // don't need to add retry-loop machinery. The guardrail's reference
+  // regex already accepts 4+ suffix chars, so this length bump is
+  // backward-compatible with existing references.
   const year = new Date().getUTCFullYear();
-  const suffix = randomBytes(3).toString('hex').toUpperCase();
+  const suffix = randomBytes(6).toString('hex').toUpperCase();
   return `BKG-${year}-${suffix}`;
 }
 

@@ -40,8 +40,17 @@ function deriveTitle(items: AgentInputItem[]): string | null {
       const text = item.content.replace(/\s+/g, ' ').trim();
       if (!text) continue;
 
-      return text.length > TITLE_MAX_LENGTH
-        ? text.slice(0, TITLE_MAX_LENGTH - 1) + '…'
+      // Iterate by code point (Array.from uses the string iterator) —
+      // NOT by UTF-16 code unit. `text.slice(0, N)` operates on code
+      // units and can split a surrogate pair mid-emoji, leaving a lone
+      // high-surrogate at the end. That surfaces as `�` in the header
+      // dropdown and gets rejected by strict JSON serializers. Length
+      // check moves to codePoints.length for the same reason. Complex
+      // grapheme clusters (ZWJ sequences, flag emojis) can still split,
+      // but no invalid code unit ever ships.
+      const codePoints = Array.from(text);
+      return codePoints.length > TITLE_MAX_LENGTH
+        ? codePoints.slice(0, TITLE_MAX_LENGTH - 1).join('') + '…'
         : text;
     }
   }

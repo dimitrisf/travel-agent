@@ -45,7 +45,15 @@ const SearchFlightsInput = z.object({
         .transform((s) => s.toUpperCase()),
     )
     .optional(),
-  currency: z.string().default('EUR'),
+  // EUR-only in the demo. Prices below are computed as
+  // basePriceEUR * cabin multiplier and returned unconverted, so any
+  // other currency here would produce EUR-valued numbers labeled with
+  // the wrong ticker AND filter max_price against EUR while the caller
+  // thinks it's in their currency. The tool spec (see
+  // searchFlightsToolSpec) already tells callers this — enforce it at
+  // parse time so a rogue `currency: 'USD'` fails loudly instead of
+  // silently mispricing.
+  currency: z.literal('EUR').default('EUR'),
 });
 
 export type SearchFlightsInput = z.input<typeof SearchFlightsInput>;

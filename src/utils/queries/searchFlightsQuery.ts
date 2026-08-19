@@ -21,6 +21,11 @@ export function parseSearchFlightsQuery(req: NextRequest): SearchFlightsInput {
     max_price:
       q.get('max_price') !== null ? Number(q.get('max_price')) : undefined,
     preferred_airlines: parseList(q.get('preferred_airlines')),
-    currency: q.get('currency') ?? undefined,
+    // Cast to the input type — Zod at the FlightService boundary
+    // validates the literal ('EUR' only) and rejects other values.
+    currency:
+      q.get('currency') !== null
+        ? (String(q.get('currency')) as SearchFlightsInput['currency'])
+        : undefined,
   };
 }
