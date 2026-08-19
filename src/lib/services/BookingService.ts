@@ -70,7 +70,29 @@ const ProposeBookingInput = z
   })
   .refine((v) => v.flights.length + v.hotels.length > 0, {
     message: 'At least one flight or hotel is required.',
-  });
+  })
+  // Reject duplicate flight_instance_id across legs. Confirm's
+  // per-leg updateMany would otherwise decrement seatsAvailable on the
+  // same FlightInstance twice for one booking, over-reserving
+  // inventory and charging the customer for a 2× phantom leg. A real
+  // caller with two segments on the same flight is nonsensical (a
+  // physical flight is a single ATH→FRA at a specific time — you can't
+  // fly it twice on one journey); an agent or malformed client
+  // producing this shape is a bug we want surfaced, not silently
+  // deduped downstream.
+  .refine(
+    (v) => {
+      const ids = v.flights.map((f) => f.flight_instance_id);
+
+      // Check if the number of unique flight_instance_id is equal to the total number of flight_instance_id. If they are not equal, it means there are duplicates. We use a Set to get the unique values and compare its size to the original array length.
+      return new Set(ids).size === ids.length;
+    },
+    {
+      message:
+        'Duplicate flight_instance_id across legs — each flight leg must reference a distinct FlightInstance.',
+      path: ['flights'],
+    },
+  );
 
 export type ProposeBookingInput = z.input<typeof ProposeBookingInput>;
 
