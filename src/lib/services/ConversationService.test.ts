@@ -275,6 +275,34 @@ describe('ConversationService.create', () => {
     expect(title.endsWith('…')).toBe(true);
   });
 
+  it('does not split a surrogate pair when truncating (emoji at the boundary)', async () => {
+    // Regression: text.slice(0, 59) operates on UTF-16 code units, so
+    // a message where a 🎉 (U+1F389 = surrogate pair) sits astride
+    // indices 58/59 would be sliced to keep the high surrogate and
+    // drop the low surrogate — persisted title contains a lone
+    // U+D83C rendered as '�…' in browsers and rejected by strict
+    // JSON serializers. Fix iterates by code point.
+    const prefix = 'a'.repeat(58); // fills indices 0..57
+    const message = `${prefix}🎉tail`; // 🎉 lives at code-unit 58/59
+    const create = vi.fn().mockResolvedValue({ id: 'c1' });
+    const repo = mockRepo({ create });
+    const service = new ConversationService(repo);
+
+    await service.create({
+      userId: 'user-1',
+      titleSource: [userTurn(message)],
+    });
+
+    const title = create.mock.calls[0][0].title as string;
+    // Not empty, not undefined, and no lone surrogate anywhere.
+    expect(typeof title).toBe('string');
+    for (const ch of title) {
+      const code = ch.codePointAt(0)!;
+      expect(code >= 0xd800 && code <= 0xdfff).toBe(false);
+    }
+    expect(title.endsWith('…')).toBe(true);
+  });
+
   it('collapses whitespace and trims before truncating', async () => {
     const create = vi.fn().mockResolvedValue({ id: 'c1' });
     const repo = mockRepo({ create });

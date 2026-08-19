@@ -84,6 +84,32 @@ describe('FlightService.searchFlights', () => {
     expect(repo.findInstances).toHaveBeenCalledTimes(1);
   });
 
+  it('rejects non-EUR currency at parse time (demo is EUR-only)', async () => {
+    // Regression: prices are computed as basePriceEUR * cabin multiplier
+    // and returned unconverted. A caller passing currency:'USD' with
+    // max_price:150 would previously get EUR-valued numbers labeled
+    // 'USD' and a max-price filter compared against EUR while the caller
+    // thinks it's in USD — silent mispricing on both axes. Now the
+    // literal-schema rejects non-EUR before any repo call.
+    const repo = mockRepo();
+    const service = new FlightService(repo);
+
+    let caught: unknown;
+    try {
+      await service.searchFlights({
+        origin: 'ATH',
+        destination: 'BER',
+        departure_date: '2026-07-10',
+        currency: 'USD' as 'EUR', // bypass TS to simulate a runtime caller
+      });
+    } catch (err) {
+      caught = err;
+    }
+    expect((caught as { name?: string }).name).toBe('ZodError');
+    // Parse threw before any repo touch.
+    expect(repo.airportExists).not.toHaveBeenCalled();
+  });
+
   it('throws INVALID_DATE_RANGE when return_date <= departure_date', async () => {
     const service = new FlightService(mockRepo());
     await expect(
