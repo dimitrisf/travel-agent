@@ -86,7 +86,8 @@ const VALID_LLM_OUTPUT: HotelGenerationResponse = {
       amenities: ['Free WiFi', 'Pet Friendly'],
       cancellationPolicy: {
         freeCancellation: false,
-        description: 'Non-refundable — cancellations forfeit the full stay cost.',
+        description:
+          'Non-refundable — cancellations forfeit the full stay cost.',
       },
       roomTypes: [
         {
@@ -172,6 +173,50 @@ describe('HotelRepository.findAvailable', () => {
     expect(rows).toHaveLength(1);
     expect(rows[0].hotelName).toBe('Existing Athens Hotel');
     expect(mocks.city.findUnique).not.toHaveBeenCalled();
+  });
+
+  it('breaks avgPricePerNight ties deterministically by hotelId, then roomTypeId', async () => {
+    // Regression: hotel.findMany has no orderBy, so Prisma returns rows
+    // in insertion order — ties at the same price would surface in
+    // whichever order the DB happened to persist. Feed the projector
+    // three rows with identical €120/night pricing in a scrambled
+    // insertion order and confirm the output is (hotelId, roomTypeId)
+    // ascending.
+    const { prisma, mocks } = makeMockPrisma();
+    const twoNightsAt120 = [
+      { date: new Date('2026-08-20T00:00:00Z'), roomsAvailable: 3, price: 120 },
+      { date: new Date('2026-08-21T00:00:00Z'), roomsAvailable: 3, price: 120 },
+    ];
+
+    const makeRow = (id: number, roomId: number, name: string) => ({
+      id,
+      name,
+      address: 'x',
+      stars: 4,
+      rating: 8,
+      city: { name: 'Athens' },
+      cancellationPolicy: { freeCancellation: true, description: '24h' },
+      hotelAmenities: [],
+      roomTypes: [
+        {
+          id: roomId,
+          name: 'Standard',
+          maxGuests: 2,
+          availability: twoNightsAt120,
+        },
+      ],
+    });
+    // Insertion order (Prisma default): 300, 100, 200 — scrambled.
+    mocks.hotel.findMany.mockResolvedValueOnce([
+      makeRow(300, 30, 'Gamma'),
+      makeRow(100, 10, 'Alpha'),
+      makeRow(200, 20, 'Beta'),
+    ]);
+    const repo = new HotelRepository(prisma);
+
+    const rows = await repo.findAvailable(VALID_OPTS);
+
+    expect(rows.map((r) => r.hotelId)).toEqual([100, 200, 300]);
   });
 
   it('returns empty when DB has no matches and no llmSource is wired', async () => {
@@ -451,7 +496,11 @@ describe('HotelRepository.findAvailable', () => {
     // 3 hotels → 3 cancellation policies with the LLM's booleans/descriptions.
     expect(mocks.cancellationPolicy.upsert).toHaveBeenCalledTimes(3);
     const policyCalls = mocks.cancellationPolicy.upsert.mock.calls.map(
-      (c: unknown[]) => c[0] as { where: { hotelId: number }; create: { freeCancellation: boolean; description: string } },
+      (c: unknown[]) =>
+        c[0] as {
+          where: { hotelId: number };
+          create: { freeCancellation: boolean; description: string };
+        },
     );
     expect(policyCalls[0].where.hotelId).toBe(101);
     expect(policyCalls[0].create.freeCancellation).toBe(true);

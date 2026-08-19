@@ -246,7 +246,20 @@ export class HotelRepository {
       }
     }
 
-    results.sort((a, b) => a.avgPricePerNight - b.avgPricePerNight);
+    // Sort primarily by avg nightly price ascending. Ties (common when
+    // the LLM picks similar €145/night rooms) fall back to hotelId then
+    // roomTypeId so the ordering is deterministic across identical
+    // requests — Array.prototype.sort is stable, but the input order
+    // reflects Prisma insertion order which drifts with re-seeding.
+    results.sort((a, b) => {
+      if (a.avgPricePerNight !== b.avgPricePerNight) {
+        return a.avgPricePerNight - b.avgPricePerNight;
+      }
+
+      if (a.hotelId !== b.hotelId) return a.hotelId - b.hotelId;
+
+      return a.roomTypeId - b.roomTypeId;
+    });
     return results;
   }
 

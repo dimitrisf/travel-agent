@@ -76,9 +76,11 @@ const HotelOfferSchema = z.object({
   name: z.string().min(3).max(80),
   address: z.string().min(10).max(150),
   stars: z.number().int().min(1).max(5),
-  // Guest rating 0-10 scale (Booking.com / Kayak style). Lower bound
-  // above 0 keeps the LLM from producing unrealistic "1.0-rated"
-  // hotels that would never be listed.
+  // Guest rating on a 0-10 scale (Booking.com / Kayak style), bounded
+  // to the range demo hotels actually inhabit. Floor at 5 keeps the LLM
+  // out of "unlisted / near-empty reviews" territory (1-4); ceiling at
+  // 9.5 keeps it out of implausible-perfect territory. Real distribution
+  // sits mostly around 7-9.
   rating: z.number().min(5).max(9.5),
   // Latitude/longitude. The prompt asks for coords within ~5km of the
   // city center passed in the input; enforced softly, not structurally.
