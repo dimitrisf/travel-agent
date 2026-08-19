@@ -75,7 +75,12 @@ const HotelOfferSchema = z.object({
   // row (which is fine — same hotel, refreshed pricing).
   name: z.string().min(3).max(80),
   address: z.string().min(10).max(150),
-  stars: z.number().int().min(1).max(5),
+  // Bounded to 3-5 stars to match the demo-curation intent in the
+  // LlmHotelSource system prompt ("mix of 3, 4, 5 stars"). Structured
+  // outputs enforces this so the LLM cannot slip a 1-2 star hotel
+  // through if it decides to sample low. Seed data is not affected —
+  // one 2-star hotel exists there as an intentional budget outlier.
+  stars: z.number().int().min(3).max(5),
   // Guest rating on a 0-10 scale (Booking.com / Kayak style), bounded
   // to the range demo hotels actually inhabit. Floor at 5 keeps the LLM
   // out of "unlisted / near-empty reviews" territory (1-4); ceiling at
