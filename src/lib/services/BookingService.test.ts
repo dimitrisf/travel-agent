@@ -202,3 +202,35 @@ describe('BookingService.getBookingByReference', () => {
     expect((caught as { cause: unknown }).cause).toBe(rootCause);
   });
 });
+
+// ─── proposeBooking (input validation only — Phase 2b covers the tx path) ──
+
+describe('BookingService.proposeBooking input validation', () => {
+  it('rejects duplicate flight_instance_id across legs before touching Prisma', async () => {
+    // Regression: without the schema-level dedup guard, confirm's
+    // per-leg updateMany would decrement seatsAvailable on the same
+    // FlightInstance twice for one booking — over-reserving inventory
+    // and charging the customer for a 2× phantom leg. The refinement
+    // catches this at parse time, before any Prisma or repo call.
+    const repo = mockRepo();
+    const service = new BookingService(stubPrisma, repo);
+
+    let caught: unknown;
+    try {
+      await service.proposeBooking({
+        idempotency_key: 'abc-123',
+        flights: [
+          { flight_instance_id: 123, adults: 2 },
+          { flight_instance_id: 123, adults: 2 },
+        ],
+      });
+    } catch (err) {
+      caught = err;
+    }
+    // ZodError shape (parse threw synchronously inside proposeBooking).
+    expect((caught as { name?: string }).name).toBe('ZodError');
+    expect(String(caught)).toContain('Duplicate flight_instance_id');
+    // No repo call happened — refinement fired first.
+    expect(repo.findByIdempotencyKey).not.toHaveBeenCalled();
+  });
+});
