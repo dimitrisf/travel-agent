@@ -431,8 +431,22 @@ export class BookingService {
         // idempotent. If any of these were already set on the row (e.g.,
         // signed-in propose), we don't overwrite — nullish-coalesce from
         // the existing value.
-        return tx.booking.update({
-          where: { id: booking.id },
+        //
+        // Same compare-and-swap pattern used above for inventory —
+        // updateMany lets us combine `id: X` with `status: 'PROPOSED'`
+        // atomically. Under Postgres READ COMMITTED (Prisma's default),
+        // two concurrent confirms on the same booking both pass the
+        // status check at line 324 (they read the same snapshot at the
+        // top of the transaction). Without a CAS here the losing side
+        // would still: create a duplicate Payment (no unique key on
+        // bookingId), double-decrement inventory, and re-flip the row.
+        // updateMany blocks on the row lock, then re-evaluates its
+        // WHERE against the post-commit state: if the winner already
+        // flipped status to PAID, count===0 → we throw INVALID_STATE
+        // and the whole transaction (inventory decrements + Payment
+        // insert) rolls back.
+        const claimed = await tx.booking.updateMany({
+          where: { id: booking.id, status: 'PROPOSED' },
           data: {
             status: 'PAID',
             confirmedAt: new Date(),
@@ -442,8 +456,23 @@ export class BookingService {
               booking.customerName ?? currentUser.name ?? currentUser.email,
             customerEmail: booking.customerEmail ?? currentUser.email,
           },
+        });
+        if (claimed.count === 0) {
+          throw new BookingServiceError(
+            `Booking ${id} was concurrently confirmed by another request.`,
+            'INVALID_STATE',
+          );
+        }
+        // updateMany doesn't take `include`; re-read the row with
+        // relations so the caller gets the same BookingWithRelations
+        // shape they used to.
+        const confirmed = await tx.booking.findUnique({
+          where: { id: booking.id },
           include: bookingInclude,
         });
+        // Non-null: we just CAS-updated this row inside the same
+        // transaction, so it must be visible.
+        return confirmed!;
       });
     } catch (err) {
       if (err instanceof BookingServiceError) throw err;
