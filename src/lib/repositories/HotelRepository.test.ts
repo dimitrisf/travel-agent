@@ -307,6 +307,47 @@ describe('HotelRepository.findAvailable', () => {
     expect(mocks.city.findUnique).not.toHaveBeenCalled();
   });
 
+  it('fails open on isolated per-hotel persistence errors — logs and continues, returns the re-query result', async () => {
+    // Regression: an isolated Prisma failure inside one hotel's nested
+    // upsert chain must not sink the whole search. LlmHotelSource fails
+    // open on every error; the repository extends that contract to
+    // persistence. Surviving hotels still land; the caller gets the
+    // re-query result instead of INTERNAL_ERROR.
+    const { prisma, mocks } = makeMockPrisma();
+    const { source, generateHotelsForCity } = makeMockLlmSource();
+    mocks.hotel.findMany
+      .mockResolvedValueOnce([]) // cache lookup
+      .mockResolvedValueOnce([]) // existing-names
+      .mockResolvedValueOnce([SAMPLE_HOTEL_ROW]); // re-query
+    mocks.availability.count.mockResolvedValueOnce(0);
+    mocks.city.findUnique.mockResolvedValueOnce({ id: 1 });
+    generateHotelsForCity.mockResolvedValueOnce(VALID_LLM_OUTPUT);
+    // Hotel #1 succeeds. Hotel #2's outer Hotel.upsert throws. Hotel #3 succeeds.
+    mocks.hotel.upsert
+      .mockResolvedValueOnce({ id: 101 })
+      .mockRejectedValueOnce(new Error('Postgres statement timeout'))
+      .mockResolvedValueOnce({ id: 103 });
+    mocks.roomType.upsert.mockResolvedValue({
+      id: 888,
+      defaultRoomsAvailable: 20,
+      basePrice: 145,
+    });
+    mocks.availability.upsert.mockResolvedValue({ id: 777 });
+    const repo = new HotelRepository(prisma, source);
+
+    const rows = await repo.findAvailable(VALID_OPTS);
+
+    // Search survived: got the re-query rows, not an exception.
+    expect(rows).toHaveLength(1);
+    // Both surviving hotels ran their nested chain to completion:
+    //   2 hotels × 1 RoomType each = 2 roomType.upsert calls
+    //   2 hotels × 1 RoomType × 2 nights = 4 availability.upsert calls
+    expect(mocks.roomType.upsert).toHaveBeenCalledTimes(2);
+    expect(mocks.availability.upsert).toHaveBeenCalledTimes(4);
+    // Re-query still happened.
+    expect(mocks.hotel.findMany).toHaveBeenCalledTimes(3);
+  });
+
   it('anchors Availability.price to RoomType.basePrice, not the LLM re-fabricated basePriceEUR', async () => {
     // Regression: without the anchor, a second LLM call that reuses an
     // existing RoomType (hotelId_name collision) would write new

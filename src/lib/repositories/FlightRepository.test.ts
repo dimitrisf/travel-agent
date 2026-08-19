@@ -213,6 +213,45 @@ describe('FlightRepository.findInstances', () => {
     expect(mocks.airport.findUnique).not.toHaveBeenCalled();
   });
 
+  it('fails open on isolated persistence errors — logs the offending offer and returns the re-query result', async () => {
+    // Regression: an isolated Prisma failure on one offer must not
+    // sink the whole search. LlmFlightSource fails open on every
+    // error (see its header); the repository extends that contract to
+    // persistence. Surviving offers still land; the caller gets the
+    // re-query result instead of INTERNAL_ERROR.
+    const { prisma, mocks } = makeMockPrisma();
+    const { source, generateFlightsForRoute } = makeMockLlmSource();
+    mocks.flightInstance.findMany
+      .mockResolvedValueOnce([]) // initial cache lookup
+      .mockResolvedValueOnce([SAMPLE_FLIGHT_ROW]); // re-query after upsert
+    mocks.flightInstance.count.mockResolvedValueOnce(0);
+    mocks.airport.findUnique
+      .mockResolvedValueOnce({ id: 1, iataCode: 'ATH', city: { name: 'Athens' } })
+      .mockResolvedValueOnce({ id: 2, iataCode: 'BER', city: { name: 'Berlin' } });
+    mocks.airline.findMany.mockResolvedValueOnce([
+      { id: 10, iataCode: 'LH', name: 'Lufthansa' },
+      { id: 11, iataCode: 'A3', name: 'Aegean Airlines' },
+    ]);
+    generateFlightsForRoute.mockResolvedValueOnce(VALID_LLM_OUTPUT);
+    // Offer #1 succeeds. Offer #2 throws. Offer #3 succeeds.
+    mocks.flightDefinition.upsert
+      .mockResolvedValueOnce({ id: 100, originAirportId: 1, destinationAirportId: 2 })
+      .mockRejectedValueOnce(new Error('Postgres connection blip'))
+      .mockResolvedValueOnce({ id: 102, originAirportId: 1, destinationAirportId: 2 });
+    mocks.flightInstance.upsert.mockResolvedValue({ id: 1000 });
+    const repo = new FlightRepository(prisma, source);
+
+    const rows = await repo.findInstances(VALID_OPTS);
+
+    // Search survived: got the re-query rows, not an exception.
+    expect(rows).toHaveLength(1);
+    // Two successful FlightInstance upserts (offer #1 and #3); offer #2's
+    // flightDefinition.upsert rejected before the flightInstance step.
+    expect(mocks.flightInstance.upsert).toHaveBeenCalledTimes(2);
+    // Re-query still happened.
+    expect(mocks.flightInstance.findMany).toHaveBeenCalledTimes(2);
+  });
+
   it('skips FlightInstance upsert when an existing FlightDefinition on that (airline, flightNumber) is for a different route', async () => {
     // Regression: FlightDefinition.@@unique is (airlineId, flightNumber) —
     // route is NOT part of the key. If seed (or a prior LLM call) has
