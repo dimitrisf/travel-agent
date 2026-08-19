@@ -26,6 +26,20 @@ export interface FlightGenerationInput {
   // list; upsert can then look up the airline by iataCode with
   // certainty that the row exists.
   allowedAirlines: Array<{ iataCode: string; name: string }>;
+  // Optional caller preferences threaded into the user prompt as
+  // soft bias — NOT schema-enforced (that would collapse cache
+  // diversity for later callers with different filters). The LLM is
+  // still free to include a few off-preference offers to enrich the
+  // cache; the repository's queryDb filter applies the user's actual
+  // hard filter on the way out.
+  callerPreferences?: {
+    // Mirrors FlightSearchOptions.nonstopOnly. When true, the prompt
+    // tells the LLM to favor stops=0.
+    nonstopOnly?: boolean;
+    // Mirrors FlightSearchOptions.airlineCodes — a whitelist of
+    // preferred IATA codes. Prompt asks the LLM to lean into these.
+    preferredAirlineCodes?: string[];
+  };
 }
 
 // Builds the Zod schema for a single flight offer. Exported for tests.

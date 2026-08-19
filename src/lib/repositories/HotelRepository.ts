@@ -2,7 +2,6 @@ import type { PrismaClient } from '@prisma/client';
 import { CITIES } from '../cities';
 import type { LlmHotelSource } from '../llm/LlmHotelSource';
 import type { HotelOffer } from '../llm/hotelGenerationSchema';
-import { create } from 'domain';
 
 export interface HotelSearchOptions {
   cityName: string;

@@ -109,6 +109,45 @@ describe('LlmFlightSource', () => {
     expect(callArgs.text?.format).toBeDefined();
   });
 
+  it('threads callerPreferences (nonstopOnly + preferredAirlineCodes) into the user prompt', async () => {
+    // Regression: without these hints, the LLM has no visibility into
+    // the caller's filters and will produce offers the queryDb filter
+    // throws away (e.g. LH stops=1 when the caller asked for A3
+    // nonstop). Threaded as soft prompt bias — schema is not
+    // hard-constrained so the cache still gets some diversity.
+    const { client, parse } = makeMockClient();
+    parse.mockResolvedValueOnce({ output_parsed: VALID_PARSED_RESPONSE });
+    const source = new LlmFlightSource({ client });
+
+    await source.generateFlightsForRoute({
+      ...VALID_INPUT,
+      callerPreferences: {
+        nonstopOnly: true,
+        preferredAirlineCodes: ['A3'],
+      },
+    });
+
+    const userContent = parse.mock.calls[0][0].input[1].content as string;
+    expect(userContent).toContain('nonstop only');
+    expect(userContent).toContain('stops=0');
+    expect(userContent).toContain('prefer these airlines');
+    expect(userContent).toContain('A3');
+  });
+
+  it('omits preference hints when callerPreferences is absent or empty', async () => {
+    const { client, parse } = makeMockClient();
+    parse.mockResolvedValueOnce({ output_parsed: VALID_PARSED_RESPONSE });
+    const source = new LlmFlightSource({ client });
+
+    await source.generateFlightsForRoute({
+      ...VALID_INPUT,
+      callerPreferences: { nonstopOnly: false, preferredAirlineCodes: [] },
+    });
+
+    const userContent = parse.mock.calls[0][0].input[1].content as string;
+    expect(userContent).not.toContain('Caller preference');
+  });
+
   it('returns null when output_parsed is null (refusal / length cutoff / validation)', async () => {
     const { client, parse } = makeMockClient();
     parse.mockResolvedValueOnce({ output_parsed: null });

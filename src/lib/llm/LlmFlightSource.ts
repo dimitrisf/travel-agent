@@ -104,11 +104,30 @@ export class LlmFlightSource {
       .map((a) => `${a.iataCode} (${a.name})`)
       .join(', ');
 
+    // Soft preference hints biasing the LLM toward what the caller
+    // will actually keep post-filter. Kept as prompt text (not schema
+    // constraints) so the cache still receives some diversity for
+    // later callers with different filters. See FlightGenerationInput
+    // for the rationale.
+    const preferenceLines: string[] = [];
+    if (input.callerPreferences?.nonstopOnly) {
+      preferenceLines.push(
+        'Caller preference: nonstop only — most offers should use stops=0 (still allowed to include at most one stops=1 option to enrich the cache).',
+      );
+    }
+    const preferredCodes = input.callerPreferences?.preferredAirlineCodes;
+    if (preferredCodes && preferredCodes.length > 0) {
+      preferenceLines.push(
+        `Caller preference: prefer these airlines — ${preferredCodes.join(', ')}. Weight the majority of offers to these; one or two offers on other allowed airlines is fine for cache diversity.`,
+      );
+    }
+
     // Now userPrompt = "Route: ATH (Athens) → FRA (Frankfurt)\nDeparture date: 2024-07-01\nAvailable airlines: A3 (Aegean Airlines), LH (Lufthansa)\n\nReturn the flight offers as JSON matching the provided schema."
     const userPrompt = [
       `Route: ${input.originAirport.iataCode} (${input.originAirport.cityName}) → ${input.destinationAirport.iataCode} (${input.destinationAirport.cityName})`,
       `Departure date: ${input.departureDate}`,
       `Available airlines: ${airlineList}`,
+      ...preferenceLines,
       '',
       'Return the flight offers as JSON matching the provided schema.',
     ].join('\n');
