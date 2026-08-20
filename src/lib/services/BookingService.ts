@@ -552,20 +552,24 @@ export class BookingService {
             'BOOKING_NOT_FOUND',
           );
         }
-        if (
-          booking.status !== 'PROPOSED' &&
-          booking.status !== 'PAID' &&
-          booking.status !== 'CONFIRMED'
-        ) {
+        if (booking.status !== 'PROPOSED' && booking.status !== 'PAID') {
           throw new BookingServiceError(
-            `Booking ${id} is in state ${booking.status}; only PROPOSED, CONFIRMED, or PAID bookings can be cancelled.`,
+            `Booking ${id} is in state ${booking.status}; only PROPOSED or PAID bookings can be cancelled.`,
             'INVALID_STATE',
           );
         }
 
         // Refund policy applies only after inventory has been reserved.
-        const wasReserved =
-          booking.status === 'PAID' || booking.status === 'CONFIRMED';
+        // The BookingStatus enum also declares CONFIRMED, but no write
+        // path in this service produces it — confirmBooking goes
+        // PROPOSED→PAID directly. If a future two-phase confirm/pay flow
+        // adds a real CONFIRMED transition, it needs to re-enter both
+        // the allowed-states check above and this wasReserved rule with
+        // whatever inventory/payment semantics it defines; treating
+        // CONFIRMED as reserved here today would fire the hotel
+        // non-refundability guard against a booking with no SUCCEEDED
+        // Payment (payment.updateMany silently matches 0 rows).
+        const wasReserved = booking.status === 'PAID';
 
         if (wasReserved) {
           // Enforce per-hotel CancellationPolicy for PAID bookings — if any hotel leg is non-refundable, the whole cancel fails. cancellationPolicy is nested under roomType.hotel, so we need to access it through that path.
