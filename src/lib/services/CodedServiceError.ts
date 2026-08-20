@@ -81,3 +81,43 @@ export abstract class CodedServiceError<
     return this.statusByCode[this.code as DomainCodes<TCode>];
   }
 }
+
+// Given a CodedServiceError subclass, return a helper that wraps an
+// arbitrary `cause` (typically a Prisma / repo failure) into that
+// subclass with code 'INTERNAL_ERROR'. Extracts the boilerplate of the
+// service-layer pattern:
+//
+//   try { ... } catch (err) { throw internal('...', err); }
+//
+// Usage: `const internal = internalErrorFactory(BookingServiceError);`
+// once at module scope, then `throw internal(msg, err)` at each call
+// site.
+//
+// The `'INTERNAL_ERROR' as TCode` cast is safe by construction: every
+// CodedServiceError subclass's TCode extends ServiceErrorCode (which is
+// exactly 'INTERNAL_ERROR'), so the literal is always assignable —
+// TypeScript just can't express "TCode must be a superset of X" as a
+// constraint, so the cast bridges what the type system won't.
+export function internalErrorFactory<
+  // E.g., BookingServiceErrorCode, ConversationServiceErrorCode, etc.
+  TCode extends string,
+  // E.g., BookingServiceError, ConversationServiceError, etc.
+  TError extends CodedServiceError<TCode>,
+>(
+  // This is a constructor signature: new (...args) => TError. It says "give me anything I can invoke with new, that takes (message, code, options) and produces a TError". Every CodedServiceError subclass matches this shape — that's the contract the base class enforces via its own constructor.
+  ErrorClass: new (
+    message: string,
+    code: TCode,
+    options?: ErrorOptions,
+  ) => TError,
+): // Return a function that takes (message, cause) and returns a TError.
+(message: string, cause: unknown) => TError {
+  // Arrow function that closes over ErrorClass, hardcodes 'INTERNAL_ERROR' as the code, and packages cause into the ErrorOptions bag. Each call constructs a fresh TError instance.
+  return (message, cause) =>
+    new ErrorClass(
+      message,
+      // TCode is a broad union like 'INTERNAL_ERROR' | 'BOOKING_NOT_FOUND' | .... We know 'INTERNAL_ERROR' is always in that union (every CodedServiceError subclass's code type extends ServiceErrorCode, which is 'INTERNAL_ERROR'). But TypeScript can't express "TCode must include this specific literal" as a constraint — you can say TCode extends X (TCode is a subset of X) but not the reverse. So the cast bridges what the type system can't prove structurally.
+      'INTERNAL_ERROR' as TCode,
+      { cause },
+    );
+}

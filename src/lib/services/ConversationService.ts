@@ -7,6 +7,7 @@ import type {
 } from '../repositories/ConversationRepository';
 import { userTurnContentText } from '../../utils/userTurnContentText';
 import { ConversationServiceError } from './ConversationServiceError';
+import { internalErrorFactory } from './CodedServiceError';
 
 // Public shape of a loaded conversation — metadata + a decoded history
 // array ready to feed into the agent's run() call. Callers don't touch
@@ -89,7 +90,12 @@ export class ConversationService {
     id: string;
     viewerId: string | null;
   }): Promise<ConversationView | null> {
-    const row = await this.repo.findById(input.id);
+    let row: ConversationWithMessages | null;
+    try {
+      row = await this.repo.findById(input.id);
+    } catch (err) {
+      throw internal('Failed to load conversation.', err);
+    }
     if (!row) return null;
 
     const isOwner = input.viewerId !== null && row.userId === input.viewerId;
@@ -111,7 +117,11 @@ export class ConversationService {
     userId: string;
     limit?: number;
   }): Promise<ConversationSummary[]> {
-    return this.repo.listByUser(input.userId, { limit: input.limit });
+    try {
+      return await this.repo.listByUser(input.userId, { limit: input.limit });
+    } catch (err) {
+      throw internal('Failed to list conversations.', err);
+    }
   }
 
   // Cheap ownership check for the agent route's per-turn validation. Same
@@ -120,7 +130,12 @@ export class ConversationService {
   // grant write access — only the owner can append turns).
   async assertOwnership(input: { id: string; userId: string }): Promise<void> {
     // If the conversation doesn't exist or the userId doesn't match, throw a 404-shaped error. This is the same shape as loadForViewer's "not viewable" case, so the agent route can treat it uniformly.
-    const meta = await this.repo.findMetaById(input.id);
+    let meta: { id: string; userId: string } | null;
+    try {
+      meta = await this.repo.findMetaById(input.id);
+    } catch (err) {
+      throw internal('Failed to verify conversation ownership.', err);
+    }
 
     if (!meta || meta.userId !== input.userId) {
       throw new ConversationServiceError(
@@ -140,7 +155,11 @@ export class ConversationService {
   }): Promise<{ shared: boolean }> {
     await this.assertOwnership({ id: input.id, userId: input.userId });
 
-    return this.repo.setShared({ id: input.id, shared: input.shared });
+    try {
+      return await this.repo.setShared({ id: input.id, shared: input.shared });
+    } catch (err) {
+      throw internal('Failed to update conversation sharing.', err);
+    }
   }
 
   // Create an empty conversation and derive its title from the first user
@@ -158,7 +177,11 @@ export class ConversationService {
     titleSource: AgentInputItem[];
   }): Promise<{ id: string }> {
     const title = deriveTitle(input.titleSource);
-    return this.repo.create({ userId: input.userId, title });
+    try {
+      return await this.repo.create({ userId: input.userId, title });
+    } catch (err) {
+      throw internal('Failed to create conversation.', err);
+    }
   }
 
   // Create a Conversation AND persist the initial history in one
@@ -171,11 +194,15 @@ export class ConversationService {
     history: AgentInputItem[];
   }): Promise<{ id: string }> {
     const title = deriveTitle(input.history);
-    return this.repo.createWithMessages({
-      userId: input.userId,
-      title,
-      items: input.history as unknown as Prisma.InputJsonValue[],
-    });
+    try {
+      return await this.repo.createWithMessages({
+        userId: input.userId,
+        title,
+        items: input.history as unknown as Prisma.InputJsonValue[],
+      });
+    } catch (err) {
+      throw internal('Failed to create conversation with seed history.', err);
+    }
   }
 
   // Persist all new items produced by one agent turn. `newItems` is the
@@ -188,16 +215,25 @@ export class ConversationService {
   }): Promise<void> {
     if (input.newItems.length === 0) return;
 
-    await this.repo.appendMessages({
-      conversationId: input.conversationId,
-      // AgentInputItem values are already JSON-serializable — the SDK
-      // deals in the same shape it sends to the OpenAI API. Prisma's
-      // InputJsonValue only rejects non-serializable things (undefined,
-      // functions), which the SDK never emits.
-      items: input.newItems as unknown as Prisma.InputJsonValue[],
-    });
+    try {
+      await this.repo.appendMessages({
+        conversationId: input.conversationId,
+        // AgentInputItem values are already JSON-serializable — the SDK
+        // deals in the same shape it sends to the OpenAI API. Prisma's
+        // InputJsonValue only rejects non-serializable things (undefined,
+        // functions), which the SDK never emits.
+        items: input.newItems as unknown as Prisma.InputJsonValue[],
+      });
+    } catch (err) {
+      throw internal('Failed to append conversation turn.', err);
+    }
   }
 }
+
+// Wraps unexpected errors (typically Prisma failures from the repo) as
+// ConversationServiceError('INTERNAL_ERROR'). See internalErrorFactory
+// in CodedServiceError.ts for the shared shape.
+const internal = internalErrorFactory(ConversationServiceError);
 
 // Message.data is a JSON blob per the schema comment — decode each row
 // back into an AgentInputItem. Prisma types the value as JsonValue; the

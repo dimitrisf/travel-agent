@@ -7,6 +7,7 @@ import {
   type BookingWithRelations,
 } from '../repositories/BookingRepository';
 import { BookingServiceError } from './BookingServiceError';
+import { internalErrorFactory } from './CodedServiceError';
 
 // ───────────────────────────────────────────────
 // Pricing rules (mirrors FlightService — kept small and duplicated on purpose)
@@ -741,7 +742,7 @@ function round1(n: number): number {
   return Math.round(n * 10) / 10;
 }
 
-// Create a BookingServiceError with code 'INTERNAL_ERROR' and the given message and cause. This is used for unexpected errors that occur during the booking process, such as database errors or other internal failures. The cause can be any unknown error that was caught during the operation.
-function internal(message: string, cause: unknown): BookingServiceError {
-  return new BookingServiceError(message, 'INTERNAL_ERROR', { cause });
-}
+// Wraps unexpected errors (typically Prisma failures inside a $transaction
+// callback) as BookingServiceError('INTERNAL_ERROR'). See
+// internalErrorFactory in CodedServiceError.ts for the shared shape.
+const internal = internalErrorFactory(BookingServiceError);
