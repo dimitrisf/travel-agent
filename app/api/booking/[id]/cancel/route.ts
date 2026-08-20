@@ -13,11 +13,10 @@ type RouteContext = { params: Promise<{ id: string }> };
 
 // POST /api/booking/[id]/cancel
 //
-// Cancels a PROPOSED, CONFIRMED, or PAID booking. For PAID/CONFIRMED bookings,
-// enforces per-hotel `CancellationPolicy.freeCancellation` — any non-refundable
-// leg causes the whole cancellation to fail. When allowed, restores inventory
-// (flight seats + hotel rooms) and marks payments REFUNDED, all in one
-// transaction.
+// Cancels a PROPOSED or PAID booking. For PAID bookings, enforces per-hotel
+// `CancellationPolicy.freeCancellation` — any non-refundable leg causes the
+// whole cancellation to fail. When allowed, restores inventory (flight seats
+// + hotel rooms) and marks payments REFUNDED, all in one transaction.
 //
 // Auth (Stage 17 Phase 2): NOT strictly required. Anon PROPOSED bookings can
 // be cancelled by anyone with the id (id itself is the only credential —
