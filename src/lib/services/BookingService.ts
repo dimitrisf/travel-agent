@@ -584,14 +584,71 @@ export class BookingService {
             }
           }
 
-          // Restore inventory for flights and hotels. For each flight leg, we increment the seatsAvailable by the number of seats in that leg. For each hotel stay, we increment the roomsAvailable by the number of rooms in that stay across all nights. This ensures that the inventory is restored to its original state before the booking was confirmed.
-          // Note: we assume here that flight bookings are always refundable, and that hotel bookings are refundable only if the cancellation policy allows it. In a real system, you would need to check the cancellation policy for flights as well.
+          // Restore inventory for flights and hotels. For each flight leg, we
+          // increment seatsAvailable by the leg's seats. For each hotel stay,
+          // we increment roomsAvailable by that stay's rooms across all nights.
+          // Note: we assume here that flight bookings are always refundable,
+          // and that hotel bookings are refundable only if the cancellation
+          // policy allows it. In a real system, you would need to check the
+          // cancellation policy for flights as well.
+          //
+          // Group legs by seat count and issue one updateMany per unique
+          // count instead of N individual updates. Common cases (1-leg,
+          // 2-leg same-party round-trip) collapse to a single statement.
+          // Worst case (every leg a different party size) matches the
+          // old per-leg round-trip cost. proposeBooking's refine
+          // guarantees each flightInstanceId appears at most once per
+          // booking (see the schema-level check above), so `id: { in: ids }`
+          // can't double-increment a shared FlightInstance within a group.
+          //
+          // The scenario
+          // A family (2 adults + 1 child = 3 seats per leg) books a multi-city trip:
+          // Athens → Berlin → London → Athens. Three flight legs, three different FlightInstances.
+          // Later they cancel.
+          // Before the change
+          // The for loop issues three separate UPDATE statements, one per leg, sequentially awaited:
+          // -- Round-trip 1
+          // UPDATE "FlightInstance" SET "seatsAvailable" = "seatsAvailable" + 3 WHERE "id" = 101;
+          // -- Round-trip 2
+          // UPDATE "FlightInstance" SET "seatsAvailable" = "seatsAvailable" + 3 WHERE "id" = 202;
+          // -- Round-trip 3
+          // UPDATE "FlightInstance" SET "seatsAvailable" = "seatsAvailable" + 3 WHERE "id" = 303;
+          // 3 network round-trips. If each takes ~15ms, that's ~45ms of transaction time just for the flight restore. The transaction is holding row locks on all three FlightInstance rows the whole time — any concurrent confirm/cancel touching those flights has to wait.
+
+          // After the change
+          // Group legs by seat count first — the map becomes { 3: [101, 202, 303] } — then one UPDATE per group:
+          // -- Round-trip 1 (only)
+          // UPDATE "FlightInstance" SET "seatsAvailable" = "seatsAvailable" + 3 WHERE "id" IN (101, 202, 303);
+          // 1 network round-trip. ~15ms instead of ~45ms.
+          //
+          // When the grouping matters less
+          // Mixed party sizes across legs — say leg 2 was a solo business detour (1 seat):
+
+          // Legs: {101, 3}, {202, 1}, {303, 3}
+          // Grouped: { 3: [101, 303], 1: [202] }
+          // 2 UPDATEs instead of 3.
+          // Degenerate case (still no worse)
+          // All three legs a different party size:
+
+          // Grouped: { 3: [101], 2: [202], 1: [303] }
+          // 3 UPDATEs — same as before, no regression.
+          // Why the report called this a bug even though it's not incorrect
+          // The old code always paid N round-trips regardless of shape. The typical booking (1-leg one-way, 2-leg matched-party round-trip) collapses to 1 round-trip after the fix. The hotel loop two lines below was already using updateMany — the flight loop was doing it the slow way for no reason.
+          const legsBySeatCount = new Map<number, number[]>();
+
           for (const leg of booking.flightBookings) {
-            await tx.flightInstance.update({
-              where: { id: leg.flightInstanceId },
-              data: { seatsAvailable: { increment: leg.seats } },
+            const ids = legsBySeatCount.get(leg.seats) ?? [];
+            ids.push(leg.flightInstanceId);
+            legsBySeatCount.set(leg.seats, ids);
+          }
+
+          for (const [seats, ids] of legsBySeatCount) {
+            await tx.flightInstance.updateMany({
+              where: { id: { in: ids } },
+              data: { seatsAvailable: { increment: seats } },
             });
           }
+
           for (const stay of booking.hotelBookings) {
             // Restore hotel inventory by incrementing roomsAvailable for each night of the stay. We use updateMany to update all Availability rows for the RoomType across the requested nights. This ensures that the inventory is restored to its original state before the booking was confirmed.
             await tx.availability.updateMany({
