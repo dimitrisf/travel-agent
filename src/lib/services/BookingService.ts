@@ -8,17 +8,7 @@ import {
 } from '../repositories/BookingRepository';
 import { BookingServiceError } from './BookingServiceError';
 import { internalErrorFactory } from './CodedServiceError';
-
-// ───────────────────────────────────────────────
-// Pricing rules (mirrors FlightService — kept small and duplicated on purpose)
-// ───────────────────────────────────────────────
-
-const CABIN_MULTIPLIER = {
-  economy: 1,
-  premium_economy: 1.5,
-  business: 3,
-  first: 6,
-} as const;
+import { CabinClass, CABIN_MULTIPLIER } from './pricing';
 
 // ───────────────────────────────────────────────
 // Input schemas
@@ -32,9 +22,7 @@ const IsoDate = z
 // It refers to a FlightBooking, which is a specific FlightInstance. The FlightInstance is a specific flight on a specific date, and the FlightDefinition defines the route, airline, and base price.
 const FlightLegInput = z.object({
   flight_instance_id: z.number().int().positive(),
-  cabin_class: z
-    .enum(['economy', 'premium_economy', 'business', 'first'])
-    .default('economy'),
+  cabin_class: CabinClass.default('economy'),
   adults: z.number().int().min(1).default(1),
   children: z.number().int().min(0).default(0),
 });

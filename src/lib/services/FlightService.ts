@@ -1,17 +1,7 @@
 import { z } from 'zod';
 import type { FlightRepository } from '../repositories/FlightRepository';
 import { TravelServiceError } from './TravelServiceError';
-
-const CabinClass = z.enum(['economy', 'premium_economy', 'business', 'first']);
-type CabinClass = z.infer<typeof CabinClass>;
-
-// Cabin multipliers are based on typical industry pricing, but can vary by airline and route. These are just rough estimates for the purpose of this service.
-const CABIN_MULTIPLIER: Record<CabinClass, number> = {
-  economy: 1,
-  premium_economy: 1.5,
-  business: 3,
-  first: 6,
-};
+import { CabinClass, CABIN_MULTIPLIER } from './pricing';
 
 const IsoDate = z
   .string()
