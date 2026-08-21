@@ -1,10 +1,7 @@
 import { z } from 'zod';
 import type { HotelRepository } from '../repositories/HotelRepository';
 import { TravelServiceError } from './TravelServiceError';
-
-const IsoDate = z
-  .string()
-  .regex(/^\d{4}-\d{2}-\d{2}$/, 'must be a date in YYYY-MM-DD format');
+import { IsoDate } from '../zodDates';
 
 const SearchHotelsInput = z.object({
   city: z.string().trim().min(1, 'city is required'),
