@@ -503,6 +503,26 @@ export class BookingService {
   // Otherwise the transaction fills `userId`, `customerName`, and
   // `customerEmail` from the session identity.
   // The input is the booking ID and the current user object, which includes the user ID, name, and email. The current user comes from the session. The output is the updated BookingWithRelations, which includes all related data.
+  //
+  // Pricing model — deliberately simplified (same posture as the stub
+  // payment below):
+  //   - `booking.totalPriceEUR` (and the per-leg / per-stay totals) are
+  //     frozen at propose time. Confirm charges that exact amount with
+  //     NO re-price, NO expiration on PROPOSED, and NO invalidation if
+  //     FlightDefinition.basePriceEUR or Availability.price moves in
+  //     between. A proposal held for weeks pays yesterday's price on
+  //     today's inventory.
+  //   - This is the airline "held quote" shape (Kayak / carrier PSS)
+  //     but WITHOUT the usual short expiration window that makes held
+  //     quotes safe for the operator. Booking.com-style hotel behaviour
+  //     (re-quote at confirm, no held quote) is the alternative model.
+  //   - Real production code would pick one — expiration + reject on
+  //     stale, or re-price + reject on drift — and would carry an audit
+  //     trail of the delta. This project intentionally does neither,
+  //     matching the stub-payment simplification: propose→confirm is
+  //     modelled as a single trusted step, not a multi-day quote hold.
+  //   - If a future change adds either mechanism, this comment should
+  //     go with it.
   async confirmBooking(
     id: number,
     currentUser: { id: string; name: string | null; email: string },
@@ -625,6 +645,10 @@ export class BookingService {
 
         // Stub payment — always succeeds instantly.
         // In a real system, this would be where you integrate with a payment provider (e.g., Stripe, PayPal) to charge the customer's card. If the payment fails, you would throw a BookingServiceError with code 'PAYMENT_FAILED' and roll back the transaction. For this stub implementation, we simply create a Payment row with status 'SUCCEEDED' and completedAt set to the current date.
+        //
+        // `amount` is the propose-time frozen total — see the
+        // "Pricing model — deliberately simplified" note in
+        // confirmBooking's docstring for why we don't re-price here.
         await tx.payment.create({
           data: {
             bookingId: booking.id,
