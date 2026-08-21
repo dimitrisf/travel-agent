@@ -9,14 +9,11 @@ import {
 import { BookingServiceError } from './BookingServiceError';
 import { internalErrorFactory } from './CodedServiceError';
 import { CabinClass, CABIN_MULTIPLIER } from './pricing';
+import { IsoDate } from '../zodDates';
 
 // ───────────────────────────────────────────────
 // Input schemas
 // ───────────────────────────────────────────────
-
-const IsoDate = z
-  .string()
-  .regex(/^\d{4}-\d{2}-\d{2}$/, 'must be a date in YYYY-MM-DD format');
 
 // Flight leg: one-way from origin to destination on a specific flight instance.
 // It refers to a FlightBooking, which is a specific FlightInstance. The FlightInstance is a specific flight on a specific date, and the FlightDefinition defines the route, airline, and base price.

@@ -2,10 +2,7 @@ import { z } from 'zod';
 import type { FlightRepository } from '../repositories/FlightRepository';
 import { TravelServiceError } from './TravelServiceError';
 import { CabinClass, CABIN_MULTIPLIER } from './pricing';
-
-const IsoDate = z
-  .string()
-  .regex(/^\d{4}-\d{2}-\d{2}$/, 'must be a date in YYYY-MM-DD format');
+import { IsoDate } from '../zodDates';
 
 const SearchFlightsInput = z.object({
   // IATA airport codes are always 3 letters, and are case-insensitive. We'll normalize to uppercase. E.g., "ATH" for Athens, "LHR" for London Heathrow, etc.
