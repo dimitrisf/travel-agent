@@ -99,6 +99,46 @@ export class LlmFlightSource {
     // airline code.
     const schema = buildFlightGenerationResponseSchema(allowedAirlineIatas);
 
+    const userPrompt = this.buildUserPrompt(input);
+
+    const startedAt = Date.now();
+
+    try {
+      const response = await this.client.responses.parse({
+        model: this.model,
+        input: [
+          { role: 'system', content: SYSTEM_PROMPT },
+          { role: 'user', content: userPrompt },
+        ],
+        text: {
+          // The Responses API uses a "text.format" envelope to carry the
+          // schema. zodTextFormat wraps our Zod schema in the correct
+          // envelope shape for the API.
+          // E.g, { type: 'json_schema', name, strict, schema } where
+          // the inner `schema` is what OpenAI actually enforces during
+          // generation.
+          format: zodTextFormat(schema, 'flight_generation'),
+        },
+      });
+
+      return this.handleParsedResponse(
+        response.output_parsed,
+        input,
+        startedAt,
+      );
+    } catch (err) {
+      // Covers network errors, rate limits, SDK-level parse errors,
+      // and refusal-throwing modes if the SDK ever surfaces them that
+      // way in a future version.
+      console.error(
+        `[LlmFlightSource] generation failed (route ${input.originAirport.iataCode}→${input.destinationAirport.iataCode}):`,
+        err,
+      );
+      return null;
+    }
+  }
+
+  private buildUserPrompt(input: FlightGenerationInput): string {
     // Now airlineList = "A3 (Aegean Airlines), LH (Lufthansa)" for the above example. Used in the user prompt to give the LLM context on what airlines are available for this route/date.
     const airlineList = input.allowedAirlines
       .map((a) => `${a.iataCode} (${a.name})`)
@@ -123,7 +163,7 @@ export class LlmFlightSource {
     }
 
     // Now userPrompt = "Route: ATH (Athens) → FRA (Frankfurt)\nDeparture date: 2024-07-01\nAvailable airlines: A3 (Aegean Airlines), LH (Lufthansa)\n\nReturn the flight offers as JSON matching the provided schema."
-    const userPrompt = [
+    return [
       `Route: ${input.originAirport.iataCode} (${input.originAirport.cityName}) → ${input.destinationAirport.iataCode} (${input.destinationAirport.cityName})`,
       `Departure date: ${input.departureDate}`,
       `Available airlines: ${airlineList}`,
@@ -131,77 +171,51 @@ export class LlmFlightSource {
       '',
       'Return the flight offers as JSON matching the provided schema.',
     ].join('\n');
+  }
 
-    const startedAt = Date.now();
-
-    try {
-      const response = await this.client.responses.parse({
-        model: this.model,
-        input: [
-          { role: 'system', content: SYSTEM_PROMPT },
-          { role: 'user', content: userPrompt },
-        ],
-        text: {
-          // The Responses API uses a "text.format" envelope to carry the
-          // schema. zodTextFormat wraps our Zod schema in the correct
-          // envelope shape for the API.
-          // E.g, { type: 'json_schema', name, strict, schema } where
-          // the inner `schema` is what OpenAI actually enforces during
-          // generation.
-          format: zodTextFormat(schema, 'flight_generation'),
-        },
-      });
-
-      // Responses API returns output_parsed = null in three cases:
-      // (a) the model refused (a 'refusal' item shows up in
-      //     response.output);
-      // (b) the response was cut off (length limit) before finishing;
-      // (c) Zod validation failed on a malformed structured output.
-      // We treat all three identically — log + return null — because
-      // the caller only cares "did we get usable offers or not."
-      const parsed = response.output_parsed;
-
-      if (!parsed) {
-        console.error(
-          `[LlmFlightSource] parse returned no data (route ${input.originAirport.iataCode}→${input.destinationAirport.iataCode}) — possible refusal, length cutoff, or validation failure`,
-        );
-        return null;
-      }
-
-      const latencyMs = Date.now() - startedAt;
-      console.log(
-        `[LlmFlightSource] generated ${parsed.flights.length} offers for ${input.originAirport.iataCode}→${input.destinationAirport.iataCode} on ${input.departureDate} in ${latencyMs}ms`,
-      );
-
-      // The structured output is guaranteed to conform to the Zod schema
-      // because we passed it to the Responses API in text.format. No
-      // further validation is needed here.
-      // The type of `parsed` is FlightGenerationResponse, so we can return it directly.
-      // As per example above, parsed = {
-      //   flights: [
-      //     {
-      //       airlineIata: 'A3',
-      //       flightNumber: '1234',
-      //       departureTimeHHMM: '08:30',
-      //       durationMinutes: 180,
-      //       basePriceEUR: 150,
-      //       stops: 0,
-      //       aircraft: 'A320',
-      //       seatsAvailable: 50,
-      //     },
-      //     ...
-      //   ]
-      // }
-      return parsed;
-    } catch (err) {
-      // Covers network errors, rate limits, SDK-level parse errors,
-      // and refusal-throwing modes if the SDK ever surfaces them that
-      // way in a future version.
+  private handleParsedResponse(
+    parsed: FlightGenerationResponse | null,
+    input: FlightGenerationInput,
+    startedAt: number,
+  ): FlightGenerationResponse | null {
+    // Responses API returns output_parsed = null in three cases:
+    // (a) the model refused (a 'refusal' item shows up in
+    //     response.output);
+    // (b) the response was cut off (length limit) before finishing;
+    // (c) Zod validation failed on a malformed structured output.
+    // We treat all three identically — log + return null — because
+    // the caller only cares "did we get usable offers or not."
+    if (!parsed) {
       console.error(
-        `[LlmFlightSource] generation failed (route ${input.originAirport.iataCode}→${input.destinationAirport.iataCode}):`,
-        err,
+        `[LlmFlightSource] parse returned no data (route ${input.originAirport.iataCode}→${input.destinationAirport.iataCode}) — possible refusal, length cutoff, or validation failure`,
       );
       return null;
     }
+
+    const latencyMs = Date.now() - startedAt;
+    console.log(
+      `[LlmFlightSource] generated ${parsed.flights.length} offers for ${input.originAirport.iataCode}→${input.destinationAirport.iataCode} on ${input.departureDate} in ${latencyMs}ms`,
+    );
+
+    // The structured output is guaranteed to conform to the Zod schema
+    // because we passed it to the Responses API in text.format. No
+    // further validation is needed here.
+    // The type of `parsed` is FlightGenerationResponse, so we can return it directly.
+    // As per example above, parsed = {
+    //   flights: [
+    //     {
+    //       airlineIata: 'A3',
+    //       flightNumber: '1234',
+    //       departureTimeHHMM: '08:30',
+    //       durationMinutes: 180,
+    //       basePriceEUR: 150,
+    //       stops: 0,
+    //       aircraft: 'A320',
+    //       seatsAvailable: 50,
+    //     },
+    //     ...
+    //   ]
+    // }
+    return parsed;
   }
 }

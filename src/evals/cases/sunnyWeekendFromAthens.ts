@@ -63,7 +63,8 @@ function euroCountCheck(out: CaseOutput): {
   const flightsPresent = anyRoundTripFlightHasResults(out);
   const threshold = flightsPresent ? 4 : 1;
   return {
-    description: 'final summary references € figures (≥4 with flights, ≥1 hotel-only)',
+    description:
+      'final summary references € figures (≥4 with flights, ≥1 hotel-only)',
     passed: count >= threshold,
     details: `€ count: ${count} (${flightsPresent ? 'flights present → need ≥4' : 'no flights → need ≥1'})`,
   };
@@ -168,20 +169,135 @@ function tripTotalArithmeticCheck(out: CaseOutput): {
     };
   }
 
-  // Compute the set of valid trip totals as: for each round-trip flight
-  // call, form (outbound × inbound) using only that call's own arrays
-  // (keeps directions bound together), then combine with any hotel total.
-  // validCombos keeps the unique sums of (outbound + return + hotel_total) rounded to two decimal places. This ensures that we have a comprehensive set of all possible trip totals based on the tool outputs.
-  // E.g., if we have two round-trip flight calls with outbound prices [100, 150] (meaning that the outbound flight has two options, i.e, two competing flights on the same leg — e.g. Aegean at €100 vs Lufthansa at €150) and inbound prices [80, 120] (with also two options), and one hotel call with total prices [200, 300], then validCombos will include:
-  // 100 + 80 + 200 = 380
-  // 100 + 80 + 300 = 480
-  // 100 + 120 + 200 = 420
-  // 100 + 120 + 300 = 520
-  // 150 + 80 + 200 = 430
-  // 150 + 80 + 300 = 530
-  // 150 + 120 + 200 = 470
-  // 150 + 120 + 300 = 570
-  // i.e., validCombos = {380, 420, 430, 470, 480, 520, 530, 570}.
+  const { validCombos, sawEmptyInbound, allFlightsEmpty } = buildValidCombos(
+    roundTripFlightCalls,
+    hotelCalls,
+  );
+
+  // If we didn't find any valid combinations, split on why:
+  //
+  //   - Mode C escape: every round-trip flight call returned both arrays
+  //     empty. There are no flights to build a combo from. The response
+  //     is legit iff it (a) doesn't invent a trip total and (b) openly
+  //     acknowledges the missing flights via HONEST_THIN_DATA_PHRASING.
+  //     A response that quotes a hotel-only total is fine — hotel totals
+  //     aren't trip totals, and the lenient candidate check below never
+  //     confuses the two once we short-circuit here.
+  //   - Otherwise (no hotels, or some other sparsity): hard fail with
+  //     the original message. That signals a real problem with the
+  //     tool results the eval should surface.
+  if (validCombos.size === 0) {
+    if (allFlightsEmpty && HONEST_THIN_DATA_PHRASING.test(out.finalText)) {
+      return {
+        description,
+        passed: true,
+        details:
+          'thin-data escape (both outbound and inbound empty): response acknowledged missing flights without inventing a trip total',
+      };
+    }
+    return {
+      description,
+      passed: false,
+      details:
+        'no valid (outbound [+ return] + hotel) combination could be built from tool results',
+    };
+  }
+
+  const { candidates, contextByCandidate } = extractTripTotalCandidates(
+    out.finalText,
+  );
+
+  if (candidates.length === 0) {
+    // No candidates found at all — the summary doesn't contain any "= €X"
+    // equations or trip-total phrases. Dump the tail so we can see what
+    // the model actually wrote and extend the patterns if needed.
+    const tail = out.finalText.slice(-500).replace(/\s+/g, ' ').trim();
+    return {
+      description,
+      passed: false,
+      details: `no "= €X" or trip-total phrase found in summary. Tail:\n        "…${tail}"`,
+    };
+  }
+
+  // Lenient: if ANY candidate matches a valid combo (exact, or ±€1 slack
+  // for rounding noise), the arithmetic is fine. Sub-totals and per-hotel
+  // totals will fail to match but that's harmless — we only fail if NONE
+  // of the candidates matches, which is the actual arithmetic-bug signal.
+  const matchedCandidate = candidates.find((t) => {
+    const rounded = Math.round(t * 100) / 100;
+    if (validCombos.has(rounded)) return true;
+    for (const v of validCombos) if (Math.abs(v - rounded) < 1) return true;
+    return false;
+  });
+
+  if (matchedCandidate === undefined) {
+    // Thin-data escape: when inbound was empty for at least one flight
+    // call AND no candidate matched, check whether the response prose is
+    // openly honest about the missing return leg. If the model wrote
+    // "no return flights available" / "only outbound" / "cannot confirm
+    // the full trip" style phrasing, it deliberately chose NOT to write
+    // a grand total rather than invent one — that's the desired Stage
+    // 17.5 THIN TOOL DATA behavior. Accept it as a pass.
+    if (sawEmptyInbound && HONEST_THIN_DATA_PHRASING.test(out.finalText)) {
+      return {
+        description,
+        passed: true,
+        details:
+          'thin-data escape: response acknowledged missing return leg without writing a fabricated trip total',
+      };
+    }
+    // Failure: show every candidate we did find with its context so we
+    // can see whether the check missed a real total or the model actually
+    // wrote wrong numbers.
+    const uniqueCandidates = Array.from(new Set(candidates));
+
+    const candidateLines = uniqueCandidates.map((n) => {
+      const ctxs = contextByCandidate.get(n) ?? ['(no context)'];
+      return `€${n} @ ${ctxs.join(' / ')}`;
+    });
+
+    const sortedCombos = Array.from(validCombos).sort((a, b) => a - b);
+    const sample = sortedCombos.slice(0, 6).map((n) => '€' + n);
+    const sampleSuffix = sortedCombos.length > 6 ? ', …' : '';
+
+    return {
+      description,
+      passed: false,
+      details:
+        `no candidate total matched any valid combo. Candidates:\n        ${candidateLines.join('\n        ')}\n` +
+        `        checked against ${validCombos.size} valid combo(s); sample: ${sample.join(', ')}${sampleSuffix}`,
+    };
+  }
+
+  return {
+    description,
+    passed: true,
+    details: `€${matchedCandidate} matched (out of ${candidates.length} candidate(s) against ${validCombos.size} valid combo(s))`,
+  };
+}
+
+// Compute the set of valid trip totals as: for each round-trip flight
+// call, form (outbound × inbound) using only that call's own arrays
+// (keeps directions bound together), then combine with any hotel total.
+// validCombos keeps the unique sums of (outbound + return + hotel_total) rounded to two decimal places. This ensures that we have a comprehensive set of all possible trip totals based on the tool outputs.
+// E.g., if we have two round-trip flight calls with outbound prices [100, 150] (meaning that the outbound flight has two options, i.e, two competing flights on the same leg — e.g. Aegean at €100 vs Lufthansa at €150) and inbound prices [80, 120] (with also two options), and one hotel call with total prices [200, 300], then validCombos will include:
+// 100 + 80 + 200 = 380
+// 100 + 80 + 300 = 480
+// 100 + 120 + 200 = 420
+// 100 + 120 + 300 = 520
+// 150 + 80 + 200 = 430
+// 150 + 80 + 300 = 530
+// 150 + 120 + 200 = 470
+// 150 + 120 + 300 = 570
+// i.e., validCombos = {380, 420, 430, 470, 480, 520, 530, 570}.
+function buildValidCombos(
+  roundTripFlightCalls: CaseOutput['toolCalls'],
+  hotelCalls: CaseOutput['toolCalls'],
+): {
+  validCombos: Set<number>;
+  sawEmptyInbound: boolean;
+  allFlightsEmpty: boolean;
+} {
   const validCombos = new Set<number>();
   // Set to true if at least one round-trip flight call returned an
   // empty `inbound` array (with outbound still present). Used later to
@@ -301,55 +417,33 @@ function tripTotalArithmeticCheck(out: CaseOutput): {
     }
   }
 
-  // If we didn't find any valid combinations, split on why:
-  //
-  //   - Mode C escape: every round-trip flight call returned both arrays
-  //     empty. There are no flights to build a combo from. The response
-  //     is legit iff it (a) doesn't invent a trip total and (b) openly
-  //     acknowledges the missing flights via HONEST_THIN_DATA_PHRASING.
-  //     A response that quotes a hotel-only total is fine — hotel totals
-  //     aren't trip totals, and the lenient candidate check below never
-  //     confuses the two once we short-circuit here.
-  //   - Otherwise (no hotels, or some other sparsity): hard fail with
-  //     the original message. That signals a real problem with the
-  //     tool results the eval should surface.
-  if (validCombos.size === 0) {
-    if (allFlightsEmpty && HONEST_THIN_DATA_PHRASING.test(out.finalText)) {
-      return {
-        description,
-        passed: true,
-        details:
-          'thin-data escape (both outbound and inbound empty): response acknowledged missing flights without inventing a trip total',
-      };
-    }
-    return {
-      description,
-      passed: false,
-      details:
-        'no valid (outbound [+ return] + hotel) combination could be built from tool results',
-    };
-  }
+  return { validCombos, sawEmptyInbound, allFlightsEmpty };
+}
 
-  // Collect candidate "trip total" values from two sources in the summary:
-  //   (a) Every "= €X" occurrence — equations of any kind (flight
-  //       subtotals, per-hotel totals, per-option grand totals).
-  //   (b) Every "<trip-total-phrase>: €X" occurrence — labelled totals
-  //       without an equation.
-  //
-  // The check is LENIENT: we require that AT LEAST ONE candidate matches
-  // a valid combo. Rationale: flight sub-totals and per-hotel totals
-  // legitimately appear as "= €X" but aren't trip totals — expecting
-  // every match to validate produces false failures. The bug we're
-  // actually hunting (one-leg arithmetic, hallucinated per-night prices,
-  // etc.) shows up as NO valid combo appearing anywhere in the summary.
+// Collect candidate "trip total" values from two sources in the summary:
+//   (a) Every "= €X" occurrence — equations of any kind (flight
+//       subtotals, per-hotel totals, per-option grand totals).
+//   (b) Every "<trip-total-phrase>: €X" occurrence — labelled totals
+//       without an equation.
+//
+// The check is LENIENT: we require that AT LEAST ONE candidate matches
+// a valid combo. Rationale: flight sub-totals and per-hotel totals
+// legitimately appear as "= €X" but aren't trip totals — expecting
+// every match to validate produces false failures. The bug we're
+// actually hunting (one-leg arithmetic, hallucinated per-night prices,
+// etc.) shows up as NO valid combo appearing anywhere in the summary.
+function extractTripTotalCandidates(finalText: string): {
+  candidates: number[];
+  contextByCandidate: Map<number, string[]>;
+} {
   const candidates: number[] = [];
   const contextByCandidate = new Map<number, string[]>();
 
   function push(value: number, matchStart: number, matchLength: number) {
     candidates.push(value);
     const start = Math.max(0, matchStart - 20);
-    const end = Math.min(out.finalText.length, matchStart + matchLength + 20);
-    const context = out.finalText.slice(start, end).replace(/\s+/g, ' ').trim();
+    const end = Math.min(finalText.length, matchStart + matchLength + 20);
+    const context = finalText.slice(start, end).replace(/\s+/g, ' ').trim();
     const list = contextByCandidate.get(value) ?? [];
     list.push(`"…${context}…"`);
     contextByCandidate.set(value, list);
@@ -360,7 +454,7 @@ function tripTotalArithmeticCheck(out: CaseOutput): {
   // "= **€471.60**" or hedged phrasing like "= approximately €471.60".
   const eqPattern = /=[^€\d\n]{0,20}€\s*([\d,]+(?:\.\d+)?)/g;
   let em: RegExpExecArray | null;
-  while ((em = eqPattern.exec(out.finalText)) !== null) {
+  while ((em = eqPattern.exec(finalText)) !== null) {
     const n = parseFloat(em[1].replace(/,/g, ''));
     if (!Number.isNaN(n)) push(n, em.index, em[0].length);
   }
@@ -370,7 +464,7 @@ function tripTotalArithmeticCheck(out: CaseOutput): {
   const phrasePattern =
     /(?:trip\s+total|total\s+trip\s+cost|total\s+trip|grand\s+total|overall\s+total|total\s+estimated\s+cost|total\s+cost|total\s+estimate|estimated\s+total|trip\s+cost|overall\s+cost)[^€]{0,30}€\s*([\d,]+(?:\.\d+)?)/gi;
   let pm: RegExpExecArray | null;
-  while ((pm = phrasePattern.exec(out.finalText)) !== null) {
+  while ((pm = phrasePattern.exec(finalText)) !== null) {
     const n = parseFloat(pm[1].replace(/,/g, ''));
     if (!Number.isNaN(n)) push(n, pm.index, pm[0].length);
   }
@@ -384,75 +478,12 @@ function tripTotalArithmeticCheck(out: CaseOutput): {
   // on failure.
   const plainTotalPattern = /\bTotal\s*:[^€\d\n]{0,20}€\s*([\d,]+(?:\.\d+)?)/gi;
   let tm: RegExpExecArray | null;
-  while ((tm = plainTotalPattern.exec(out.finalText)) !== null) {
+  while ((tm = plainTotalPattern.exec(finalText)) !== null) {
     const n = parseFloat(tm[1].replace(/,/g, ''));
     if (!Number.isNaN(n)) push(n, tm.index, tm[0].length);
   }
 
-  if (candidates.length === 0) {
-    // No candidates found at all — the summary doesn't contain any "= €X"
-    // equations or trip-total phrases. Dump the tail so we can see what
-    // the model actually wrote and extend the patterns if needed.
-    const tail = out.finalText.slice(-500).replace(/\s+/g, ' ').trim();
-    return {
-      description,
-      passed: false,
-      details: `no "= €X" or trip-total phrase found in summary. Tail:\n        "…${tail}"`,
-    };
-  }
-
-  // Lenient: if ANY candidate matches a valid combo (exact, or ±€1 slack
-  // for rounding noise), the arithmetic is fine. Sub-totals and per-hotel
-  // totals will fail to match but that's harmless — we only fail if NONE
-  // of the candidates matches, which is the actual arithmetic-bug signal.
-  const matchedCandidate = candidates.find((t) => {
-    const rounded = Math.round(t * 100) / 100;
-    if (validCombos.has(rounded)) return true;
-    for (const v of validCombos) if (Math.abs(v - rounded) < 1) return true;
-    return false;
-  });
-
-  if (matchedCandidate === undefined) {
-    // Thin-data escape: when inbound was empty for at least one flight
-    // call AND no candidate matched, check whether the response prose is
-    // openly honest about the missing return leg. If the model wrote
-    // "no return flights available" / "only outbound" / "cannot confirm
-    // the full trip" style phrasing, it deliberately chose NOT to write
-    // a grand total rather than invent one — that's the desired Stage
-    // 17.5 THIN TOOL DATA behavior. Accept it as a pass.
-    if (sawEmptyInbound && HONEST_THIN_DATA_PHRASING.test(out.finalText)) {
-      return {
-        description,
-        passed: true,
-        details:
-          'thin-data escape: response acknowledged missing return leg without writing a fabricated trip total',
-      };
-    }
-    // Failure: show every candidate we did find with its context so we
-    // can see whether the check missed a real total or the model actually
-    // wrote wrong numbers.
-    const uniqueCandidates = Array.from(new Set(candidates));
-    const candidateLines = uniqueCandidates.map((n) => {
-      const ctxs = contextByCandidate.get(n) ?? ['(no context)'];
-      return `€${n} @ ${ctxs.join(' / ')}`;
-    });
-    const sortedCombos = Array.from(validCombos).sort((a, b) => a - b);
-    const sample = sortedCombos.slice(0, 6).map((n) => '€' + n);
-    const sampleSuffix = sortedCombos.length > 6 ? ', …' : '';
-    return {
-      description,
-      passed: false,
-      details:
-        `no candidate total matched any valid combo. Candidates:\n        ${candidateLines.join('\n        ')}\n` +
-        `        checked against ${validCombos.size} valid combo(s); sample: ${sample.join(', ')}${sampleSuffix}`,
-    };
-  }
-
-  return {
-    description,
-    passed: true,
-    details: `€${matchedCandidate} matched (out of ${candidates.length} candidate(s) against ${validCombos.size} valid combo(s))`,
-  };
+  return { candidates, contextByCandidate };
 }
 
 // Helper to extract the `price` numbers from an array of objects that may or may not have a `price` property. Filters out undefined values and returns an array of numbers. If the input is undefined, returns an empty array.

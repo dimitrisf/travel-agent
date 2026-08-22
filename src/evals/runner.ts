@@ -39,7 +39,7 @@ import { todayClaimWithoutWeatherCallTrips } from './synthetic/todayClaimWithout
 import { weatherClaimOutsideCoverageTrips } from './synthetic/weatherClaimOutsideCoverageTrips';
 import { weatherClaimWithinCoverageAllowed } from './synthetic/weatherClaimWithinCoverageAllowed';
 import { wrongTotalTrips } from './synthetic/wrongTotalTrips';
-import type { Case, SyntheticGuardrailCase } from './types';
+import type { Case, CaseOutput, SyntheticGuardrailCase } from './types';
 
 // Case set grows per phase. Single-turn cases first, then the multi-turn
 // regressions added in Stage 10 Phase 4, then the Stage-9 guardrail cases.
@@ -195,9 +195,10 @@ async function warmDatabase(base: string): Promise<void> {
   );
 }
 
-async function main() {
-  const base =
-    process.env.APP_BASE ?? `http://localhost:${process.env.PORT ?? 3000}`;
+async function setupMcpServers(base: string): Promise<{
+  mcpTravel: MCPServerStreamableHttp;
+  mcpWeather: MCPServerStreamableHttp;
+}> {
   const mcpTravel = new MCPServerStreamableHttp({
     name: 'travel',
     url: process.env.TRAVEL_MCP_URL ?? `${base}/api/mcp/travel`,
@@ -217,17 +218,17 @@ async function main() {
     process.exit(1);
   }
 
-  // Wake the DB before running cases so the first case doesn't eat a
-  // cold-start P1001. See warmDatabase() for the retry policy.
-  await warmDatabase(base);
+  return { mcpTravel, mcpWeather };
+}
 
-  // Support `npm run evals -- --case name-pattern` to run one case (or a
-  // substring match) in isolation. Handy while iterating on a single fix.
-  //
-  // Also honor `EVALS_CASE=name-pattern` as a fallback because npm on some
-  // Windows versions strips arbitrary flags between `--` and the script,
-  // even when they shouldn't be npm-owned (`--brief`, `--case ...` have
-  // both been observed to disappear on npm 10.9.2). Env vars survive.
+// Support `npm run evals -- --case name-pattern` to run one case (or a
+// substring match) in isolation. Handy while iterating on a single fix.
+//
+// Also honor `EVALS_CASE=name-pattern` as a fallback because npm on some
+// Windows versions strips arbitrary flags between `--` and the script,
+// even when they shouldn't be npm-owned (`--brief`, `--case ...` have
+// both been observed to disappear on npm 10.9.2). Env vars survive.
+function parseCliArgs(): { filter: string | undefined; brief: boolean } {
   const filterArg = process.argv.indexOf('--case');
   // E.g., `npm run evals -- --case hotels` → filter="hotels"
   const filter =
@@ -243,6 +244,13 @@ async function main() {
   const brief =
     process.argv.includes('--brief') || process.env.EVALS_BRIEF === '1';
 
+  return { filter, brief };
+}
+
+function filterCases(filter: string | undefined): {
+  selected: Case[];
+  selectedSynth: SyntheticGuardrailCase[];
+} {
   const selected = filter
     ? CASES.filter((c) => c.name.includes(filter))
     : CASES;
@@ -253,6 +261,197 @@ async function main() {
   const selectedSynth = filter
     ? SYNTHETIC_CASES.filter((c) => c.name.includes(filter))
     : SYNTHETIC_CASES;
+  return { selected, selectedSynth };
+}
+
+async function runRegularCase(
+  c: Case,
+  mcpTravel: MCPServerStreamableHttp,
+  mcpWeather: MCPServerStreamableHttp,
+  brief: boolean,
+): Promise<{ failed: number; total: number }> {
+  process.stdout.write(`\n▶ ${c.name}\n  ${c.description}\n`);
+  // Wall-clock per case. Useful for spotting slow cases (Neon cold-start,
+  // big searches) without a separate profiler.
+  const t0 = Date.now();
+  const out = await runCase(c, mcpTravel, mcpWeather);
+  const elapsedSec = ((Date.now() - t0) / 1000).toFixed(1);
+  const results = c.expect(out);
+  let caseFailed = 0;
+
+  for (const r of results) {
+    const icon = r.passed ? '  ✓' : '  ✗';
+    process.stdout.write(`${icon} ${r.description}\n`);
+    if (!r.passed) {
+      caseFailed++;
+      if (r.details) process.stdout.write(`      ${r.details}\n`);
+    }
+  }
+  // Timing line, with a `retried Nx` annotation if runWithBackoff had
+  // to absorb any 429s during this case (Stage 17.6). Zero on almost
+  // every run — the annotation is the loud visibility for the runs
+  // where TPM saturation quietly happened underneath.
+  const retryNote =
+    out.retries && out.retries > 0 ? `, retried ${out.retries}x` : '';
+  process.stdout.write(`  (${elapsedSec}s${retryNote})\n`);
+
+  // Skip the agent-output block on green passes when --brief is set.
+  // Failing cases always print it — that's the whole point of having it.
+  if (!(brief && caseFailed === 0)) {
+    printAgentOutputDump(c, out);
+  }
+
+  return { failed: caseFailed, total: results.length };
+}
+
+function printAgentOutputDump(c: Case, out: CaseOutput): void {
+  process.stdout.write(`\n  ── agent output ──\n`);
+  // Print each turn's user input so multi-turn cases show the whole
+  // conversation flow. Single-turn cases still get "User: ..." (turn count 1).
+  const turns = getTurns(c);
+  if (turns.length === 1) {
+    process.stdout.write(`  User: ${turns[0]}\n`);
+  } else {
+    turns.forEach((t, i) => {
+      process.stdout.write(`  User (turn ${i + 1}/${turns.length}): ${t}\n`);
+    });
+  }
+  process.stdout.write(`  Last agent: ${out.lastAgent}\n`);
+  if (out.guardrailTripped) {
+    process.stdout.write(`  Guardrail tripped: ${out.guardrailTripped}\n`);
+  }
+  if (out.errored) {
+    process.stdout.write(`  Errored: ${out.errored}\n`);
+  }
+  process.stdout.write(`  Tool calls (${out.toolCalls.length}):\n`);
+  for (const tc of out.toolCalls) {
+    const argsStr = JSON.stringify(tc.args);
+    const shortArgs =
+      argsStr.length > 120 ? argsStr.slice(0, 120) + '…' : argsStr;
+    process.stdout.write(`    - ${tc.agent} → ${tc.name}(${shortArgs})\n`);
+    // Also surface a compact summary of the tool output — e.g. so a
+    // "search returned 5 flights but the summary listed 1" mismatch is
+    // visible at a glance without re-running with a debugger.
+    if (tc.output != null) {
+      process.stdout.write(
+        `        → ${summarizeToolOutput(tc.parsedOutput, tc.output)}\n`,
+      );
+    }
+  }
+  process.stdout.write(`  Final message:\n`);
+  // Indent every line of the final message by 4 spaces so it visually
+  // sits under the "Final message:" label.
+  const indented = out.finalText
+    .split('\n')
+    .map((line) => `    ${line}`)
+    .join('\n');
+  process.stdout.write(indented + '\n');
+  process.stdout.write(`  ── end agent output ──\n`);
+}
+
+async function runSyntheticCase(
+  sc: SyntheticGuardrailCase,
+): Promise<{ failed: number; total: number }> {
+  // E.g., sc = bookingWithoutCallTrips
+  process.stdout.write(`\n▶ ${sc.name}\n  ${sc.description}\n`);
+
+  const t0 = Date.now();
+  let result;
+  let executeError: string | undefined;
+
+  try {
+    result = await invokeSyntheticGuardrail(sc);
+  } catch (err) {
+    executeError = (err as Error)?.message ?? String(err);
+  }
+
+  const elapsedSec = ((Date.now() - t0) / 1000).toFixed(2);
+
+  // If the guardrail executed successfully, run the case's assertions on its output.
+  // If the guardrail threw, report that as a single failed assertion.
+
+  const assertions =
+    result !== undefined
+      ? sc.expect(result)
+      : // If the guardrail executed successfully, run the case's assertions on its output.
+        [
+          {
+            description: 'guardrail.execute did not throw',
+            passed: false,
+            details: `threw: ${executeError}`,
+          },
+        ];
+
+  let synthFailed = 0;
+  // Track the number of failed assertions for this synthetic case, so we can report it in the summary at the end.
+  // This is similar to how we track failed assertions for regular cases above.
+  // E.g., assertions = [
+  //   { description: 'tripwire triggered', passed: true },
+  //   { description: 'outputInfo.patternName is "booking-without-call"', passed: true }
+  // ], or
+  //   assertions = [
+  //     { description: 'tripwire triggered', passed: false, details: 'expected true, got false' },
+  //     { description: 'outputInfo.patternName is "booking-without-call"', passed: true }
+  //   ]
+  for (const a of assertions) {
+    // E.g, a = { description: 'tripwire triggered', passed: true }
+    // or a = { description: 'outputInfo.patternName is "booking-without-call"', passed: false, details: 'expected "booking-without-call", got "some-other-pattern"' }
+    const icon = a.passed ? '  ✓' : '  ✗';
+    process.stdout.write(`${icon} ${a.description}\n`);
+
+    if (!a.passed) {
+      synthFailed++;
+      if (a.details) process.stdout.write(`      ${a.details}\n`);
+    }
+  }
+
+  process.stdout.write(`  (${elapsedSec}s)\n`);
+
+  return { failed: synthFailed, total: assertions.length };
+}
+
+function printFinalSummary(params: {
+  totalAsserts: number;
+  failedAsserts: number;
+  selected: Case[];
+  selectedSynth: SyntheticGuardrailCase[];
+  failedCases: Array<{ name: string; failed: number; total: number }>;
+}): number {
+  const { totalAsserts, failedAsserts, selected, selectedSynth, failedCases } =
+    params;
+
+  process.stdout.write(
+    `\n${totalAsserts - failedAsserts}/${totalAsserts} assertions passed across ${selected.length} case(s) + ${selectedSynth.length} synthetic.\n`,
+  );
+
+  if (failedCases.length > 0) {
+    // One line per failed case with its own pass/fail ratio, so the
+    // summary tells you where to look first when several cases fail.
+    process.stdout.write(`Failed cases:\n`);
+    for (const fc of failedCases) {
+      process.stdout.write(
+        `  - ${fc.name} (${fc.failed}/${fc.total} failed)\n`,
+      );
+    }
+    return 1;
+  }
+
+  process.stdout.write('All cases passed.\n');
+  return 0;
+}
+
+async function main() {
+  const base =
+    process.env.APP_BASE ?? `http://localhost:${process.env.PORT ?? 3000}`;
+
+  const { mcpTravel, mcpWeather } = await setupMcpServers(base);
+
+  // Wake the DB before running cases so the first case doesn't eat a
+  // cold-start P1001. See warmDatabase() for the retry policy.
+  await warmDatabase(base);
+
+  const { filter, brief } = parseCliArgs();
+  const { selected, selectedSynth } = filterCases(filter);
 
   if (filter && selected.length === 0 && selectedSynth.length === 0) {
     console.error(`No cases matched --case "${filter}".`);
@@ -281,88 +480,17 @@ async function main() {
     [];
 
   for (const c of selected) {
-    process.stdout.write(`\n▶ ${c.name}\n  ${c.description}\n`);
-    // Wall-clock per case. Useful for spotting slow cases (Neon cold-start,
-    // big searches) without a separate profiler.
-    const t0 = Date.now();
-    const out = await runCase(c, mcpTravel, mcpWeather);
-    const elapsedSec = ((Date.now() - t0) / 1000).toFixed(1);
-    const results = c.expect(out);
-    let caseFailed = 0;
-
-    for (const r of results) {
-      totalAsserts++;
-      const icon = r.passed ? '  ✓' : '  ✗';
-      process.stdout.write(`${icon} ${r.description}\n`);
-      if (!r.passed) {
-        failedAsserts++;
-        caseFailed++;
-        if (r.details) process.stdout.write(`      ${r.details}\n`);
-      }
+    const { failed, total } = await runRegularCase(
+      c,
+      mcpTravel,
+      mcpWeather,
+      brief,
+    );
+    totalAsserts += total;
+    failedAsserts += failed;
+    if (failed > 0) {
+      failedCases.push({ name: c.name, failed, total });
     }
-    // Timing line, with a `retried Nx` annotation if runWithBackoff had
-    // to absorb any 429s during this case (Stage 17.6). Zero on almost
-    // every run — the annotation is the loud visibility for the runs
-    // where TPM saturation quietly happened underneath.
-    const retryNote =
-      out.retries && out.retries > 0 ? `, retried ${out.retries}x` : '';
-    process.stdout.write(`  (${elapsedSec}s${retryNote})\n`);
-    if (caseFailed > 0) {
-      failedCases.push({
-        name: c.name,
-        failed: caseFailed,
-        total: results.length,
-      });
-    }
-
-    // Skip the agent-output block on green passes when --brief is set.
-    // Failing cases always print it — that's the whole point of having it.
-    if (brief && caseFailed === 0) {
-      continue;
-    }
-
-    process.stdout.write(`\n  ── agent output ──\n`);
-    // Print each turn's user input so multi-turn cases show the whole
-    // conversation flow. Single-turn cases still get "User: ..." (turn count 1).
-    const turns = getTurns(c);
-    if (turns.length === 1) {
-      process.stdout.write(`  User: ${turns[0]}\n`);
-    } else {
-      turns.forEach((t, i) => {
-        process.stdout.write(`  User (turn ${i + 1}/${turns.length}): ${t}\n`);
-      });
-    }
-    process.stdout.write(`  Last agent: ${out.lastAgent}\n`);
-    if (out.guardrailTripped) {
-      process.stdout.write(`  Guardrail tripped: ${out.guardrailTripped}\n`);
-    }
-    if (out.errored) {
-      process.stdout.write(`  Errored: ${out.errored}\n`);
-    }
-    process.stdout.write(`  Tool calls (${out.toolCalls.length}):\n`);
-    for (const tc of out.toolCalls) {
-      const argsStr = JSON.stringify(tc.args);
-      const shortArgs =
-        argsStr.length > 120 ? argsStr.slice(0, 120) + '…' : argsStr;
-      process.stdout.write(`    - ${tc.agent} → ${tc.name}(${shortArgs})\n`);
-      // Also surface a compact summary of the tool output — e.g. so a
-      // "search returned 5 flights but the summary listed 1" mismatch is
-      // visible at a glance without re-running with a debugger.
-      if (tc.output != null) {
-        process.stdout.write(
-          `        → ${summarizeToolOutput(tc.parsedOutput, tc.output)}\n`,
-        );
-      }
-    }
-    process.stdout.write(`  Final message:\n`);
-    // Indent every line of the final message by 4 spaces so it visually
-    // sits under the "Final message:" label.
-    const indented = out.finalText
-      .split('\n')
-      .map((line) => `    ${line}`)
-      .join('\n');
-    process.stdout.write(indented + '\n');
-    process.stdout.write(`  ── end agent output ──\n`);
   }
 
   // Synthetic guardrail cases — Stage 11 Phase 5. `selectedSynth` was
@@ -377,90 +505,24 @@ async function main() {
     );
 
     for (const sc of selectedSynth) {
-      // E.g., sc = bookingWithoutCallTrips
-      process.stdout.write(`\n▶ ${sc.name}\n  ${sc.description}\n`);
-
-      const t0 = Date.now();
-      let result;
-      let executeError: string | undefined;
-
-      try {
-        result = await invokeSyntheticGuardrail(sc);
-      } catch (err) {
-        executeError = (err as Error)?.message ?? String(err);
-      }
-
-      const elapsedSec = ((Date.now() - t0) / 1000).toFixed(2);
-
-      // If the guardrail executed successfully, run the case's assertions on its output.
-      // If the guardrail threw, report that as a single failed assertion.
-
-      const assertions =
-        result !== undefined
-          ? sc.expect(result)
-          : // If the guardrail executed successfully, run the case's assertions on its output.
-            [
-              {
-                description: 'guardrail.execute did not throw',
-                passed: false,
-                details: `threw: ${executeError}`,
-              },
-            ];
-
-      let synthFailed = 0;
-      // Track the number of failed assertions for this synthetic case, so we can report it in the summary at the end.
-      // This is similar to how we track failed assertions for regular cases above.
-      // E.g., assertions = [
-      //   { description: 'tripwire triggered', passed: true },
-      //   { description: 'outputInfo.patternName is "booking-without-call"', passed: true }
-      // ], or
-      //   assertions = [
-      //     { description: 'tripwire triggered', passed: false, details: 'expected true, got false' },
-      //     { description: 'outputInfo.patternName is "booking-without-call"', passed: true }
-      //   ]
-      for (const a of assertions) {
-        // E.g, a = { description: 'tripwire triggered', passed: true }
-        // or a = { description: 'outputInfo.patternName is "booking-without-call"', passed: false, details: 'expected "booking-without-call", got "some-other-pattern"' }
-        totalAsserts++;
-        const icon = a.passed ? '  ✓' : '  ✗';
-        process.stdout.write(`${icon} ${a.description}\n`);
-
-        if (!a.passed) {
-          failedAsserts++;
-          synthFailed++;
-          if (a.details) process.stdout.write(`      ${a.details}\n`);
-        }
-      }
-
-      process.stdout.write(`  (${elapsedSec}s)\n`);
-      if (synthFailed > 0) {
-        failedCases.push({
-          name: sc.name,
-          failed: synthFailed,
-          total: assertions.length,
-        });
+      const { failed, total } = await runSyntheticCase(sc);
+      totalAsserts += total;
+      failedAsserts += failed;
+      if (failed > 0) {
+        failedCases.push({ name: sc.name, failed, total });
       }
     }
   }
 
-  process.stdout.write(
-    `\n${totalAsserts - failedAsserts}/${totalAsserts} assertions passed across ${selected.length} case(s) + ${selectedSynth.length} synthetic.\n`,
+  process.exit(
+    printFinalSummary({
+      totalAsserts,
+      failedAsserts,
+      selected,
+      selectedSynth,
+      failedCases,
+    }),
   );
-
-  if (failedCases.length > 0) {
-    // One line per failed case with its own pass/fail ratio, so the
-    // summary tells you where to look first when several cases fail.
-    process.stdout.write(`Failed cases:\n`);
-    for (const fc of failedCases) {
-      process.stdout.write(
-        `  - ${fc.name} (${fc.failed}/${fc.total} failed)\n`,
-      );
-    }
-    process.exit(1);
-  } else {
-    process.stdout.write('All cases passed.\n');
-    process.exit(0);
-  }
 }
 
 main().catch((err) => {
