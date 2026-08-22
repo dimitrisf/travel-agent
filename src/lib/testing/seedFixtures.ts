@@ -1,60 +1,65 @@
 import type { PrismaClient } from '@prisma/client';
 
-// Small dictionary of well-known airports used across integration
-// tests. Extend by adding an entry — no schema-side changes needed.
-// Values are realistic enough to look right in test output without
-// mattering to the assertions (lat/lon default to 0).
-const KNOWN_AIRPORTS = {
-  ATH: {
-    icao: 'LGAV',
-    name: 'Athens International',
-    city: 'Athens',
-    country: 'Greece',
-    countryCode: 'GR',
-  },
-  FRA: {
-    icao: 'EDDF',
-    name: 'Frankfurt Airport',
-    city: 'Frankfurt',
-    country: 'Germany',
-    countryCode: 'DE',
-  },
-  BER: {
-    icao: 'EDDB',
-    name: 'Berlin Brandenburg',
-    city: 'Berlin',
-    country: 'Germany',
-    countryCode: 'DE',
-  },
-  LHR: {
-    icao: 'EGLL',
-    name: 'London Heathrow',
-    city: 'London',
-    country: 'United Kingdom',
-    countryCode: 'GB',
-  },
+// Small dictionary of cities used across integration tests. Names
+// deliberately match entries in src/lib/cities.ts (`CITIES`) so
+// hotel-side Scope B guards (`CITIES[opts.cityName]`) accept them —
+// tests exercise the real path, not a bypass. Frankfurt is included
+// even though it's NOT in the app CITIES lookup because flight tests
+// need it as an airport destination; hotel tests should stick to
+// {Athens, Berlin, London} (or add more as CITIES grows).
+const KNOWN_CITIES = {
+  Athens: { country: 'Greece', countryCode: 'GR' },
+  Berlin: { country: 'Germany', countryCode: 'DE' },
+  Frankfurt: { country: 'Germany', countryCode: 'DE' },
+  London: { country: 'United Kingdom', countryCode: 'GB' },
 } as const;
 
-// Idempotently seed Country + City for the requested airport, then
-// create the Airport. Idempotent on Country (isoCode @unique) and
-// City (name @unique) so a test can call this multiple times to
-// seed several airports that share countries or cities without
-// FK/unique clashes (e.g. FRA + BER both in Germany).
-export async function seedAirport(
+// Small dictionary of well-known airports used across integration
+// tests. Extend by adding an entry — the city field must reference
+// a KNOWN_CITIES key so seedAirport can compose off seedCity.
+const KNOWN_AIRPORTS = {
+  ATH: { icao: 'LGAV', name: 'Athens International', city: 'Athens' },
+  FRA: { icao: 'EDDF', name: 'Frankfurt Airport', city: 'Frankfurt' },
+  BER: { icao: 'EDDB', name: 'Berlin Brandenburg', city: 'Berlin' },
+  LHR: { icao: 'EGLL', name: 'London Heathrow', city: 'London' },
+} as const;
+
+// Idempotent Country + City upsert. Extracted from seedAirport so
+// hotel tests (which don't need an Airport row) can seed just the
+// geographic anchor. Idempotent on Country (isoCode @unique) and
+// City (name @unique) so it composes freely — call multiple times
+// with the same name, or for several cities sharing a country
+// (Frankfurt + Berlin both DE), without FK/unique clashes.
+export async function seedCity(
   prisma: PrismaClient,
-  iata: keyof typeof KNOWN_AIRPORTS,
-): Promise<{ id: number; iataCode: string; cityId: number }> {
-  const meta = KNOWN_AIRPORTS[iata];
+  name: keyof typeof KNOWN_CITIES,
+): Promise<{ id: number; name: string }> {
+  const meta = KNOWN_CITIES[name];
   const country = await prisma.country.upsert({
     where: { isoCode: meta.countryCode },
     create: { name: meta.country, isoCode: meta.countryCode },
     update: {},
   });
   const city = await prisma.city.upsert({
-    where: { name: meta.city },
-    create: { name: meta.city, countryId: country.id },
+    where: { name },
+    create: { name, countryId: country.id },
     update: {},
   });
+  return { id: city.id, name };
+}
+
+// Seed an Airport (and its City + Country via seedCity). Airport
+// itself is a create (not upsert) — each call produces a fresh row,
+// so a test that seeds the same airport twice will error on the
+// iataCode @unique constraint. That's the intended contract; tests
+// that need multi-airport setups on the same country/city rely on
+// seedCity's idempotency handling the shared graph.
+export async function seedAirport(
+  prisma: PrismaClient,
+  iata: keyof typeof KNOWN_AIRPORTS,
+): Promise<{ id: number; iataCode: string; cityId: number }> {
+  const meta = KNOWN_AIRPORTS[iata];
+  const city = await seedCity(prisma, meta.city);
   const airport = await prisma.airport.create({
     data: {
       iataCode: iata,
