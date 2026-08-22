@@ -1,5 +1,92 @@
 import type { PrismaClient } from '@prisma/client';
 
+// Small dictionary of well-known airports used across integration
+// tests. Extend by adding an entry — no schema-side changes needed.
+// Values are realistic enough to look right in test output without
+// mattering to the assertions (lat/lon default to 0).
+const KNOWN_AIRPORTS = {
+  ATH: {
+    icao: 'LGAV',
+    name: 'Athens International',
+    city: 'Athens',
+    country: 'Greece',
+    countryCode: 'GR',
+  },
+  FRA: {
+    icao: 'EDDF',
+    name: 'Frankfurt Airport',
+    city: 'Frankfurt',
+    country: 'Germany',
+    countryCode: 'DE',
+  },
+  BER: {
+    icao: 'EDDB',
+    name: 'Berlin Brandenburg',
+    city: 'Berlin',
+    country: 'Germany',
+    countryCode: 'DE',
+  },
+  LHR: {
+    icao: 'EGLL',
+    name: 'London Heathrow',
+    city: 'London',
+    country: 'United Kingdom',
+    countryCode: 'GB',
+  },
+} as const;
+
+// Idempotently seed Country + City for the requested airport, then
+// create the Airport. Idempotent on Country (isoCode @unique) and
+// City (name @unique) so a test can call this multiple times to
+// seed several airports that share countries or cities without
+// FK/unique clashes (e.g. FRA + BER both in Germany).
+export async function seedAirport(
+  prisma: PrismaClient,
+  iata: keyof typeof KNOWN_AIRPORTS,
+): Promise<{ id: number; iataCode: string; cityId: number }> {
+  const meta = KNOWN_AIRPORTS[iata];
+  const country = await prisma.country.upsert({
+    where: { isoCode: meta.countryCode },
+    create: { name: meta.country, isoCode: meta.countryCode },
+    update: {},
+  });
+  const city = await prisma.city.upsert({
+    where: { name: meta.city },
+    create: { name: meta.city, countryId: country.id },
+    update: {},
+  });
+  const airport = await prisma.airport.create({
+    data: {
+      iataCode: iata,
+      icaoCode: meta.icao,
+      name: meta.name,
+      cityId: city.id,
+      latitude: 0,
+      longitude: 0,
+      timezone: 'UTC',
+    },
+  });
+  return { id: airport.id, iataCode: iata, cityId: city.id };
+}
+
+// Same pattern for airlines. Small hardcoded roster; extend as needed.
+const KNOWN_AIRLINES = {
+  A3: { icao: 'AEE', name: 'Aegean Airlines' },
+  LH: { icao: 'DLH', name: 'Lufthansa' },
+  BA: { icao: 'BAW', name: 'British Airways' },
+} as const;
+
+export async function seedAirline(
+  prisma: PrismaClient,
+  iata: keyof typeof KNOWN_AIRLINES,
+): Promise<{ id: number; iataCode: string; name: string }> {
+  const meta = KNOWN_AIRLINES[iata];
+  const airline = await prisma.airline.create({
+    data: { iataCode: iata, icaoCode: meta.icao, name: meta.name },
+  });
+  return { id: airline.id, iataCode: iata, name: meta.name };
+}
+
 // Create a User row for tests that need to pass a currentUser to
 // BookingService.confirmBooking/cancelBooking. Required because
 // Booking.userId is a FK to User.id — the DB rejects a claim to a
