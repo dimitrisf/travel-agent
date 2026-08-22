@@ -1,5 +1,25 @@
 import type { PrismaClient } from '@prisma/client';
 
+// Create a User row for tests that need to pass a currentUser to
+// BookingService.confirmBooking/cancelBooking. Required because
+// Booking.userId is a FK to User.id — the DB rejects a claim to a
+// user that doesn't exist. Defaults derive from `id` so `seedUser(px,
+// { id: 'alice' })` produces a consistent test identity without
+// caller-side ceremony.
+//
+// Returns the shape confirmBooking wants for `currentUser`, so the
+// caller can spread it in directly.
+export async function seedUser(
+  prisma: PrismaClient,
+  opts: { id: string; name?: string | null; email?: string },
+): Promise<{ id: string; name: string | null; email: string }> {
+  const id = opts.id;
+  const name = opts.name === undefined ? id : opts.name;
+  const email = opts.email ?? `${id}@test.example.com`;
+  await prisma.user.create({ data: { id, name, email } });
+  return { id, name, email };
+}
+
 export type ProposeBookingFixture = {
   flightInstanceId: number;
   roomTypeId: number;
