@@ -5,10 +5,11 @@ name: Unit tests
 # from Stage 23 (Phases 1 and 2). Fast enough (~seconds) that there's
 # no reason to gate on draft PRs, unlike the eval suite in evals.yml.
 #
-# When Phase 2b lands (repository tests against a real Prisma DB),
-# this workflow will gain a Neon test-branch DATABASE_URL secret and a
-# `prisma migrate deploy` step — but that's a future extension, not a
-# rewrite.
+# Phase 2b integration tests (BookingService transactional write
+# methods against a real Postgres) live in the sibling
+# integration-tests.yml workflow — they run a postgres:16 service
+# container per job and are kept separate so this fast mocked-repo
+# path stays Docker-free (~15s incl. setup).
 on:
   push:
   pull_request:

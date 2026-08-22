@@ -1,0 +1,89 @@
+name: Integration tests
+
+# Runs the Phase 2b integration suite against a real Postgres 16
+# service container on every push and every PR. Sister workflow to
+# unit-tests.yml — that suite covers the fast, mocked-repo path
+# (~15s incl. setup); this one covers the transaction-heavy
+# BookingService write methods (proposeBooking / confirmBooking /
+# cancelBooking) that need real Postgres MVCC + READ COMMITTED
+# semantics to exercise the CAS races. See README section
+# "Deferred to Phase 2b" for the choice rationale (Docker Postgres
+# over Neon test branch or SQLite).
+#
+# No secrets: the postgres:16 service container is ephemeral,
+# per-run, on the CI runner. Connection string is written into
+# .env.test at job start so the existing scripts (db:test:migrate,
+# test:integration) work in CI the same way they do locally.
+on:
+  push:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+concurrency:
+  # Separate group from unit-tests so the two workflows don't cancel
+  # each other. Per-branch: iterative pushes on the same branch
+  # cancel earlier runs. Parallel branches still run concurrently.
+  group: integration-tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    # Generous cap: service startup (~5s), prisma migrate (~10s),
+    # the test suite itself is ~3s. 10 minutes is well above worst
+    # case even with cold npm ci; a hung test still fails loudly.
+    timeout-minutes: 10
+
+    services:
+      # Postgres 16 to match docker-compose.yml — same image, same
+      # env, so behaviour in CI matches local dev exactly. Port 5432
+      # (not 5433 as in local docker-compose) because nothing on the
+      # CI runner competes for it.
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: test
+          POSTGRES_PASSWORD: test
+          POSTGRES_DB: test
+        ports:
+          - 5432:5432
+        # Health check mirrors docker-compose.yml's — GitHub Actions
+        # waits on this before running any job step, so migrate
+        # doesn't race initdb on the first connection.
+        options: >-
+          --health-cmd "pg_isready -U test -d test"
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      # Same reason as unit-tests.yml: @prisma/client types are
+      # imported from the service/repo layers, so the tests won't
+      # even load without a generated client on disk.
+      - name: Prisma generate
+        run: npx prisma generate
+
+      # Write .env.test so the existing db:test:migrate and
+      # test:integration scripts pick up the CI DATABASE_URL the
+      # same way the local flow does. Keeps CI-vs-local drift to
+      # a single line of shell.
+      - name: Configure .env.test for CI Postgres
+        run: echo "DATABASE_URL=postgresql://test:test@localhost:5432/test?schema=public" > .env.test
+
+      - name: Apply migrations to test DB
+        run: npm run db:test:migrate
+
+      - name: Run integration tests
+        run: npm run test:integration
