@@ -1,4 +1,4 @@
-import { defineConfig } from 'vitest/config';
+import { defineConfig, configDefaults } from 'vitest/config';
 import react from '@vitejs/plugin-react';
 
 // Vitest config. Two Stage-23 waves have landed on top of Phase 1's
@@ -26,6 +26,11 @@ export default defineConfig({
   test: {
     // Colocated *.test.ts and *.test.tsx files next to their source.
     include: ['src/**/*.test.{ts,tsx}'],
+    // Phase 2b integration tests live under *.integration.test.ts and
+    // opt into a real Postgres via vitest.integration.config.mts. Keep
+    // them out of the fast/mocked default suite so `npm test` stays
+    // Docker-free.
+    exclude: [...configDefaults.exclude, '**/*.integration.test.ts'],
     environment: 'jsdom',
     // jest-dom matchers (toBeInTheDocument, toHaveAttribute, etc.).
     // Import lives in a setup file so it runs once per test file
