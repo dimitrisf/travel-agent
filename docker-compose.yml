@@ -1,0 +1,30 @@
+# Phase 2b — local Postgres for integration tests (repository + BookingService
+# transactional write methods). Not used by dev/prod; the main app connects to
+# Neon via DATABASE_URL. See README section "Deferred to Phase 2b" for the
+# larger context and choice rationale (Docker vs Neon test branch vs SQLite).
+services:
+  postgres-test:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: test
+      POSTGRES_PASSWORD: test
+      POSTGRES_DB: test
+    ports:
+      # Host 5433 → container 5432. Deliberately not 5432 so a local
+      # dev Postgres (or someone else's docker container) on the default
+      # port doesn't clash. If you have to change it, mirror the change
+      # in .env.test.example's TEST_DATABASE_URL.
+      - "5433:5432"
+    tmpfs:
+      # RAM-only data dir. Container restart = clean slate (the point).
+      # ~30% faster than a volume for our test writes, and no cleanup
+      # to worry about across reboots.
+      - /var/lib/postgresql/data
+    healthcheck:
+      # Blocks `docker compose up -d --wait` until Postgres is ready to
+      # accept connections. Without this, the next `prisma migrate deploy`
+      # races the initdb bootstrap and fails on ECONNREFUSED.
+      test: ["CMD-SHELL", "pg_isready -U test -d test"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
