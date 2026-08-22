@@ -155,37 +155,13 @@ export class FlightRepository {
     // that collides with a seeded FlightDefinition), reuse it without
     // overwriting anything (which would corrupt existing state).
 
-    // Airline lookup uses a Map after fetch. We already fetched all airlines for the Zod z.enum that constrains the LLM's airlineIata field; we look up each offer's airline by IATA in O(1) via airlineByIata.get(offer.airlineIata)! — the ! is safe because structured outputs guaranteed the value is in the enum we passed in.
-    // E.g, airlineByIata = Map { 'A3' => { id: 1, iataCode: 'A3', name: 'Aegean Airlines' }, 'LH' => { id: 2, iataCode: 'LH', name: 'Lufthansa' }, 'BA' => { id: 3, iataCode: 'BA', name: 'British Airways' }, ... }
-    const airlineByIata = new Map(airlines.map((a) => [a.iataCode, a]));
-
-    // Fire per-offer upserts in parallel — each offer targets a
-    // distinct (airlineId, flightNumber) FlightDefinition and a
-    // distinct (flightDefinitionId, departureDatetime) FlightInstance,
-    // so there is no cross-offer contention. Runs inside a
-    // user-visible cache-miss path where LLM latency already dominates;
-    // serial per-offer round-trips add avoidable milliseconds.
-    // Per-offer try/catch preserves the fail-open contract: an isolated
-    // Prisma failure on one offer must not sink the whole search.
-    await Promise.all(
-      result.flights.map(async (offer) => {
-        // E.g., offer = { airlineIata: 'A3', flightNumber: '824', departureTimeHHMM: '07:15', durationMinutes: 165, basePriceEUR: 145, stops: 0, aircraft: 'A320', seatsAvailable: 42 }
-        try {
-          await this.upsertOffer({
-            offer,
-            airlineId: airlineByIata.get(offer.airlineIata)!.id,
-            originAirportId: origin.id,
-            destinationAirportId: destination.id,
-            departureDate: opts.departureDate,
-          });
-        } catch (err) {
-          console.error(
-            `[FlightRepository] upsert failed for ${offer.airlineIata} ${offer.flightNumber} on ${opts.originIata}→${opts.destinationIata} ${opts.departureDate}:`,
-            err,
-          );
-        }
-      }),
-    );
+    await this.upsertOffersFromLlm({
+      offers: result.flights,
+      airlines,
+      origin,
+      destination,
+      departureDate: opts.departureDate,
+    });
 
     // Re-query so the newly-upserted rows join any prior dbRows rows,
     // and so the return shape (JOIN-projected FlightSearchRow) is
@@ -317,6 +293,48 @@ export class FlightRepository {
         city: r.flightDefinition.destinationAirport.city.name,
       },
     }));
+  }
+
+  private async upsertOffersFromLlm(params: {
+    offers: FlightOffer[];
+    airlines: Array<{ id: number; iataCode: string; name: string }>;
+    origin: { id: number; iataCode: string };
+    destination: { id: number; iataCode: string };
+    departureDate: string; // YYYY-MM-DD
+  }): Promise<void> {
+    const { offers, airlines, origin, destination, departureDate } = params;
+
+    // Airline lookup uses a Map after fetch. We already fetched all airlines for the Zod z.enum that constrains the LLM's airlineIata field; we look up each offer's airline by IATA in O(1) via airlineByIata.get(offer.airlineIata)! — the ! is safe because structured outputs guaranteed the value is in the enum we passed in.
+    // E.g, airlineByIata = Map { 'A3' => { id: 1, iataCode: 'A3', name: 'Aegean Airlines' }, 'LH' => { id: 2, iataCode: 'LH', name: 'Lufthansa' }, 'BA' => { id: 3, iataCode: 'BA', name: 'British Airways' }, ... }
+    const airlineByIata = new Map(airlines.map((a) => [a.iataCode, a]));
+
+    // Fire per-offer upserts in parallel — each offer targets a
+    // distinct (airlineId, flightNumber) FlightDefinition and a
+    // distinct (flightDefinitionId, departureDatetime) FlightInstance,
+    // so there is no cross-offer contention. Runs inside a
+    // user-visible cache-miss path where LLM latency already dominates;
+    // serial per-offer round-trips add avoidable milliseconds.
+    // Per-offer try/catch preserves the fail-open contract: an isolated
+    // Prisma failure on one offer must not sink the whole search.
+    await Promise.all(
+      offers.map(async (offer) => {
+        // E.g., offer = { airlineIata: 'A3', flightNumber: '824', departureTimeHHMM: '07:15', durationMinutes: 165, basePriceEUR: 145, stops: 0, aircraft: 'A320', seatsAvailable: 42 }
+        try {
+          await this.upsertOffer({
+            offer,
+            airlineId: airlineByIata.get(offer.airlineIata)!.id,
+            originAirportId: origin.id,
+            destinationAirportId: destination.id,
+            departureDate,
+          });
+        } catch (err) {
+          console.error(
+            `[FlightRepository] upsert failed for ${offer.airlineIata} ${offer.flightNumber} on ${origin.iataCode}→${destination.iataCode} ${departureDate}:`,
+            err,
+          );
+        }
+      }),
+    );
   }
 
   // Upsert one LLM-generated offer. Both FlightDefinition and

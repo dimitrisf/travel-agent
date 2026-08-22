@@ -50,6 +50,58 @@ export function useAgentChat(opts: UseAgentChatOptions = {}) {
     const userInput = prompt.trim();
     if (!userInput || pending) return;
 
+    const { userMsg, agentMsg, agentMsgId } = buildAgentTurnBubbles(userInput);
+
+    // We add the user message and the placeholder agent message to the messages state, so they appear in the UI immediately. The agent message will be updated as we receive streaming events from the agent API.
+    setMessages((prev) => [...prev, userMsg, agentMsg]);
+    setPending(true);
+
+    try {
+      const res = await fetch('/api/agent', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        // Request body: current history + this turn's input + optional
+        // conversationId (for signed-in follow-up turns). If no id yet,
+        // the server creates a Conversation on this turn and echoes the
+        // id back via the `done` event.
+        body: JSON.stringify({
+          history,
+          userInput,
+          conversationId: conversationId ?? undefined,
+        }),
+      });
+
+      if (!res.ok || !res.body) throw new Error(`HTTP ${res.status}`);
+
+      await streamAgentResponse(res.body, agentMsgId);
+    } catch (err) {
+      const message = (err as Error).message ?? String(err);
+      setMessages((prev) =>
+        prev.map((m) =>
+          m.id === agentMsgId
+            ? { ...m, text: `Error: ${message}`, pending: false }
+            : m,
+        ),
+      );
+    } finally {
+      setPending(false);
+      // Mark the agent message as no longer pending, so the UI can stop showing the "thinking..." indicator.
+      // agentMsgId is the id of the agent message we added to the messages state when we sent the prompt. We find that message and set its pending flag to false, so the UI can stop showing the "thinking..." indicator.
+      setMessages((prev) =>
+        prev.map((m) => (m.id === agentMsgId ? { ...m, pending: false } : m)),
+      );
+    }
+  }
+
+  // Construct the two chat bubbles for a new turn (the user's input +
+  // an empty pending agent bubble) plus a unique agentMsgId that send()
+  // captures in its closure to route every streamed frame back to the
+  // right agent bubble.
+  function buildAgentTurnBubbles(userInput: string): {
+    userMsg: ChatMessage;
+    agentMsg: ChatMessage;
+    agentMsgId: string;
+  } {
     // We need to add the user message to the messages state immediately, so it appears in the UI while we wait for the agent's response.
     const userMsg: ChatMessage = {
       id: `u-${Date.now()}`,
@@ -152,85 +204,56 @@ export function useAgentChat(opts: UseAgentChatOptions = {}) {
       pending: true,
     };
 
-    // We add the user message and the placeholder agent message to the messages state, so they appear in the UI immediately. The agent message will be updated as we receive streaming events from the agent API.
-    setMessages((prev) => [...prev, userMsg, agentMsg]);
-    setPending(true);
+    return { userMsg, agentMsg, agentMsgId };
+  }
 
-    try {
-      const res = await fetch('/api/agent', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        // Request body: current history + this turn's input + optional
-        // conversationId (for signed-in follow-up turns). If no id yet,
-        // the server creates a Conversation on this turn and echoes the
-        // id back via the `done` event.
-        body: JSON.stringify({
-          history,
-          userInput,
-          conversationId: conversationId ?? undefined,
-        }),
-      });
+  // Read the SSE body and dispatch each parsed frame to applyEvent,
+  // which routes it to the agent bubble identified by agentMsgId.
+  async function streamAgentResponse(
+    body: ReadableStream<Uint8Array>,
+    agentMsgId: string,
+  ): Promise<void> {
+    // The response body is a ReadableStream of Server-Sent Events (SSE) from the agent API. We read it in chunks, decode it, and parse each event to update the UI in real-time.
+    const reader = body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
 
-      if (!res.ok || !res.body) throw new Error(`HTTP ${res.status}`);
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
 
-      // The response body is a ReadableStream of Server-Sent Events (SSE) from the agent API. We read it in chunks, decode it, and parse each event to update the UI in real-time.
-      const reader = res.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = '';
+      let sepIdx: number;
+      // We split the buffer into frames separated by double newlines (\n\n). Each frame may contain multiple lines, each starting with "data: " followed by a JSON payload. We parse each line and apply the event to update the messages state.
+      while ((sepIdx = buffer.indexOf('\n\n')) !== -1) {
+        // We extract the next frame from the buffer and remove it from the buffer. Each frame may contain multiple lines, each starting with "data: " followed by a JSON payload. We parse each line and apply the event to update the messages state.
+        // E.g., a frame may look like:
+        // data: {"type":"text_delta","delta":"Hello, "}
+        // data: {"type":"text_delta","delta":"world!"}
+        // We parse each line and apply the event to update the messages state.
+        const frame = buffer.slice(0, sepIdx);
+        buffer = buffer.slice(sepIdx + 2);
 
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buffer += decoder.decode(value, { stream: true });
-
-        let sepIdx: number;
-        // We split the buffer into frames separated by double newlines (\n\n). Each frame may contain multiple lines, each starting with "data: " followed by a JSON payload. We parse each line and apply the event to update the messages state.
-        while ((sepIdx = buffer.indexOf('\n\n')) !== -1) {
-          // We extract the next frame from the buffer and remove it from the buffer. Each frame may contain multiple lines, each starting with "data: " followed by a JSON payload. We parse each line and apply the event to update the messages state.
-          // E.g., a frame may look like:
-          // data: {"type":"text_delta","delta":"Hello, "}
-          // data: {"type":"text_delta","delta":"world!"}
-          // We parse each line and apply the event to update the messages state.
-          const frame = buffer.slice(0, sepIdx);
-          buffer = buffer.slice(sepIdx + 2);
-
-          // E.g., frame = "data: {\"type\":\"text_delta\",\"delta\":\"Hello, \"}\ndata: {\"type\":\"text_delta\",\"delta\":\"world!\"}", so we split it into these lines:
-          // [
-          //   "data: {\"type\":\"text_delta\",\"delta\":\"Hello, \"}",
-          //   "data: {\"type\":\"text_delta\",\"delta\":\"world!\"}"
-          // ]
-          for (const line of frame.split('\n')) {
-            // We only process lines that start with "data: ". Other lines (e.g., comments or empty lines) are ignored. We parse the JSON payload after "data: " and apply the event to update the messages state.
-            if (!line.startsWith('data: ')) continue;
-            try {
-              // We parse the JSON payload after "data: " and apply the event to update the messages state. The payload has a type field that indicates the kind of event (text_delta, tool_call, tool_output, done, or error) and additional fields depending on the type. We call applyEvent to update the messages state accordingly.
-              // E.g. {"type":"text_delta","delta":"Hello, "}
-              // or {"type":"tool_call","name":"search_hotels","args":"{\"city\":\"Berlin\"}","callId":"12345"}
-              // or {"type":"tool_output","output":"{\"hotels\":[{\"name\":\"Hotel A\"}]}","callId":"12345"}
-              const payload = JSON.parse(line.slice(6)) as StreamEvent;
-              applyEvent(agentMsgId, payload);
-            } catch {
-              // ignore malformed frame
-            }
+        // E.g., frame = "data: {\"type\":\"text_delta\",\"delta\":\"Hello, \"}\ndata: {\"type\":\"text_delta\",\"delta\":\"world!\"}", so we split it into these lines:
+        // [
+        //   "data: {\"type\":\"text_delta\",\"delta\":\"Hello, \"}",
+        //   "data: {\"type\":\"text_delta\",\"delta\":\"world!\"}"
+        // ]
+        for (const line of frame.split('\n')) {
+          // We only process lines that start with "data: ". Other lines (e.g., comments or empty lines) are ignored. We parse the JSON payload after "data: " and apply the event to update the messages state.
+          if (!line.startsWith('data: ')) continue;
+          try {
+            // We parse the JSON payload after "data: " and apply the event to update the messages state. The payload has a type field that indicates the kind of event (text_delta, tool_call, tool_output, done, or error) and additional fields depending on the type. We call applyEvent to update the messages state accordingly.
+            // E.g. {"type":"text_delta","delta":"Hello, "}
+            // or {"type":"tool_call","name":"search_hotels","args":"{\"city\":\"Berlin\"}","callId":"12345"}
+            // or {"type":"tool_output","output":"{\"hotels\":[{\"name\":\"Hotel A\"}]}","callId":"12345"}
+            const payload = JSON.parse(line.slice(6)) as StreamEvent;
+            applyEvent(agentMsgId, payload);
+          } catch {
+            // ignore malformed frame
           }
         }
       }
-    } catch (err) {
-      const message = (err as Error).message ?? String(err);
-      setMessages((prev) =>
-        prev.map((m) =>
-          m.id === agentMsgId
-            ? { ...m, text: `Error: ${message}`, pending: false }
-            : m,
-        ),
-      );
-    } finally {
-      setPending(false);
-      // Mark the agent message as no longer pending, so the UI can stop showing the "thinking..." indicator.
-      // agentMsgId is the id of the agent message we added to the messages state when we sent the prompt. We find that message and set its pending flag to false, so the UI can stop showing the "thinking..." indicator.
-      setMessages((prev) =>
-        prev.map((m) => (m.id === agentMsgId ? { ...m, pending: false } : m)),
-      );
     }
   }
 

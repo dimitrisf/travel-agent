@@ -275,56 +275,62 @@ function summarizeForecastTools(collector: ToolCallRecord[]): string {
   //   }
   // ]
   return weatherCalls
-    .map((r) => {
-      const parsed = r.parsedResult as
-        | {
-            city?: unknown;
-            days?: Array<{ date?: unknown }>;
-            tempC?: unknown;
-            conditions?: unknown;
-          }
-        | undefined;
-
-      // E.g, parsed = { city: 'Berlin', days: [ { date: '2026-07-17' }, ... ] } for get_forecast
-      // or parsed = { city: 'Berlin', tempC: 22, conditions: 'partly cloudy' } for get_weather.
-
-      // If the tool returned no city, say "unknown" — the classifier should treat that as no coverage.
-      const city = typeof parsed?.city === 'string' ? parsed.city : 'unknown';
-
-      if (r.name === 'get_forecast') {
-        // Sort dates so `covered X to Y` is monotonic regardless of the
-        // order the tool returned them. If the tool returned no days, say
-        // so explicitly — the classifier should treat that as no coverage.
-        const dates = Array.isArray(parsed?.days)
-          ? parsed.days
-              .map((d) => (typeof d?.date === 'string' ? d.date : null))
-              .filter((d): d is string => d !== null)
-              .sort()
-          : [];
-
-        // At this point, e.g., dates might look like:
-        // [ '2026-07-17', '2026-07-18', '2026-07-19', '2026-07-20', '2026-07-21', '2026-07-22', '2026-07-23' ]
-        if (dates.length === 0) {
-          return `get_forecast(${city}) → no days returned`;
-        }
-
-        // E.g, `get_forecast(Berlin) → covered 2026-07-17 to 2026-07-23 (7 days)` returned to the classifier. The classifier should treat this as coverage for July 17-23, and any claim outside that range is unbacked.
-        const first = dates[0];
-        const last = dates[dates.length - 1];
-        const dayWord = dates.length === 1 ? 'day' : 'days';
-
-        return `get_forecast(${city}) → covered ${first} to ${last} (${dates.length} ${dayWord})`;
-      }
-
-      // get_weather (current conditions)
-      // E.g, parsed = { city: 'Berlin', tempC: 22, conditions: 'partly cloudy' } for get_weather.
-      const tempC = typeof parsed?.tempC === 'number' ? parsed.tempC : null;
-
-      const conditions =
-        typeof parsed?.conditions === 'string' ? parsed.conditions : null;
-
-      // returns e.g., `get_weather(Berlin) → tempC=22, conditions=partly cloudy` to the classifier. The classifier should treat this as coverage for "today" in Berlin, and any claim about "today" without a get_weather call is unbacked.
-      return `get_weather(${city}) → tempC=${tempC ?? 'unknown'}, conditions=${conditions ?? 'unknown'}`;
-    })
+    .map((r) =>
+      r.name === 'get_forecast'
+        ? summarizeGetForecast(r)
+        : summarizeGetWeather(r),
+    )
     .join('\n');
+}
+
+function summarizeGetForecast(r: ToolCallRecord): string {
+  // E.g, parsed = { city: 'Berlin', days: [ { date: '2026-07-17' }, ... ] } for get_forecast
+  const parsed = r.parsedResult as
+    | { city?: unknown; days?: Array<{ date?: unknown }> }
+    | undefined;
+
+  // If the tool returned no city, say "unknown" — the classifier should treat that as no coverage.
+  const city = typeof parsed?.city === 'string' ? parsed.city : 'unknown';
+
+  // Sort dates so `covered X to Y` is monotonic regardless of the
+  // order the tool returned them. If the tool returned no days, say
+  // so explicitly — the classifier should treat that as no coverage.
+  const dates = Array.isArray(parsed?.days)
+    ? parsed.days
+        .map((d) => (typeof d?.date === 'string' ? d.date : null))
+        .filter((d): d is string => d !== null)
+        .sort()
+    : [];
+
+  // At this point, e.g., dates might look like:
+  // [ '2026-07-17', '2026-07-18', '2026-07-19', '2026-07-20', '2026-07-21', '2026-07-22', '2026-07-23' ]
+  if (dates.length === 0) {
+    return `get_forecast(${city}) → no days returned`;
+  }
+
+  // E.g, `get_forecast(Berlin) → covered 2026-07-17 to 2026-07-23 (7 days)` returned to the classifier. The classifier should treat this as coverage for July 17-23, and any claim outside that range is unbacked.
+  const first = dates[0];
+  const last = dates[dates.length - 1];
+  const dayWord = dates.length === 1 ? 'day' : 'days';
+
+  return `get_forecast(${city}) → covered ${first} to ${last} (${dates.length} ${dayWord})`;
+}
+
+// get_weather (current conditions)
+function summarizeGetWeather(r: ToolCallRecord): string {
+  // E.g, parsed = { city: 'Berlin', tempC: 22, conditions: 'partly cloudy' } for get_weather.
+  const parsed = r.parsedResult as
+    | { city?: unknown; tempC?: unknown; conditions?: unknown }
+    | undefined;
+
+  // If the tool returned no city, say "unknown" — the classifier should treat that as no coverage.
+  const city = typeof parsed?.city === 'string' ? parsed.city : 'unknown';
+
+  const tempC = typeof parsed?.tempC === 'number' ? parsed.tempC : null;
+
+  const conditions =
+    typeof parsed?.conditions === 'string' ? parsed.conditions : null;
+
+  // returns e.g., `get_weather(Berlin) → tempC=22, conditions=partly cloudy` to the classifier. The classifier should treat this as coverage for "today" in Berlin, and any claim about "today" without a get_weather call is unbacked.
+  return `get_weather(${city}) → tempC=${tempC ?? 'unknown'}, conditions=${conditions ?? 'unknown'}`;
 }

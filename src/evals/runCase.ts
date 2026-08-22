@@ -116,72 +116,9 @@ export async function runCase(
       // ]
       for (const item of result.newItems) {
         if (item.type === 'tool_call_item') {
-          // rawItem has `name` and `arguments` (a JSON string in the standard
-          // OpenAI format). Parse args when we can so cases can assert on
-          // structured content (e.g. `args.return_date`).
-          // E.g, rawItem = { name: 'get_weather', arguments: '{"city":"Athens"}', callId: '1' }
-          // So, in this example, raw is { name: 'get_weather', arguments: '{"city":"Athens"}', callId: '1' }
-          const raw = item.rawItem as {
-            name?: string;
-            arguments?: unknown;
-            callId?: string;
-            call_id?: string;
-            id?: string;
-          };
-
-          const callId = raw.callId ?? raw.call_id ?? raw.id;
-
-          // E.g, raw.arguments = '{"city":"Athens"}' (a JSON string) or just 'Athens' (a plain string).
-          let args: unknown = raw.arguments;
-          if (typeof args === 'string') {
-            try {
-              args = JSON.parse(args);
-            } catch {
-              // leave as string
-            }
-          }
-
-          // At this point, args = { city: 'Athens' } (a parsed object) or just 'Athens' (a plain string).
-
-          // Record the tool call in the output so cases can assert on it.
-          // We have to subtract 1 because push() returns the new length, not the index.
-          const index =
-            toolCalls.push({
-              name: raw.name ?? '(unknown)',
-              args,
-              agent: item.agent.name,
-            }) - 1;
-
-          if (callId) indexByCallId.set(callId, index);
-          // now indexByCallId = { '1' => 0 } for this example, so when the output arrives we can pair it with its call.
+          recordToolCall(item, toolCalls, indexByCallId);
         } else if (item.type === 'tool_call_output_item') {
-          // Pair the output with its call. `unwrapToolOutput` strips the MCP
-          // content envelope down to the raw string the REST API returned;
-          // best-effort JSON parse into `parsedOutput` for structured asserts.
-
-          // In this case, item.rawItem = { callId: '1' } and item.output = '{"temperature":25,"condition":"sunny"}'.
-          const outRaw = item.rawItem as {
-            callId?: string;
-            call_id?: string;
-            id?: string;
-          };
-
-          const callId = outRaw.callId ?? outRaw.call_id ?? outRaw.id;
-
-          // E.g, if item.output = '{"temperature":25,"condition":"sunny"}', then output = '{"temperature":25,"condition":"sunny"}' (a string) and parsedOutput = { temperature: 25, condition: 'sunny' } (an object).
-          const output = unwrapToolOutput(item.output);
-          let parsedOutput: unknown = undefined;
-          try {
-            parsedOutput = JSON.parse(output);
-          } catch {
-            // leave undefined — tool returned non-JSON text
-          }
-
-          // Pair the output with its call in toolCalls. If we can't find the callId, we just skip it — this shouldn't happen unless the MCP is misbehaving.
-          const idx = callId ? indexByCallId.get(callId) : undefined;
-          if (idx !== undefined) {
-            toolCalls[idx] = { ...toolCalls[idx], output, parsedOutput };
-          }
+          attachToolCallOutput(item, toolCalls, indexByCallId);
         }
       }
 
@@ -200,50 +137,15 @@ export async function runCase(
     // equal min(requested, available)" collapse to 0 === 0 and mask the
     // real failure. Only the standard `{error: string, code: string}` shape
     // from apiErrorResponse counts — anything else stays a normal output.
-
-    // E.g, toolCalls = [
-    //   { name: 'get_weather', args: { city: 'Athens' }, agent: 'weather-agent', output: '{"temperature":25,"condition":"sunny"}', parsedOutput: { temperature: 25, condition: 'sunny' } },
-    //   { name: 'get_forecast', args: { city: 'Athens', days: 3 }, agent: 'weather-agent', output: '{"error":"City not found","code":"404"}', parsedOutput: { error: 'City not found', code: '404' } },
-    // ]
-    // In this example, the second tool call returned an error envelope, so we fold that into `errored` for the case output.
-    // In this particular example, toolErrors = ['get_forecast → 404: City not found'], and errored = 'tool errors: get_forecast → 404: City not found'.
-    const toolErrors = toolCalls
-      .filter(
-        (tc) =>
-          tc.parsedOutput != null &&
-          typeof tc.parsedOutput === 'object' &&
-          'error' in (tc.parsedOutput as object) &&
-          'code' in (tc.parsedOutput as object),
-      )
-      .map((tc) => {
-        const p = tc.parsedOutput as { error?: unknown; code?: unknown };
-        return `${tc.name} → ${String(p.code)}: ${String(p.error)}`;
-      });
-
+    const toolErrors = collectToolErrors(toolCalls);
     if (toolErrors.length > 0) {
       const toolErrPart = `tool errors: ${toolErrors.join('; ')}`;
       errored = errored ? `${errored} | ${toolErrPart}` : toolErrPart;
     }
   } catch (err) {
-    // Guardrail trips are expected outcomes for some cases — surface them
-    // as first-class output rather than errors so cases can assert on them.
-    if (
-      err instanceof InputGuardrailTripwireTriggered ||
-      err instanceof OutputGuardrailTripwireTriggered
-    ) {
-      // The guardrail trip message is in `err.result.output.outputInfo.message`
-      const info = err.result?.output?.outputInfo as
-        | { message?: unknown }
-        | undefined;
-
-      // If the message is a string, use it; otherwise, fall back to the error's message.
-      guardrailTripped =
-        typeof info?.message === 'string' ? info.message : err.message;
-    } else {
-      // Unexpected errors (network, MCP, model call, etc.) are surfaced as
-      // `errored` so cases can assert on them if desired.
-      errored = (err as Error)?.message ?? String(err);
-    }
+    const classified = classifyThrownError(err);
+    guardrailTripped = classified.guardrailTripped;
+    errored = classified.errored;
   }
 
   // Return the accumulated output for this case, which the caller will hand to the case's `expect(...)` for assertion checking.
@@ -258,4 +160,140 @@ export async function runCase(
     // even when the case passes on retry.
     retries: totalRetries,
   };
+}
+
+// Record a tool_call_item into toolCalls and index its callId so the
+// matching tool_call_output_item can be spliced back on when it arrives.
+function recordToolCall(
+  item: { rawItem: unknown; agent: { name: string } },
+  toolCalls: CaseOutput['toolCalls'],
+  indexByCallId: Map<string, number>,
+): void {
+  // rawItem has `name` and `arguments` (a JSON string in the standard
+  // OpenAI format). Parse args when we can so cases can assert on
+  // structured content (e.g. `args.return_date`).
+  // E.g, rawItem = { name: 'get_weather', arguments: '{"city":"Athens"}', callId: '1' }
+  // So, in this example, raw is { name: 'get_weather', arguments: '{"city":"Athens"}', callId: '1' }
+  const raw = item.rawItem as {
+    name?: string;
+    arguments?: unknown;
+    callId?: string;
+    call_id?: string;
+    id?: string;
+  };
+
+  const callId = raw.callId ?? raw.call_id ?? raw.id;
+
+  // E.g, raw.arguments = '{"city":"Athens"}' (a JSON string) or just 'Athens' (a plain string).
+  let args: unknown = raw.arguments;
+  if (typeof args === 'string') {
+    try {
+      args = JSON.parse(args);
+    } catch {
+      // leave as string
+    }
+  }
+
+  // At this point, args = { city: 'Athens' } (a parsed object) or just 'Athens' (a plain string).
+
+  // Record the tool call in the output so cases can assert on it.
+  // We have to subtract 1 because push() returns the new length, not the index.
+  const index =
+    toolCalls.push({
+      name: raw.name ?? '(unknown)',
+      args,
+      agent: item.agent.name,
+    }) - 1;
+
+  if (callId) indexByCallId.set(callId, index);
+  // now indexByCallId = { '1' => 0 } for this example, so when the output arrives we can pair it with its call.
+}
+
+// Pair a tool_call_output_item back onto its tool_call by callId.
+// `unwrapToolOutput` strips the MCP content envelope down to the raw
+// string the REST API returned; best-effort JSON parse into
+// `parsedOutput` for structured asserts.
+function attachToolCallOutput(
+  item: { rawItem: unknown; output: unknown },
+  toolCalls: CaseOutput['toolCalls'],
+  indexByCallId: Map<string, number>,
+): void {
+  // In this case, item.rawItem = { callId: '1' } and item.output = '{"temperature":25,"condition":"sunny"}'.
+  const outRaw = item.rawItem as {
+    callId?: string;
+    call_id?: string;
+    id?: string;
+  };
+
+  const callId = outRaw.callId ?? outRaw.call_id ?? outRaw.id;
+
+  // E.g, if item.output = '{"temperature":25,"condition":"sunny"}', then output = '{"temperature":25,"condition":"sunny"}' (a string) and parsedOutput = { temperature: 25, condition: 'sunny' } (an object).
+  const output = unwrapToolOutput(item.output);
+  let parsedOutput: unknown = undefined;
+  try {
+    parsedOutput = JSON.parse(output);
+  } catch {
+    // leave undefined — tool returned non-JSON text
+  }
+
+  // Pair the output with its call in toolCalls. If we can't find the callId, we just skip it — this shouldn't happen unless the MCP is misbehaving.
+  const idx = callId ? indexByCallId.get(callId) : undefined;
+  if (idx !== undefined) {
+    toolCalls[idx] = { ...toolCalls[idx], output, parsedOutput };
+  }
+}
+
+// Scan toolCalls for the standard `{error, code}` error envelope from
+// apiErrorResponse and format each as "name → code: error". Anything
+// else stays a normal output.
+//
+// E.g, toolCalls = [
+//   { name: 'get_weather', args: { city: 'Athens' }, agent: 'weather-agent', output: '{"temperature":25,"condition":"sunny"}', parsedOutput: { temperature: 25, condition: 'sunny' } },
+//   { name: 'get_forecast', args: { city: 'Athens', days: 3 }, agent: 'weather-agent', output: '{"error":"City not found","code":"404"}', parsedOutput: { error: 'City not found', code: '404' } },
+// ]
+// In this example, the second tool call returned an error envelope, so we fold that into `errored` for the case output.
+// In this particular example, toolErrors = ['get_forecast → 404: City not found'], and errored = 'tool errors: get_forecast → 404: City not found'.
+function collectToolErrors(toolCalls: CaseOutput['toolCalls']): string[] {
+  return toolCalls
+    .filter(
+      (tc) =>
+        tc.parsedOutput != null &&
+        typeof tc.parsedOutput === 'object' &&
+        'error' in (tc.parsedOutput as object) &&
+        'code' in (tc.parsedOutput as object),
+    )
+    .map((tc) => {
+      const p = tc.parsedOutput as { error?: unknown; code?: unknown };
+      return `${tc.name} → ${String(p.code)}: ${String(p.error)}`;
+    });
+}
+
+// Classify a thrown error into either a guardrail trip (expected
+// outcome for some cases — surface as first-class output) or an
+// unexpected error (network, MCP, model call, etc. — surfaced as
+// `errored` so cases can assert on them if desired).
+function classifyThrownError(err: unknown): {
+  guardrailTripped?: string;
+  errored?: string;
+} {
+  // Guardrail trips are expected outcomes for some cases — surface them
+  // as first-class output rather than errors so cases can assert on them.
+  if (
+    err instanceof InputGuardrailTripwireTriggered ||
+    err instanceof OutputGuardrailTripwireTriggered
+  ) {
+    // The guardrail trip message is in `err.result.output.outputInfo.message`
+    const info = err.result?.output?.outputInfo as
+      | { message?: unknown }
+      | undefined;
+
+    // If the message is a string, use it; otherwise, fall back to the error's message.
+    return {
+      guardrailTripped:
+        typeof info?.message === 'string' ? info.message : err.message,
+    };
+  }
+  // Unexpected errors (network, MCP, model call, etc.) are surfaced as
+  // `errored` so cases can assert on them if desired.
+  return { errored: (err as Error)?.message ?? String(err) };
 }
