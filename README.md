@@ -3154,6 +3154,91 @@ Once this lands, the unit-tests check will appear on every PR. Recommendation: a
 
 New: `.github/workflows/unit-tests.yml` (CI workflow), and five colocated `*.test.ts` files (`WeatherService`, `FlightService`, `HotelService`, `BookingService`, `ConversationService`, all under `src/lib/services/`). No source-code changes this stage — all five services already had testable shapes from prior stages.
 
+### Stage 23 — Unit tests (Phase 2b: real-DB integration)
+
+Follow-up to Phase 2. Phase 2 covered services against mocked repositories; Phase 2b covers the two remaining surfaces that mocking couldn't touch: **cache-first repositories** (`FlightRepository.findInstances`, `HotelRepository.findAvailable`) and **`BookingService`'s transactional write methods** (`proposeBooking`, `confirmBooking`, `cancelBooking`). Both need a real Postgres — the repos hit Prisma's projection + upsert plumbing, and the booking writes rely on `$transaction` + MVCC semantics that a mock can't reproduce.
+
+#### Why real Postgres, why Docker over Neon / SQLite
+
+Three test-DB options were on the table:
+
+- **Docker Postgres (chosen).** Local `postgres:16` service container from [`docker-compose.yml`](docker-compose.yml), matched by a `postgres:16` service in the CI workflow. Fastest inner loop (fresh container in ~5s; `tmpfs` data dir for RAM-only writes), zero token cost, deterministic. Same image, same version, same behaviour as prod — the CAS races and MVCC snapshots the booking tests exercise are Postgres-specific and would silently pass under SQLite while breaking in prod.
+- **Neon test branch.** Would match prod infra exactly but adds a network round-trip per query (~50-100 ms), a shared branch that concurrent CI runs would fight over, and Neon credentials in CI secrets. All to trade "same infra" for "same version" when the version is already pinned.
+- **SQLite via Prisma driver.** Fast, in-process, no infra. Rejected on correctness — Prisma's SQLite adapter doesn't implement `$transaction` isolation the same way, `updateMany` returns different counts on some CAS shapes, and the concurrent-CAS tests rely on independent Prisma clients on separate connection pools that SQLite can't model.
+
+The chosen shape is a `postgres-test` service in `docker-compose.yml` bound to host port `5433` (not `5432`, so a local dev Postgres or another container on the default port doesn't clash) with a `tmpfs` data directory so restarting the container gives a clean slate for free.
+
+#### What the suite adds (3 files, 22 tests)
+
+| Test file | What it verifies |
+|---|---|
+| [`src/lib/repositories/FlightRepository.integration.test.ts`](src/lib/repositories/FlightRepository.integration.test.ts) | Six tests. Cache hit → `FlightSearchRow` JOIN shape (airline name, city names, composite `"A3 824"` label); cache hit with `nonstopOnly` + `airlineCodes` SQL push-down; cache miss + no `llmSource` → returns `[]` (pre-Stage-23 behaviour preserved); cache miss + LLM offers → upsert with `externalSource='llm'` + `generatedAt` provenance stamps; cache miss + LLM returns `null` → fail-open, no writes; cross-route `flightNumber` collision → `upsertOffer`'s route-mismatch guard drops the misfiled `FlightInstance` (would otherwise corrupt future searches on the correct route). |
+| [`src/lib/repositories/HotelRepository.integration.test.ts`](src/lib/repositories/HotelRepository.integration.test.ts) | Seven tests. Cache hit → `HotelSearchRow` JOIN shape (city, amenities as `string[]`, cancellation policy, per-night totals); combined SQL filter push-down (`minStars` + `freeCancellationRequired` + `requiredAmenities`) with three foil hotels each failing exactly one filter; cache miss + no `llmSource` → `[]`; Scope B guard on cities not in `src/lib/cities.ts` `CITIES` (LLM never called — zero tokens burned on ungeocodable inputs); cache miss + LLM offers → upsert `Hotel` + `RoomType` + `Availability` + `CancellationPolicy` + `HotelAmenity` sibling writes with provenance; LLM returns `null` → fail-open; **anchor-drift prevention** — a second LLM call for the same `Hotel + RoomType` with drifted `roomsAvailable`/`basePriceEUR` does NOT overwrite `RoomType.defaultRoomsAvailable`/`basePrice`, and NEW `Availability` rows for the queried dates use the anchored values (the whole point of the `upsertRoomTypeWithAvailability` scheme). |
+| [`src/lib/services/BookingService.integration.test.ts`](src/lib/services/BookingService.integration.test.ts) | Nine tests across three describe blocks. `proposeBooking`: nested flight+hotel row creation + trip total; idempotency-key short-circuit (second call returns the same row, only one Booking hits DB). `confirmBooking`: happy path (`PROPOSED` → `PAID`, inventory decrement, Payment row, ownership claim from `currentUser`); anon-propose → signed-in-confirm ownership pattern; `INSUFFICIENT_SEATS` + `INSUFFICIENT_ROOMS` (single night short) with full rollback proof; cross-tenant `BOOKING_NOT_FOUND` (404-shape, not 403 — id-scanning defence); `INVALID_STATE` on re-confirm; **concurrent-CAS race** (two `Promise.allSettled` confirms against independent Prisma clients — exactly one wins, seats decrement once, one Payment). `cancelBooking`: anon `PROPOSED` cancel with reason; owner `PROPOSED` cancel; `PAID` cancel restores inventory + flips Payment to `REFUNDED`; `NON_REFUNDABLE` on `freeCancellation: false` policy; cross-tenant + anon-vs-owned `BOOKING_NOT_FOUND`; `INVALID_STATE` on double-cancel; **concurrent-CAS race** on two cancels (double-restore prevented — seats stay at fixture default, Payment refunded once). |
+
+Cumulative across all phases: **157 tests across 16 files** (135 unit + 22 integration).
+
+#### The test-DB helper module
+
+[`src/lib/testing/prismaTestClient.ts`](src/lib/testing/prismaTestClient.ts) — two exports, both used by every integration file:
+
+- **`createTestPrisma()`** — reads `DATABASE_URL` from `.env.test` (loaded at module-import time with `override: true` so a stray `.env` can't leak the dev DB into a test run) and returns a fresh `PrismaClient`. Not memoized: each test file wants its own client so Prisma's per-client connection pool doesn't leak between files.
+- **`resetDb(prisma)`** — `TRUNCATE ... CASCADE` on every table discovered at runtime from `pg_catalog` (excluding `_prisma_migrations`). Called from `beforeEach` in every suite. `RESTART IDENTITY` resets autoincrement sequences so per-test row ids stay predictable. Runtime table discovery means new Prisma models auto-include without touching this file.
+- **Safety fence.** Refuses to run against any `DATABASE_URL` that doesn't match `localhost` or `127.0.0.1` (regex check). Cheap defence against a misconfigured CI secret or a rogue `.env` override pointing at Neon prod.
+
+[`src/lib/testing/seedFixtures.ts`](src/lib/testing/seedFixtures.ts) — small idempotent builders (`seedCity`, `seedAirport`, `seedAirline`, `seedUser`) plus one bigger fixture (`seedProposeBookingFixture`) that produces the ATH→FRA route + Frankfurt hotel graph the booking tests share. Cities use `upsert`; airports/airlines are `create` (each call is a distinct row). The LLM sources are stubbed via typed `mockLlmFlightSource` / `mockLlmHotelSource` helpers inside each repo test file — they return a canned response so integration tests remain zero-token.
+
+#### Vitest config separation
+
+New [`vitest.integration.config.mts`](vitest.integration.config.mts) — same shape as `vitest.config.mts` but three differences that matter:
+
+- **`include: ['src/**/*.integration.test.ts']`** — files opt in by suffix, so `npm test` still runs only the fast unit suite and `npm run test:integration` runs only the real-DB suite.
+- **`fileParallelism: false`** (`pool: 'forks'`). Runs one integration file at a time. Vitest 4 flattened the old `poolOptions.forks.singleFork` into this top-level flag. Required — two files running in parallel would race each other's `TRUNCATE` cycles on the shared test DB.
+- **`testTimeout: 30_000` / `hookTimeout: 30_000`.** Real-DB round-trips + cold Prisma engine startup routinely eat 5-10s; 30s is generous headroom without masking genuinely stuck tests.
+
+#### npm scripts
+
+```bash
+npm run db:test:up            # docker compose up -d postgres-test --wait
+npm run db:test:migrate       # dotenv -e .env.test -- prisma migrate deploy
+npm run test:integration      # vitest run --config vitest.integration.config.mts
+npm run db:test:down          # tear down + delete the volume
+```
+
+`db:test:migrate` uses `dotenv-cli` so the test `DATABASE_URL` is scoped to just this invocation — it doesn't leak into the shell or into `prisma migrate dev` (which still targets the dev DB via `.env`).
+
+Local flow, first time:
+
+```bash
+cp .env.test.example .env.test    # DATABASE_URL=postgresql://test:test@localhost:5433/test?schema=public
+npm run db:test:up                # starts postgres-test on host port 5433
+npm run db:test:migrate           # applies the Prisma schema to the fresh DB
+npm run test:integration          # ~3s once warm
+```
+
+Re-runs just need `test:integration` — the container survives across runs (and `beforeEach` truncates between tests anyway). Restart the container (`db:test:down` → `db:test:up`) if you want a truly cold start.
+
+#### CI workflow
+
+New [`.github/workflows/integration-tests.yml`](.github/workflows/integration-tests.yml) — separate from `unit-tests.yml` so failures in one don't cascade to the other and the two workflows have independent concurrency groups.
+
+- **Postgres 16 service container.** Same image as `docker-compose.yml` (behaviour matches local exactly). Bound to port `5432` on the runner (not `5433` — nothing on the CI runner competes). Health-check on `pg_isready` blocks steps until initdb finishes, so `prisma migrate deploy` doesn't race the bootstrap.
+- **No secrets.** The service container is ephemeral and per-run; the connection string is written into `.env.test` at job start (`echo "DATABASE_URL=postgresql://test:test@localhost:5432/test?schema=public" > .env.test`) so the same `db:test:migrate` and `test:integration` scripts used locally work unchanged in CI.
+- **Triggers on every push and PR** (`opened` / `synchronize` / `reopened` / `ready_for_review`). Same posture as unit-tests.
+- **Timeout 10 minutes.** Well above the usual ~30s (service startup ~5s + migrate ~10s + tests ~3s). A hung test still fails loudly.
+
+Once stable on a few PRs, flip it to a required branch-protection check — same posture as `unit-tests.yml` and the eval check.
+
+#### Deferred to Phase 3 (and beyond)
+
+- **Coverage reporting** (`@vitest/coverage-v8`). Still deferred — first candidate once coverage numbers start being useful for spotting gaps.
+- **React component tests.** Still deferred — no UI bugs in the wild have surfaced that would justify jsdom + `@testing-library/react` overhead yet.
+- **`ConversationService` integration tests.** Its methods don't touch `$transaction`; the mocked-repo suite in Phase 2 covers the behaviour, and the added surface of a real-DB variant wouldn't catch anything the mock-based tests miss.
+
+#### File index
+
+New: [`docker-compose.yml`](docker-compose.yml) (`postgres-test` service on host port `5433`, `tmpfs` data dir), [`.env.test.example`](.env.test.example) (test `DATABASE_URL` template), [`vitest.integration.config.mts`](vitest.integration.config.mts) (separate config, `fileParallelism: false`, `*.integration.test.ts` glob), [`src/lib/testing/prismaTestClient.ts`](src/lib/testing/prismaTestClient.ts) (client factory + `resetDb` + local-only safety fence), [`src/lib/testing/seedFixtures.ts`](src/lib/testing/seedFixtures.ts) (idempotent city/airport/airline/user seeders + `seedProposeBookingFixture`), [`.github/workflows/integration-tests.yml`](.github/workflows/integration-tests.yml) (CI with Postgres service container), and three `*.integration.test.ts` files ([FlightRepository](src/lib/repositories/FlightRepository.integration.test.ts), [HotelRepository](src/lib/repositories/HotelRepository.integration.test.ts), [BookingService](src/lib/services/BookingService.integration.test.ts)). Modified: `package.json` (four `db:test:*` scripts + `test:integration`, `dotenv-cli` devDep).
+
 ### Stage 22 — Deploy to Vercel
 
 First public deploy. Everything below Stage 5 had been a "clone the repo and boot it locally" story; this stage puts it behind a shareable URL running on Vercel Hobby (free tier), backed by a dedicated Neon prod branch, with real Google OAuth callbacks. Smoke-tested end-to-end (all six layers of the test plan passed). Deploy remains live between demo sessions — Vercel confirms idle deployments cost $0 on Hobby.
