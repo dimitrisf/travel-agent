@@ -2849,7 +2849,7 @@ Anything that throws bubbles up as `LiveWeatherFetchError`, which `WeatherServic
 
 - **Seeded path is byte-identical** to what shipped before — pure rename. `SeededWeatherRepository.findCurrentWeatherByCity` and `.findForecastByCity` are the same code as the old `WeatherRepository`'s methods.
 - **Eval suite runs in seeded mode by default** (no env var change needed). All 33 cases should stay green.
-- **Live mode verification is manual** — `USE_SEEDED_WEATHER=0`, hit the app in the browser, ask "what's the weather in Berlin?" A live-mode eval case would need `OPENWEATHERMAP_API_KEY` as a CI secret plus tolerance for non-deterministic weather content in the assertions — deferred as Stage 20.5 territory.
+- **Live mode verification is manual** — `USE_SEEDED_WEATHER=0`, hit the app in the browser, ask "what's the weather in Berlin?" A live-mode eval case would need `OPENWEATHERMAP_API_KEY` as a CI secret plus tolerance for non-deterministic weather content in the assertions — still deferred. Stage 20.5 shipped as post-Stage-20 hygiene (forecast-boundary rule + shared cities module), not the live-mode eval; that piece is open for a future stage.
 
 #### Env-var contract
 
@@ -3176,7 +3176,7 @@ The chosen shape is a `postgres-test` service in `docker-compose.yml` bound to h
 | [`src/lib/repositories/HotelRepository.integration.test.ts`](src/lib/repositories/HotelRepository.integration.test.ts) | Seven tests. Cache hit → `HotelSearchRow` JOIN shape (city, amenities as `string[]`, cancellation policy, per-night totals); combined SQL filter push-down (`minStars` + `freeCancellationRequired` + `requiredAmenities`) with three foil hotels each failing exactly one filter; cache miss + no `llmSource` → `[]`; Scope B guard on cities not in `src/lib/cities.ts` `CITIES` (LLM never called — zero tokens burned on ungeocodable inputs); cache miss + LLM offers → upsert `Hotel` + `RoomType` + `Availability` + `CancellationPolicy` + `HotelAmenity` sibling writes with provenance; LLM returns `null` → fail-open; **anchor-drift prevention** — a second LLM call for the same `Hotel + RoomType` with drifted `roomsAvailable`/`basePriceEUR` does NOT overwrite `RoomType.defaultRoomsAvailable`/`basePrice`, and NEW `Availability` rows for the queried dates use the anchored values (the whole point of the `upsertRoomTypeWithAvailability` scheme). |
 | [`src/lib/services/BookingService.integration.test.ts`](src/lib/services/BookingService.integration.test.ts) | Nine tests across three describe blocks. `proposeBooking`: nested flight+hotel row creation + trip total; idempotency-key short-circuit (second call returns the same row, only one Booking hits DB). `confirmBooking`: happy path (`PROPOSED` → `PAID`, inventory decrement, Payment row, ownership claim from `currentUser`); anon-propose → signed-in-confirm ownership pattern; `INSUFFICIENT_SEATS` + `INSUFFICIENT_ROOMS` (single night short) with full rollback proof; cross-tenant `BOOKING_NOT_FOUND` (404-shape, not 403 — id-scanning defence); `INVALID_STATE` on re-confirm; **concurrent-CAS race** (two `Promise.allSettled` confirms against independent Prisma clients — exactly one wins, seats decrement once, one Payment). `cancelBooking`: anon `PROPOSED` cancel with reason; owner `PROPOSED` cancel; `PAID` cancel restores inventory + flips Payment to `REFUNDED`; `NON_REFUNDABLE` on `freeCancellation: false` policy; cross-tenant + anon-vs-owned `BOOKING_NOT_FOUND`; `INVALID_STATE` on double-cancel; **concurrent-CAS race** on two cancels (double-restore prevented — seats stay at fixture default, Payment refunded once). |
 
-Cumulative across all phases: **157 tests across 16 files** (135 unit + 22 integration).
+Cumulative across all waves: **261 tests across 31 files** (239 in the default `npm test` suite — pure logic + services + React components + LLM source classes — plus 22 in the real-DB integration suite).
 
 #### The test-DB helper module
 
@@ -3232,8 +3232,9 @@ Once stable on a few PRs, flip it to a required branch-protection check — same
 #### Deferred to Phase 3 (and beyond)
 
 - **Coverage reporting** (`@vitest/coverage-v8`). Still deferred — first candidate once coverage numbers start being useful for spotting gaps.
-- **React component tests.** Still deferred — no UI bugs in the wild have surfaced that would justify jsdom + `@testing-library/react` overhead yet.
 - **`ConversationService` integration tests.** Its methods don't touch `$transaction`; the mocked-repo suite in Phase 2 covers the behaviour, and the added surface of a real-DB variant wouldn't catch anything the mock-based tests miss.
+
+React component tests (originally the Phase 2b "still deferred" item) actually landed earlier in [PR #24](https://github.com/dimitrisFotiadis/travel-agent/pull/24) — jsdom + `@testing-library/react` are wired into [`vitest.config.mts`](vitest.config.mts), with colocated `*.test.tsx` files for [`BookingCard`](src/components/BookingCard.test.tsx), [`ChatContainer`](src/components/ChatContainer.test.tsx), [`Header`](src/components/Header.test.tsx), and [`SamplePrompts`](src/components/SamplePrompts.test.tsx). They're part of the 239 tests the default `npm test` suite runs, alongside the Phase-1/Phase-2 pure-logic and services suites.
 
 #### File index
 
@@ -3497,6 +3498,8 @@ Not Stage 23 blockers — real issues live testing exposed. Filed for future wor
 - **UI leaks raw agent errors.** When the top-level agent throws (E1's corrupted API key), the raw 401 message — including a partially-masked API key fragment — flows to the chat UI. Should catch and render "sorry, temporarily unavailable" instead. UX-polish PR scope.
 - **New Conversation button broken.** Discovered during B2 setup. Click handler is not firing; workaround was hard-refresh. Pre-existing, unrelated to Stage 23.
 - **No UI test coverage.** Related to the button bug: zero tests exercise the client-side surface (buttons, session handling, message rendering). All existing tests are backend-only. RTL + jsdom setup would catch this class of silent regression. Deferred to a UI-tests PR.
+
+**Status update (post-close).** Four of the five items above closed out in the [Stage 23 follow-ups](#stage-23-follow-ups) section below — jailbreak carve-out (PR #26), UI error sanitization (PR #25), New Chat button (PR #23), RTL foundation + first UI tests (PR #24). **"Agent condenses tool-result lists" is the one item still open** — no prompt rule matching that description has landed yet.
 
 #### File index
 
