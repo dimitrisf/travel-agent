@@ -61,6 +61,7 @@ export function createMcpHttpHandler(config: {
   tools: McpToolSpec[];
 }) {
   const { name, version, tools } = config;
+  // E.g., if tools = [{ name: 'search_flights', ... }, { name: 'search_hotels', ... }], then toolsByName = Map { 'search_flights' => {...}, 'search_hotels' => {...} }
   const toolsByName = new Map(tools.map((t) => [t.name, t]));
 
   return async function POST(req: NextRequest): Promise<Response> {
