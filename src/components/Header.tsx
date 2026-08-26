@@ -1,6 +1,7 @@
 'use client';
 
 import Link from 'next/link';
+import { usePathname } from 'next/navigation';
 import { useState } from 'react';
 import AppBar from '@mui/material/AppBar';
 import Toolbar from '@mui/material/Toolbar';
@@ -14,6 +15,8 @@ import Box from '@mui/material/Box';
 import CircularProgress from '@mui/material/CircularProgress';
 import Stack from '@mui/material/Stack';
 import AddIcon from '@mui/icons-material/Add';
+import ChatIcon from '@mui/icons-material/Chat';
+import ExploreIcon from '@mui/icons-material/Explore';
 import HistoryIcon from '@mui/icons-material/History';
 import GoogleIcon from '@mui/icons-material/Google';
 import ShareIcon from '@mui/icons-material/Share';
@@ -36,6 +39,11 @@ import { ShareModal } from '@/components/ShareModal';
 // - SignedOutControls — the same Sign in with Google button from before.
 export function Header() {
   const user = useCurrentUser();
+  const pathname = usePathname();
+  // Context-aware toggle: on chat pages the button reads "Explorer" and
+  // routes to /explorer; on any /explorer route it reads "Assistant" and
+  // routes back to /. Same button, swapped label + icon + href.
+  const inExplorer = pathname?.startsWith('/explorer') ?? false;
 
   return (
     <AppBar position="static" color="default" elevation={1}>
@@ -52,6 +60,18 @@ export function Header() {
         >
           Travel Assistant
         </Typography>
+
+        <Button
+          component={Link}
+          href={inExplorer ? '/' : '/explorer'}
+          size="small"
+          startIcon={inExplorer ? <ChatIcon /> : <ExploreIcon />}
+          variant="text"
+          color="inherit"
+          sx={{ mr: 1 }}
+        >
+          {inExplorer ? 'Assistant' : 'Explorer'}
+        </Button>
 
         {user ? <SignedInControls /> : <SignedOutControls />}
       </Toolbar>
