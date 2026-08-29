@@ -2,11 +2,8 @@ import { describe, it, expect, vi } from 'vitest';
 import { z } from 'zod';
 import { WeatherService } from './WeatherService';
 import { WeatherServiceError } from './WeatherServiceError';
-import type {
-  CurrentWeatherRow,
-  ForecastRow,
-  WeatherRepository,
-} from '../repositories/WeatherRepository';
+import type { WeatherRepository } from '../repositories/WeatherRepository';
+import type { CurrentWeatherRow, ForecastRow } from '@/types/weather';
 
 // ─── Mock repository helper ─────────────────────────────────────────
 

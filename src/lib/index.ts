@@ -16,19 +16,19 @@ import { WeatherService } from './services/WeatherService';
 // ───── Weather ─────
 export { SeededWeatherRepository } from './repositories/SeededWeatherRepository';
 export { LiveWeatherRepository } from './repositories/LiveWeatherRepository';
-export type {
-  CurrentWeatherRow,
-  ForecastDayRow,
-  ForecastRow,
-  WeatherRepository,
-} from './repositories/WeatherRepository';
+export type { WeatherRepository } from './repositories/WeatherRepository';
 export { WeatherService } from './services/WeatherService';
 export type {
-  CurrentWeatherResult,
-  ForecastResult,
   GetCurrentWeatherInput,
   GetForecastInput,
 } from './services/WeatherService';
+export type {
+  CurrentWeatherResult,
+  CurrentWeatherRow,
+  ForecastDayRow,
+  ForecastResult,
+  ForecastRow,
+} from '../types/weather';
 export {
   WeatherServiceError,
   type WeatherServiceErrorCode,

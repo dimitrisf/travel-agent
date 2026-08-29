@@ -1,9 +1,6 @@
 import type { PrismaClient } from '@prisma/client';
-import type {
-  CurrentWeatherRow,
-  ForecastRow,
-  WeatherRepository,
-} from './WeatherRepository';
+import type { WeatherRepository } from './WeatherRepository';
+import type { CurrentWeatherRow, ForecastRow } from '@/types/weather';
 
 // Seeded adapter for WeatherRepository (Stage 20). Reads from the Neon
 // Prisma-backed tables that the demo library populates. This is what

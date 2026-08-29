@@ -2,7 +2,7 @@
 
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import AppBar from '@mui/material/AppBar';
 import Toolbar from '@mui/material/Toolbar';
 import Typography from '@mui/material/Typography';
@@ -45,6 +45,26 @@ export function Header() {
   // routes back to /. Same button, swapped label + icon + href.
   const inExplorer = pathname?.startsWith('/explorer') ?? false;
 
+  // Remember the last Explorer sub-page so Explorer → Assistant → Explorer
+  // returns the user to the sub-page they were comparing against, not the
+  // /explorer index. Session-scoped so a fresh tab starts at the index.
+  const [lastExplorerPath, setLastExplorerPath] = useState<string | null>(null);
+
+  useEffect(() => {
+    const stored = sessionStorage.getItem('explorer:lastPath');
+    if (stored) setLastExplorerPath(stored);
+  }, []);
+
+  // Update the last Explorer path whenever the user navigates to an Explorer page. This ensures that if the user is on /explorer/weather and switches to Assistant, clicking "Explorer" will return them to /explorer/weather instead of the default /explorer index. We only update sessionStorage when inExplorer is true and pathname is defined.
+  useEffect(() => {
+    if (inExplorer && pathname) {
+      sessionStorage.setItem('explorer:lastPath', pathname);
+      setLastExplorerPath(pathname);
+    }
+  }, [inExplorer, pathname]);
+
+  const explorerHref = inExplorer ? '/' : (lastExplorerPath ?? '/explorer');
+
   return (
     <AppBar position="static" color="default" elevation={1}>
       <Toolbar>
@@ -63,7 +83,7 @@ export function Header() {
 
         <Button
           component={Link}
-          href={inExplorer ? '/' : '/explorer'}
+          href={explorerHref}
           size="small"
           startIcon={inExplorer ? <ChatIcon /> : <ExploreIcon />}
           variant="text"

@@ -1,11 +1,11 @@
 import { sleep } from '@/utils/sleep';
 import { CITIES, type CityMetadata } from '../cities';
+import type { WeatherRepository } from './WeatherRepository';
 import type {
   CurrentWeatherRow,
   ForecastDayRow,
   ForecastRow,
-  WeatherRepository,
-} from './WeatherRepository';
+} from '@/types/weather';
 
 // Live adapter for OpenWeatherMap (Stage 20). Same interface as
 // SeededWeatherRepository — WeatherService doesn't know or care which
