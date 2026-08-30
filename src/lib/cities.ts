@@ -10,6 +10,7 @@
 //   - src/agents/buildWeatherAgent.ts                  (CITY_NAMES in cities-available line)
 //   - src/agents/buildTravelAgent.ts                   (CITY_IATA_PAIRS + CITY_NAMES.length)
 //   - src/components/explorer/widgets/CitySelect.tsx   (CITY_NAMES for Explorer autocomplete)
+//   - src/components/explorer/widgets/AirportSelect.tsx (CITIES for Explorer IATA-per-city autocomplete)
 
 export type CityMetadata = {
   // 2-letter country code, for OpenWeatherMap `q=` queries.

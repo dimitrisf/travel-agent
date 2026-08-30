@@ -1,5 +1,6 @@
 import type { McpToolSpec } from '@/mcp/mcpHttpHandler';
 import type { createMcpApiClient } from '@/mcp/mcpApiClient';
+import { CabinClass } from '@/lib/pricing';
 
 type ApiClient = ReturnType<typeof createMcpApiClient>;
 
@@ -41,7 +42,7 @@ export function makeProposeBookingToolSpec(
               },
               cabin_class: {
                 type: 'string',
-                enum: ['economy', 'premium_economy', 'business', 'first'],
+                enum: [...CabinClass.options],
                 description: 'Cabin class. Defaults to economy.',
               },
               adults: {
