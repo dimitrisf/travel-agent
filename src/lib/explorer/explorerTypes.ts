@@ -28,3 +28,8 @@ export function isError<T>(
 ): state is Extract<ResponseState<T>, { kind: 'error' }> {
   return state.kind === 'error';
 }
+
+// Predicate for usePersistedState's `filter` arg — skips persisting a
+// { kind: 'loading' } state so a mid-flight navigation doesn't restore
+// into a stuck spinner. Idle, success, and error round-trip fine.
+export const notLoading = <T,>(s: ResponseState<T>) => s.kind !== 'loading';

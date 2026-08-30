@@ -13,7 +13,7 @@ import {
 } from '../repositories/BookingRepository';
 import { BookingServiceError } from './BookingServiceError';
 import { internalErrorFactory } from './CodedServiceError';
-import { CabinClass, CABIN_MULTIPLIER } from './pricing';
+import { CabinClass, CABIN_MULTIPLIER } from '../pricing';
 import { IsoDate } from '../zodDates';
 
 // ───────────────────────────────────────────────

@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import type { FlightRepository } from '../repositories/FlightRepository';
 import { TravelServiceError } from './TravelServiceError';
-import { CabinClass, CABIN_MULTIPLIER } from './pricing';
+import { CabinClass, CABIN_MULTIPLIER } from '../pricing';
 import { IsoDate } from '../zodDates';
 
 const SearchFlightsInput = z.object({

@@ -1,11 +1,19 @@
 import { z } from 'zod';
 
-// Cabin class enum, shared by FlightService's search path and
-// BookingService's propose path so the same string set is validated
-// on both sides. Adding or renaming a cabin here forces every caller
-// (via the exhaustive Record<CabinClass, number> below) to update in
-// lockstep — no more silent divergence between the price quoted at
-// search time and the price charged at booking time.
+// Single source of truth for the cabin classes the demo supports.
+// Everything that names them — validators, JSON-schema tool specs,
+// UI dropdowns, the price multiplier below — reads from here. Adding
+// or renaming a cabin is a one-file change; the exhaustive
+// Record<CabinClass, number> below forces the multiplier update, and
+// consumers that iterate `CabinClass.options` pick up new values
+// automatically.
+//
+// Consumers today:
+//   - src/lib/services/FlightService.ts             (CabinClass in SearchFlightsInput)
+//   - src/lib/services/BookingService.ts            (CabinClass in ProposeBookingInput)
+//   - src/mcp/tools/travel/searchFlightsToolSpec.ts (CabinClass.options in JSON schema enum)
+//   - src/mcp/tools/travel/proposeBookingToolSpec.ts (CabinClass.options in JSON schema enum)
+//   - app/explorer/flights/page.tsx                  (CabinClass.options in the cabin dropdown)
 export const CabinClass = z.enum([
   'economy',
   'premium_economy',
