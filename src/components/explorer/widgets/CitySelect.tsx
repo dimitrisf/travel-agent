@@ -13,6 +13,10 @@ export type CitySelectProps = {
   onChange: (value: string) => void;
   label?: string;
   disabled?: boolean;
+  // Per-call-site fixed width. Uses `width` (not maxWidth) because the
+  // field's natural width is narrower than most call sites want — a
+  // ceiling wouldn't do anything, but a fixed width forces the target.
+  width?: number;
 };
 
 export function CitySelect({
@@ -20,6 +24,7 @@ export function CitySelect({
   onChange,
   label = 'City',
   disabled,
+  width = 320,
 }: CitySelectProps) {
   return (
     <Autocomplete
@@ -29,7 +34,7 @@ export function CitySelect({
       onInputChange={(_, next) => onChange(next)}
       disabled={disabled}
       size="small"
-      sx={{ maxWidth: 320 }}
+      sx={{ width }}
       renderInput={(params) => <TextField {...params} label={label} />}
     />
   );

@@ -33,5 +33,6 @@ export function buildFlightsQuery(input: FlightsQueryInput): string {
   if (input.nonstopOnly) params.set('nonstop_only', 'true');
   if (input.maxPrice !== undefined)
     params.set('max_price', String(input.maxPrice));
+
   return `/api/flights?${params.toString()}`;
 }

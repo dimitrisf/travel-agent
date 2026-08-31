@@ -40,7 +40,7 @@ export function CurrentWeatherPanel() {
     <Paper variant="outlined" sx={{ p: 3 }}>
       <PanelHeader title="Current weather" endpoint="GET /api/weather/current" />
       <Stack spacing={2} sx={{ mt: 2 }}>
-        <CitySelect value={city} onChange={setCity} />
+        <CitySelect value={city} onChange={setCity} width={160} />
       </Stack>
       <SubmitBar
         submitLabel="Fetch current"

@@ -49,7 +49,7 @@ export function ForecastPanel() {
         sx={{ mt: 2 }}
         alignItems={{ sm: 'flex-start' }}
       >
-        <CitySelect value={city} onChange={setCity} />
+        <CitySelect value={city} onChange={setCity} width={170} />
         <TextField
           label="Days"
           type="number"
