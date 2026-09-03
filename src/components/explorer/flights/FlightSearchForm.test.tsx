@@ -4,6 +4,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, cleanup } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 
+import { todayLocalIsoDate } from '@/lib/explorer/today';
 import { FlightSearchForm } from './FlightSearchForm';
 
 // FlightSearchForm owns its state via usePersistedState. Clearing
@@ -123,5 +124,43 @@ describe('FlightSearchForm', () => {
     expect(
       screen.getByRole('button', { name: /Search flights/ }),
     ).toBeDisabled();
+  });
+
+  it('sets min=today on both date inputs so the picker greys out past days', () => {
+    render(<FlightSearchForm submitting={false} onSearch={vi.fn()} />);
+    const today = todayLocalIsoDate();
+    expect(screen.getByLabelText('Departure')).toHaveAttribute('min', today);
+    expect(screen.getByLabelText('Return (optional)')).toHaveAttribute(
+      'min',
+      today,
+    );
+  });
+
+  it('warns and disables submit when a persisted date is in the past', async () => {
+    // Simulates the day-rollover case: values were stored in
+    // sessionStorage on some previous visit and are now older than
+    // today. `min` on the input only constrains the picker, not the
+    // rehydrated state — the guard has to catch it.
+    sessionStorage.setItem(
+      'explorer:flights:departureDate',
+      JSON.stringify('2000-01-01'),
+    );
+    const onSearch = vi.fn();
+    const user = userEvent.setup();
+    render(<FlightSearchForm submitting={false} onSearch={onSearch} />);
+
+    expect(
+      await screen.findByText('Dates cannot be in the past.'),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole('button', { name: /Search flights/ }),
+    ).toBeDisabled();
+
+    await user
+      .click(screen.getByRole('button', { name: /Search flights/ }))
+      .catch(() => {
+        /* disabled */
+      });
+    expect(onSearch).not.toHaveBeenCalled();
   });
 });

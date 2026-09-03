@@ -11,6 +11,7 @@ import { NumberStepper } from '@/components/explorer/widgets/NumberStepper';
 import { PriceSlider } from '@/components/explorer/widgets/PriceSlider';
 import { SubmitBar } from '@/components/explorer/SubmitBar';
 import { buildFlightsQuery } from '@/lib/explorer/flights/buildQuery';
+import { todayLocalIsoDate } from '@/lib/explorer/today';
 import { usePersistedState } from '@/lib/explorer/usePersistedState';
 import { CabinClass } from '@/lib/pricing';
 
@@ -79,6 +80,18 @@ export function FlightSearchForm({
     destination.trim().length > 0 &&
     origin.trim().toUpperCase() === destination.trim().toUpperCase();
 
+  const today = todayLocalIsoDate();
+
+  // Past-date guard: sessionStorage rehydrates whatever dates were last
+  // typed, so a stored value can silently become "past" once the day
+  // rolls over. The `min` attribute only constrains the picker UI, not
+  // the value that's already sitting in state, so we have to check
+  // here as well. Empty is fine (return is optional; departure is
+  // incomplete-not-invalid).
+  const hasPastDate =
+    (departureDate.length > 0 && departureDate < today) ||
+    (returnDate.length > 0 && returnDate < today);
+
   const path = buildFlightsQuery({
     origin,
     destination,
@@ -92,7 +105,7 @@ export function FlightSearchForm({
   });
 
   function handleSubmit() {
-    if (sameAirport) return;
+    if (sameAirport || hasPastDate) return;
     onSearch({ path, passengers: adults + children });
   }
 
@@ -122,7 +135,10 @@ export function FlightSearchForm({
             onChange={(e) => setDepartureDate(e.target.value)}
             size="small"
             // Ensure the label shrinks when a date is selected.
-            slotProps={{ inputLabel: { shrink: true } }}
+            slotProps={{
+              inputLabel: { shrink: true },
+              htmlInput: { min: today },
+            }}
             sx={{ maxWidth: 200 }}
           />
           <TextField
@@ -131,7 +147,10 @@ export function FlightSearchForm({
             value={returnDate}
             onChange={(e) => setReturnDate(e.target.value)}
             size="small"
-            slotProps={{ inputLabel: { shrink: true } }}
+            slotProps={{
+              inputLabel: { shrink: true },
+              htmlInput: { min: today },
+            }}
             sx={{ maxWidth: 200 }}
           />
         </Stack>
@@ -190,6 +209,16 @@ export function FlightSearchForm({
         />
       </Stack>
 
+      {hasPastDate && (
+        <Typography
+          variant="caption"
+          color="error"
+          sx={{ mt: 2, display: 'block' }}
+        >
+          Dates cannot be in the past.
+        </Typography>
+      )}
+
       {sameAirport && (
         <Typography
           variant="caption"
@@ -203,7 +232,7 @@ export function FlightSearchForm({
       <SubmitBar
         submitLabel="Search flights"
         onSubmit={handleSubmit}
-        submitting={submitting || sameAirport}
+        submitting={submitting || sameAirport || hasPastDate}
         curl={{ method: 'GET', path }}
       />
     </>
