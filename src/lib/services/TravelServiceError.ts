@@ -5,7 +5,8 @@ export type TravelServiceErrorCode =
   | ServiceErrorCode
   | 'CITY_NOT_FOUND'
   | 'AIRPORT_NOT_FOUND'
-  | 'INVALID_DATE_RANGE';
+  | 'INVALID_DATE_RANGE'
+  | 'DATE_IN_PAST';
 
 // Single error class shared by flights and hotels, since the
 // TravelService API is a single service that can return errors from
@@ -19,5 +20,6 @@ export class TravelServiceError extends CodedServiceError<TravelServiceErrorCode
     CITY_NOT_FOUND: 404,
     AIRPORT_NOT_FOUND: 404,
     INVALID_DATE_RANGE: 400,
+    DATE_IN_PAST: 400,
   };
 }

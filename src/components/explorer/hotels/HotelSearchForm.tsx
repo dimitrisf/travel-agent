@@ -11,6 +11,7 @@ import { PriceSlider } from '@/components/explorer/widgets/PriceSlider';
 import { StarsSelect } from '@/components/explorer/widgets/StarsSelect';
 import { SubmitBar } from '@/components/explorer/SubmitBar';
 import { buildHotelsQuery } from '@/lib/explorer/hotels/buildQuery';
+import { todayLocalIsoDate } from '@/lib/explorer/today';
 import { usePersistedState } from '@/lib/explorer/usePersistedState';
 
 // Self-contained search form for /api/hotels. Owns every input field
@@ -75,6 +76,17 @@ export function HotelSearchForm({
   const invalidDateRange =
     checkin.length > 0 && checkout.length > 0 && checkout <= checkin;
 
+  const today = todayLocalIsoDate();
+
+  // Past-date guard: sessionStorage rehydrates whatever dates were last
+  // typed, so a stored value can silently become "past" once the day
+  // rolls over. The `min` attribute only constrains the picker UI, not
+  // the value that's already sitting in state, so we have to check
+  // here as well. Empty is fine (incomplete form, not invalid).
+  const hasPastDate =
+    (checkin.length > 0 && checkin < today) ||
+    (checkout.length > 0 && checkout < today);
+
   const path = buildHotelsQuery({
     city,
     checkin,
@@ -89,7 +101,7 @@ export function HotelSearchForm({
   });
 
   function handleSubmit() {
-    if (invalidDateRange) return;
+    if (invalidDateRange || hasPastDate) return;
     onSearch({ path });
   }
 
@@ -107,7 +119,10 @@ export function HotelSearchForm({
             value={checkin}
             onChange={(e) => setCheckin(e.target.value)}
             size="small"
-            slotProps={{ inputLabel: { shrink: true } }}
+            slotProps={{
+              inputLabel: { shrink: true },
+              htmlInput: { min: today },
+            }}
             sx={{ maxWidth: 200 }}
           />
           <TextField
@@ -116,7 +131,10 @@ export function HotelSearchForm({
             value={checkout}
             onChange={(e) => setCheckout(e.target.value)}
             size="small"
-            slotProps={{ inputLabel: { shrink: true } }}
+            slotProps={{
+              inputLabel: { shrink: true },
+              htmlInput: { min: today },
+            }}
             sx={{ maxWidth: 200 }}
           />
         </Stack>
@@ -188,6 +206,16 @@ export function HotelSearchForm({
         </Stack>
       </Stack>
 
+      {hasPastDate && (
+        <Typography
+          variant="caption"
+          color="error"
+          sx={{ mt: 2, display: 'block' }}
+        >
+          Dates cannot be in the past.
+        </Typography>
+      )}
+
       {invalidDateRange && (
         <Typography
           variant="caption"
@@ -201,7 +229,7 @@ export function HotelSearchForm({
       <SubmitBar
         submitLabel="Search hotels"
         onSubmit={handleSubmit}
-        submitting={submitting || invalidDateRange}
+        submitting={submitting || invalidDateRange || hasPastDate}
         curl={{ method: 'GET', path }}
       />
     </>

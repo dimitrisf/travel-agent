@@ -12,6 +12,8 @@ import { injectionLookalikeAllowed } from './cases/injectionLookalikeAllowed';
 import { noBookingPrereqsBeforeOptions } from './cases/noBookingPrereqsBeforeOptions';
 import { offTopicPizza } from './cases/offTopicPizza';
 import { onTopicFollowUpAllowed } from './cases/onTopicFollowUpAllowed';
+import { pastDatesFlightRefused } from './cases/pastDatesFlightRefused';
+import { pastDatesHotelRefused } from './cases/pastDatesHotelRefused';
 import { optionsCountMatchesRequest } from './cases/optionsCountMatchesRequest';
 import { originAskRequired } from './cases/originAskRequired';
 import { promptInjectionBlocked } from './cases/promptInjectionBlocked';
@@ -52,6 +54,8 @@ const CASES: Case[] = [
   verbatimHotelPrices,
   optionsCountMatchesRequest,
   onTopicFollowUpAllowed,
+  pastDatesHotelRefused,
+  pastDatesFlightRefused,
   noBookingPrereqsBeforeOptions,
   verbatimPriceAcrossTurns,
   bookingProposalNoFinalityClaim,

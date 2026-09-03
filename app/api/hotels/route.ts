@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { apiErrorResponse } from '@/utils/apiErrorResponse';
+import { assertNoPastDates } from '@/utils/dateGuards';
 import { createHotelService } from '@/lib';
 import { parseSearchHotelsQuery } from '@/utils/queries/searchHotelsQuery';
 
@@ -11,6 +12,14 @@ const hotelService = createHotelService();
 export async function GET(req: NextRequest) {
   try {
     const input = parseSearchHotelsQuery(req);
+    // Reject past dates at the boundary — services stay lenient so
+    // internal test fixtures pinned to fixed dates keep working.
+    // Covers Explorer, Assistant (via MCP), and any direct HTTP
+    // caller with the same guard in one place.
+    assertNoPastDates([
+      ['checkin', input.checkin],
+      ['checkout', input.checkout],
+    ]);
     const result = await hotelService.searchHotels(input);
     return NextResponse.json(result);
   } catch (err) {
