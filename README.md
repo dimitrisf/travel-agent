@@ -27,11 +27,12 @@ The current stack (active files) and the historical journey (files preserved in 
 | Layer | Files | Notes |
 |---|---|---|
 | **Frontend** | `app/page.tsx`, `app/layout.tsx`, `app/theme.ts`, `src/components/*`, `src/hooks/useAgentChat.ts` | React Client Component chat UI, MUI theming. Streams SSE events into the DOM. Rich `BookingCard` for booking tool outputs (Stage 8). |
+| **Explorer UI** | `app/explorer/*`, `src/components/explorer/*`, `src/lib/explorer/*` | Form-based parallel front-end over the same REST endpoints the agent calls — compare raw tool output against the agent's prose. Four sub-pages (weather, flights, hotels, booking) with a shared plumbing layer (`ResponsePanel`, `SubmitBar`, `usePersistedState`, `explorerFetch`). See the [Explorer UI section](#explorer-ui) below. |
 | **API Route Handlers** | `app/api/weather/*`, `app/api/flights/route.ts`, `app/api/hotels/route.ts`, `app/api/booking/*` (Stage 8), `app/api/agent/route.ts` | Replace the three Express `*-api.ts` servers. `/api/agent` streams the agent's turn as SSE. The `/api/booking/*` set is a booking state machine with idempotency and CAS on both inventory decrements and status transitions. |
 | **MCP servers** | `app/api/mcp/travel/route.ts`, `app/api/mcp/weather/route.ts` | Route Handlers using `createMcpHttpHandler` (Stage 7 — Streamable HTTP). Tool specs live under `src/mcp/tools/{travel,weather}/` (restructure). |
 | **Agent graph** | `src/agents/build{Weather,Travel,Triage,Agent}Agent.ts`, `src/agents/buildAgentGraph.ts` | One file per agent's instructions + a wire-up (restructure). |
-| **Domain layer** | `src/lib/services/*`, `src/lib/repositories/*`, `src/lib/index.ts` | Services + typed errors + Prisma-backed repositories + barrel with factory helpers (post-Stage-8 subfolder split). Cross-cutting primitives: `services/pricing.ts` (`CabinClass` + multipliers, shared by Flight and Booking so search-time and propose-time prices can't diverge), `services/CodedServiceError.ts::internalErrorFactory` (shared `INTERNAL_ERROR` wrapper), `src/lib/zodDates.ts` (`IsoDate`). |
-| **Utils / config / types** | `src/utils/*` (`apiErrorResponse`, `parsers`, `dates`, `toolOutput`, `queries/`), `src/config/samplePrompts.ts`, `src/types/*` (`chat`, `booking`, `stream`) | Stateless helpers, editable constants, shared types (restructure). |
+| **Domain layer** | `src/lib/services/*`, `src/lib/repositories/*`, `src/lib/index.ts` | Services + typed errors + Prisma-backed repositories + barrel with factory helpers (post-Stage-8 subfolder split). Cross-cutting primitives at `src/lib/` root: `pricing.ts` (`CabinClass` + multipliers, shared by Flight and Booking so search-time and propose-time prices can't diverge — moved here from `services/` since it's not service-owned), `cities.ts` (single source of truth for the five demo cities and their IATA/country/coords), `amenities.ts` (canonical amenity names), `zodDates.ts` (`IsoDate`), plus `services/CodedServiceError.ts::internalErrorFactory` (shared `INTERNAL_ERROR` wrapper). |
+| **Utils / config / types** | `src/utils/*` (`apiErrorResponse`, `parsers`, `dates`, `toolOutput`, `queries/`), `src/config/samplePrompts.ts`, `src/types/*` (`chat`, `booking`, `stream`, `weather`) | Stateless helpers, editable constants, shared types (restructure). Weather Row/Result types live under `src/types/weather.ts` (extracted during M1 so the Explorer client bundle doesn't drag in service or Prisma code). |
 | **Data** | `prisma/schema.prisma`, `prisma/seed.ts` | Booking, FlightBooking, HotelBooking, Payment + BookingStatus/PaymentStatus enums added in Stage 8. |
 | **Historical journey** | `legacy/index.ts` (Day 1), `legacy/weather.ts` (Day 3), `legacy/books.ts` (Day 5), `legacy/research.ts` (Day 6/7), `legacy/mcp-server.ts` (Day 7), `legacy/weather-agent.ts`, `legacy/travel-agent.ts` (CLI REPLs) | Preserved but not part of the running app. Run individually with `tsx legacy/<file>` if you want to revisit the lesson. |
 
@@ -3529,6 +3530,146 @@ Four small PRs that came out of Stage 23 live testing or the initial README pass
 
 ---
 
+## Explorer UI
+
+The chat agent invokes REST endpoints — `/api/weather/current`, `/api/weather/forecast`, `/api/flights`, `/api/hotels`, `/api/booking/*` — as tools behind the scenes. The Explorer UI is a parallel front-end over the same endpoints, hitting them directly through form inputs so a human operator can compare what the tool actually returned against what the agent claimed. It's a debugging surface and a demo aid, not a customer-facing feature.
+
+The whole thing lives under `/explorer`, side-by-side with the chat surface at `/`. A toggle in the shared Header ("Explorer" ↔ "Assistant") swaps between them; sessionStorage remembers the last visited sub-page so a round-trip lands the user back on the same panel with the last query and last response intact.
+
+### Sitemap
+
+Four sub-routes plus an index:
+
+| Route | Backing endpoint(s) | Purpose |
+|---|---|---|
+| `/explorer` | — | Index — one card per sub-route. |
+| `/explorer/weather` | `GET /api/weather/current`, `GET /api/weather/forecast` | Two panels (current + forecast), city-typed autocomplete, forecast day count 1–7. |
+| `/explorer/flights` | `GET /api/flights` | Origin/destination airports, dates, cabin class, adults/children steppers, direct-only toggle, price cap. Results split into outbound + return legs, each independently sortable. |
+| `/explorer/hotels` | `GET /api/hotels` | City, check-in/out, guests, rooms, min stars, per-night price cap, three amenity toggles. Results rendered as `HotelCard`s. |
+| `/explorer/booking` | (planned M4) | Load a booking by id or reference, render through the shared `BookingCard`. |
+
+### Folder layout
+
+Two roots — presentational components under `src/components/explorer/`, non-component helpers under `src/lib/explorer/`. The invariant is strict: `components/` holds only React components; `lib/` holds everything else (hooks, types, utility functions, comparators).
+
+```
+src/components/explorer/
+├─ PageHeader.tsx, PanelHeader.tsx                        (shared headers used by every page)
+├─ EndpointCard.tsx, ExplorerRail.tsx                     (index + persistent left nav)
+├─ ResponsePanel.tsx, SubmitBar.tsx, CurlButton.tsx       (shared response + submit plumbing)
+├─ widgets/
+│  ├─ CitySelect.tsx, AirportSelect.tsx                   (freeSolo Autocomplete over CITIES SoT)
+│  ├─ NumberStepper.tsx, PriceSlider.tsx, StarsSelect.tsx
+├─ weather/
+│  ├─ CurrentWeatherPanel.tsx + CurrentWeatherResults.tsx
+│  └─ ForecastPanel.tsx + ForecastResults.tsx
+├─ flights/
+│  ├─ FlightSearchForm.tsx                                (owns form state, emits { path, passengers })
+│  ├─ FlightResults.tsx → LegBlock.tsx → FlightHeaderRow.tsx → SortableHeader.tsx
+│  └─ FlightRow.tsx
+└─ hotels/
+   ├─ HotelSearchForm.tsx                                 (owns form state, emits { path })
+   ├─ HotelResults.tsx → HotelCard.tsx
+
+src/lib/explorer/
+├─ explorerTypes.ts                                       (ResponseState<T> discriminated union + guards + notLoading)
+├─ explorerFetch.ts                                       (typed fetch wrapper — never throws)
+├─ usePersistedState.ts                                   (sessionStorage-backed useState)
+├─ buildCurl.ts                                           (curl generator for CurlButton)
+├─ flights/
+│  ├─ sort.ts                                             (SortMode/SortSpec + compareFlights + toggleSort + FLIGHT_ROW_GRID)
+│  └─ buildQuery.ts                                       (buildFlightsQuery — form state → /api/flights?...)
+└─ hotels/
+   └─ buildQuery.ts                                       (buildHotelsQuery — form state → /api/hotels?...)
+
+app/explorer/
+├─ layout.tsx                                             (persistent rail + main content area)
+├─ page.tsx                                               (index card grid)
+├─ weather/page.tsx, flights/page.tsx, hotels/page.tsx    (thin shells — instantiate panels/forms + ResponsePanel)
+```
+
+Pages are deliberately thin: they own response state + (for flights) sort state, delegate form ownership to a self-contained `*SearchForm` component. Weather is split into two independent panels (each owns its own form state) since its two endpoints don't share inputs.
+
+### State + persistence
+
+Every panel's inputs and last response survive Explorer↔Assistant navigation via `sessionStorage`, so a user can flip to the chat agent to compare, then flip back and find each panel exactly as they left it. Two moving parts.
+
+**The `usePersistedState` hook** wraps `useState` with sessionStorage sync. Reads once on mount via `useEffect` — safe for SSR since the effect never runs server-side and `sessionStorage` (a browser API) is never touched during SSR. Persists via a wrapped setter (the returned `setValue`), *not* via a separate effect watching the value. The effect-watching pattern creates a race on mount: the persist effect fires with the stale `initial` value in its render-1 closure and overwrites what the hydrate effect just read. Wrapping the setter keeps flow strictly one-way — caller → state + storage, storage → state via hydrate, storage never touched from the hydrate path.
+
+An optional `filter` argument skips persisting transient values. The panels pass `notLoading` (a helper in `explorerTypes.ts`) so a mid-flight fetch never gets restored into a stuck spinner on return. The filter is held in a `useRef`, not in `useCallback`'s deps, so callers can pass inline arrows without churning the returned setter's identity every render — a stability property that matters when the setter is passed to `React.memo`'d children or listed in another effect's dep array.
+
+**The Header's Explorer↔Assistant toggle** remembers the last visited `/explorer/*` sub-page in `sessionStorage['explorer:lastPath']`. Going Assistant → Explorer routes back to that sub-page instead of the `/explorer` index. Fresh tab → clean slate → the toggle defaults to `/explorer`.
+
+Every field in the search forms gets its own storage key (`explorer:flights:origin`, `explorer:hotels:checkin`, etc.). Response state uses `explorer:<page>:state`. The last-searched passenger count on flights is `explorer:flights:lastPassengers` — sticky so displayed per-leg totals reflect the search that actually ran, not whatever the pax steppers happen to show now.
+
+### Building queries
+
+Each search endpoint has a matching `buildQuery` under `src/lib/explorer/<page>/buildQuery.ts`. Two shared properties:
+
+- **Options-object input.** Nine fields for flights, ten for hotels — positional args would be a hazard, and the object keeps call sites self-documenting.
+- **Skip params that equal the API's defaults.** So `Copy as curl` produces the smallest correct request. `guests: 2` doesn't get appended for hotels (matches the server's default); `guests: 3` does. Same for `cabin_class: 'economy'`, `adults: 1`, and every boolean-off toggle.
+
+There's no clever generic — each field has its own inclusion rule (truthy string, non-default number, defined-or-not, `true`-only boolean), and ten `if` statements in the flights builder is more scrutable than a table-driven variant that would need per-field predicates anyway.
+
+### Response handling
+
+Every panel talks to its endpoint through `explorerFetch<T>`, which:
+
+- Times the request with `performance.now()`.
+- Parses JSON on both success and error paths (`apiErrorResponse.ts` returns JSON either way — the endpoint contract is stable).
+- Extracts the typed error shape `{ error: { code, message } }` on failure so the UI can render both the code (as a monospace chip) and the human message.
+- **Never throws** — always resolves to a `ResponseState<T>` discriminated union:
+  - `{ kind: 'idle' }` — before submit.
+  - `{ kind: 'loading' }` — fetch in flight.
+  - `{ kind: 'success', status, timing, data }` — parsed body available.
+  - `{ kind: 'error', status, timing, error }` — server-typed error, HTTP error, or network failure.
+
+`ResponsePanel<T>` dispatches on `state.kind`:
+
+- **idle** → renders nothing (nothing has been submitted yet).
+- **loading** → centered `CircularProgress`.
+- **error** → MUI `Alert` with the typed code + message.
+- **success** → Pretty / Raw tabs. Pretty invokes the caller's `renderPretty(data)` callback (each page provides one — `CurrentWeatherResults`, `ForecastResults`, `FlightResults`, `HotelResults`). Raw dumps `JSON.stringify(data, null, 2)`.
+
+The response meta row carries `<status> · <timing>ms` in the top-right — small but durable through re-hydration, so returning from Assistant to a previously-successful search shows the same status + timing the request actually saw.
+
+### Widget library
+
+Five reusable input widgets under `src/components/explorer/widgets/`:
+
+- **`CitySelect`** — freeSolo MUI Autocomplete over `CITY_NAMES` from `src/lib/cities.ts`. Free-type is allowed so an operator can drive the `CITY_NOT_FOUND` error path on purpose. Per-call-site `width` prop.
+- **`AirportSelect`** — same shape over `CITIES` (which carries the IATA per city). Options display as `"ATH — Athens"` but the controlled value is the bare IATA; selection extracts the IATA before firing `onChange`, and free-type is upper-cased. Optional `excludeIata` filters one airport out of the dropdown — used by the flights form to block picking the same airport for origin and destination. (A same-airport guard on the form still handles the case where a user free-types a matching IATA.)
+- **`NumberStepper`** — −/number/+ control for adults / children / guests / rooms. Clamps to `[min, max]`, disables each button at its respective endpoint, and accepts direct keyboard input (also clamped).
+- **`PriceSlider`** — MUI Slider gated by a Switch. Off → `undefined` (no cap parameter sent). On → integer between `min` and `max` in `step` increments.
+- **`StarsSelect`** — MUI Rating for the minimum-stars filter. Click a star to set the floor ("3+ stars"). Click the built-in "Empty" affordance to clear back to no filter.
+
+Every widget is a **controlled** component — `value` in, `onChange` out — so the parent (`*SearchForm` in most cases) owns state.
+
+### Flights sort
+
+Each results leg — outbound and return — holds its own `SortSpec = { mode, direction }`, persisted independently under `explorer:flights:outboundSort` / `explorer:flights:inboundSort`. So a user can sort outbound by price ascending and return by duration descending at the same time.
+
+- **Mode**: `'departure' | 'duration' | 'price'`.
+- **Direction**: `'asc' | 'desc'`. Clicking a column header cycles inactive → asc → desc → asc — no "off" state, since every leg is always sorted by something.
+- **Tie-breaker**: departure time, always ascending, regardless of the primary sort's direction. So a price-desc sort still groups same-price flights by earliest departure first — the sensible reading.
+
+The comparator lives in `src/lib/explorer/flights/sort.ts` and is a pure function of `(SortSpec, FlightResult, FlightResult) → number`. The direction cycle is in `toggleSort(current, mode)`: switching to a new mode always starts at `asc`; hitting the active mode flips direction.
+
+`SortableHeader` renders one clickable column header with an ↑ / ↓ arrow when active, keyboard-operable via Enter and Space with a matching `aria-label`. Kept fully generic (takes any `sort` + `onSort` prop) so it'll drop into hotels results too if sorting lands there.
+
+### Test coverage
+
+Full component-level coverage under Vitest + React Testing Library — **112 tests across 25 colocated `.test.tsx` files**, shipped as four incremental PRs:
+
+- **A — widgets (28 tests).** Established the pattern; discovered that controlled-`inputValue` Autocomplete needs a stateful test wrapper (otherwise typed characters replace each other instead of accumulating), and that MUI Rating's visually-hidden radios need `fireEvent.click` on the radio input queried by its `value` attribute — `user.click` on the label doesn't reliably reach the underlying input.
+- **B — presenters + headers (43 tests).** Introduced the `vi.mock('./LegBlock', ...)` pattern for composed components: parent tests focus on the composition contract (right props, right count, right order) without repeating rendering coverage that already exists in the child's own test file.
+- **C — stateful panels + fetch mock (25 tests).** `vi.stubGlobal('fetch', vi.fn())` with a `Response`-shaped resolve, `sessionStorage` pre-population as a shortcut past widget interactions when the test only cares about a validation state, `fireEvent.change` for controlled number inputs (where `parseInt('') === NaN` makes `user.clear` silently no-op).
+- **D — shared plumbing (16 tests).** Discovered `userEvent.setup()` installs its own Clipboard API stub — instead of fighting it, `CurlButton` tests read back the copied command with `await navigator.clipboard.readText()`.
+
+Test files sit next to the component they cover — no separate `__tests__` directory, no test-only naming convention. `Foo.tsx` → `Foo.test.tsx` in the same folder.
+
+---
+
 ## Next.js port
 
 Everything below Stage 5 was ported to a single Next.js 15 (App Router) app. What changed and what didn't:
@@ -3832,6 +3973,9 @@ The legacy REPLs still work — the CLI travel-agent talks to the same MCP serve
 day-1/
 ├─ app/
 │  ├─ page.tsx, layout.tsx, theme.ts                     (chat UI shell)
+│  ├─ explorer/
+│  │  ├─ layout.tsx, page.tsx                             (persistent rail + index card grid)
+│  │  ├─ weather/page.tsx, flights/page.tsx, hotels/page.tsx  (thin shells over the panel components)
 │  └─ api/
 │     ├─ agent/route.ts                                   (SSE stream of the agent's turn)
 │     ├─ weather/{current,forecast}/route.ts              (weather REST)
@@ -3840,17 +3984,31 @@ day-1/
 │     └─ mcp/{travel,weather}/route.ts                    (MCP as Streamable HTTP Route Handlers, Stage 7)
 ├─ src/
 │  ├─ agents/         (build{Weather,Travel,Triage}Agent, buildAgentGraph)
-│  ├─ components/     (UI: MessageBubble(s), ToolCallView, BookingCard, FlightLegRow(s), HotelStayRow(s), SamplePrompts)
+│  ├─ components/
+│  │  ├─ (chat UI: MessageBubble(s), ToolCallView, BookingCard, FlightLegRow(s), HotelStayRow(s), SamplePrompts, Header)
+│  │  └─ explorer/                                       (Explorer sub-app UI)
+│  │     ├─ PageHeader, PanelHeader, EndpointCard, ExplorerRail
+│  │     ├─ ResponsePanel, SubmitBar, CurlButton         (shared plumbing)
+│  │     ├─ widgets/{City,Airport}Select, NumberStepper, PriceSlider, StarsSelect
+│  │     ├─ weather/{Current,Forecast}Panel + {Current,Forecast}Results
+│  │     ├─ flights/FlightSearchForm + FlightResults → LegBlock → FlightHeaderRow → SortableHeader + FlightRow
+│  │     └─ hotels/HotelSearchForm + HotelResults + HotelCard
 │  ├─ config/         (samplePrompts.ts)
 │  ├─ hooks/          (useAgentChat)
 │  ├─ lib/
 │  │  ├─ index.ts     (barrel + factory helpers + PrismaClient singleton)
+│  │  ├─ cities.ts, amenities.ts, pricing.ts             (cross-cutting SoTs for city/airport data, amenity names, CabinClass enum)
+│  │  ├─ zodDates.ts  (shared IsoDate zod primitive)
 │  │  ├─ repositories/ (Booking, Flight, Hotel, WeatherRepository)
-│  │  └─ services/    (Booking, Flight, Hotel, WeatherService + typed error classes)
+│  │  ├─ services/    (Booking, Flight, Hotel, WeatherService + typed error classes)
+│  │  └─ explorer/
+│  │     ├─ explorerTypes.ts, explorerFetch.ts, usePersistedState.ts, buildCurl.ts
+│  │     ├─ flights/{sort,buildQuery}.ts
+│  │     └─ hotels/buildQuery.ts
 │  ├─ mcp/
 │  │  ├─ mcpHttpHandler.ts, mcpApiClient.ts
 │  │  └─ tools/{travel,weather}/                          (one tool spec factory per file)
-│  ├─ types/          (chat, booking, stream)
+│  ├─ types/          (chat, booking, stream, weather)   (weather Row/Result types extracted here as of M1)
 │  └─ utils/
 │     ├─ apiErrorResponse.ts, parsers.ts, dates.ts, toolOutput.ts
 │     └─ queries/     (search{Flights,Hotels}Query)
