@@ -1,31 +1,39 @@
-import Box from '@mui/material/Box';
-import Typography from '@mui/material/Typography';
+import { styled } from '@pigment-css/react';
 import { EndpointCard } from '@/components/explorer/EndpointCard';
+import { PageHeader } from '@/components/explorer/PageHeader';
 
 // Explorer index. Four cards, one per sub-route. Each card links to a
 // form-based UI that hits the underlying REST endpoint directly, so a
 // reader can compare raw tool output against what the agent claims.
 // See docs/ Explorer Sketch for the design rationale.
+//
+// Rendered as a pure server component: layout wrappers are Pigment
+// styled elements (zero-runtime CSS, no client boundary), and the
+// cards themselves are Pigment styled anchors. No MUI on this page.
+
+const Page = styled('div')({
+  display: 'flex',
+  flexDirection: 'column',
+  gap: '24px',
+});
+
+const CardGrid = styled('div')({
+  display: 'grid',
+  gap: '16px',
+  gridTemplateColumns: '1fr',
+  '@media (min-width: 600px)': {
+    gridTemplateColumns: 'repeat(2, 1fr)',
+  },
+});
+
 export default function ExplorerIndex() {
   return (
-    <Box sx={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
-      <Box>
-        <Typography variant="h4" component="h1" gutterBottom>
-          Explorer
-        </Typography>
-        <Typography variant="body1" color="text.secondary">
-          Form-based UI hitting each REST endpoint directly. Compare what
-          the tools actually returned against what the agent claimed.
-        </Typography>
-      </Box>
-
-      <Box
-        sx={{
-          display: 'grid',
-          gridTemplateColumns: { xs: '1fr', sm: 'repeat(2, 1fr)' },
-          gap: 2,
-        }}
-      >
+    <Page>
+      <PageHeader
+        title="Explorer"
+        description="Form-based UI hitting each REST endpoint directly. Compare what the tools actually returned against what the agent claimed."
+      />
+      <CardGrid>
         <EndpointCard
           title="Weather"
           href="/explorer/weather"
@@ -50,7 +58,7 @@ export default function ExplorerIndex() {
           blurb="Propose a booking or load one by reference; operate via BookingCard."
           sample="POST /api/booking/propose · GET /api/booking/:id"
         />
-      </Box>
-    </Box>
+      </CardGrid>
+    </Page>
   );
 }
