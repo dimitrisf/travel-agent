@@ -2039,7 +2039,7 @@ Two consistent design choices:
 
 **Client Context** — the load-bearing piece of coordination between Header and page:
 
-- **New `src/lib/share/ShareContext.tsx`** — client React Context. Shape: `{ conversationId, isOwner, shared, setShareState, setShared }`. Empty default (`conversationId: null`) so the Header's `ShareButton` trivially short-circuits on `/`.
+- **New `src/context/ShareContext.tsx`** — client React Context. Shape: `{ conversationId, isOwner, shared, setShareState, setShared }`. Empty default (`conversationId: null`) so the Header's `ShareButton` trivially short-circuits on `/`.
 - **Why a Context and not props**: Header is a sibling of the page — both mount inside the root layout, which is a server component. Prop-drilling between them would require lifting state into the layout, which can't hold client state. A client Context in `app/providers.tsx` is the cleaner boundary. Alternative was Header fetching ownership metadata on every navigation — an extra HTTP round-trip that most navigations don't need.
 - **`app/providers.tsx`** nests `ShareProvider` inside `SessionProvider`.
 
@@ -2091,7 +2091,7 @@ src/lib/auth/
 src/lib/repositories/ConversationRepository.ts    (Phase 3 — findById/findMetaById/listByUser/create/appendMessages; Phase 4 added setShared)
 src/lib/services/ConversationService.ts           (Phase 3 — listForUser/create/appendTurn/assertOwnership; Phase 4 replaced loadForUser with loadForViewer, added setShared; Phase 3.5 post-refactor renamed create's seedHistory→titleSource, added atomic createWithSeed)
 src/lib/services/ConversationServiceError.ts      (Phase 3 — typed error class)
-src/lib/share/ShareContext.tsx                    (Phase 4 — client Context for {conversationId, isOwner, shared})
+src/context/ShareContext.tsx                      (Phase 4 — client Context for {conversationId, isOwner, shared})
 
 src/types/next-auth.d.ts               (module augmentation — adds id to session.user)
 src/utils/hydrateChatMessages.ts       (Phase 3 — AgentInputItem[] → ChatMessage[] for /c/[id] hydration)

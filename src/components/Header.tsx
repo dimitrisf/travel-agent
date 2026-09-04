@@ -25,7 +25,7 @@ import {
   signInWithGoogle,
   signOutCurrent,
 } from '@/lib/auth/client';
-import { useShareState } from '@/lib/share/ShareContext';
+import { useShareState } from '@/context/ShareContext';
 import { ShareModal } from '@/components/ShareModal';
 
 // Header for both the / and /c/[id] surfaces. Signed-out: title + sign-in
