@@ -11,6 +11,14 @@ import { explorerFetch } from '@/lib/explorer/explorerFetch';
 import { notLoading, type ResponseState } from '@/lib/explorer/explorerTypes';
 import { usePersistedState } from '@/lib/explorer/usePersistedState';
 import type { HotelResult } from '@/lib/services/HotelService';
+import type { StayContext } from '@/components/explorer/hotels/HotelResults';
+
+const DEFAULT_STAY: StayContext = {
+  checkin: '',
+  checkout: '',
+  guests: 2,
+  rooms: 1,
+};
 
 export default function HotelsExplorerPage() {
   const [state, setState] = usePersistedState<ResponseState<HotelResult[]>>(
@@ -19,7 +27,28 @@ export default function HotelsExplorerPage() {
     notLoading,
   );
 
-  async function search({ path }: { path: string }) {
+  // Stay context from the LAST submitted search — sticky so the row-
+  // level "Add to booking" payloads reflect the search that actually
+  // ran, not whatever the form shows now. Persisted alongside the
+  // response.
+  //
+  // The sticky snapshot matters because a user can change the form
+  // after searching without re-submitting. The row must show the
+  // price the search returned, not the price the form is currently
+  // configured for.
+  const [lastStay, setLastStay] = usePersistedState<StayContext>(
+    'explorer:hotels:lastStay',
+    DEFAULT_STAY,
+  );
+
+  async function search({
+    path,
+    stay,
+  }: {
+    path: string;
+    stay: StayContext;
+  }) {
+    setLastStay(stay);
     setState({ kind: 'loading' });
     const next = await explorerFetch<HotelResult[]>({ method: 'GET', path });
     setState(next);
@@ -42,7 +71,9 @@ export default function HotelsExplorerPage() {
 
         <ResponsePanel
           state={state}
-          renderPretty={(data) => <HotelResults data={data} />}
+          renderPretty={(data) => (
+            <HotelResults data={data} stay={lastStay} />
+          )}
         />
       </Paper>
     </Stack>

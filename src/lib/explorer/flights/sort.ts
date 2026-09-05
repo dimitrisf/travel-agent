@@ -13,7 +13,9 @@ export const DEFAULT_SORT: SortSpec = { mode: 'price', direction: 'asc' };
 
 // Grid template shared by the sortable header row and every flight row
 // so the column headers line up exactly over the values below them.
-export const FLIGHT_ROW_GRID = '90px 130px 90px 1fr auto';
+// Trailing `auto` column is reserved for the per-row "Add to booking"
+// toggle (the header renders an empty slot there).
+export const FLIGHT_ROW_GRID = '90px 130px 90px 1fr auto auto';
 
 export function compareFlights(
   sort: SortSpec,

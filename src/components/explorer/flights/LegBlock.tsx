@@ -3,6 +3,7 @@ import Typography from '@mui/material/Typography';
 import { FlightHeaderRow } from './FlightHeaderRow';
 import { FlightRow } from './FlightRow';
 import type { SortSpec } from '@/lib/explorer/flights/sort';
+import type { CabinClass } from '@/lib/pricing';
 import type { FlightResult } from '@/lib/services/FlightService';
 
 // One outbound or return leg: overline caption (title · date · count),
@@ -12,6 +13,7 @@ export type LegBlockProps = {
   title: string;
   flights: FlightResult[];
   passengers: number;
+  cabinClass: CabinClass;
   sort: SortSpec;
   onSort: (sort: SortSpec) => void;
 };
@@ -20,6 +22,7 @@ export function LegBlock({
   title,
   flights,
   passengers,
+  cabinClass,
   sort,
   onSort,
 }: LegBlockProps) {
@@ -44,6 +47,7 @@ export function LegBlock({
             key={f.flight_instance_id}
             flight={f}
             passengers={passengers}
+            cabinClass={cabinClass}
           />
         ))}
       </Stack>

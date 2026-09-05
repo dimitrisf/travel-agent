@@ -2,6 +2,7 @@ import Stack from '@mui/material/Stack';
 import Typography from '@mui/material/Typography';
 import { LegBlock } from './LegBlock';
 import { compareFlights, type SortSpec } from '@/lib/explorer/flights/sort';
+import type { CabinClass } from '@/lib/pricing';
 import type { SearchFlightsResult } from '@/lib/services/FlightService';
 
 // Pretty view for a SearchFlightsResult. Renders outbound and return
@@ -12,6 +13,7 @@ import type { SearchFlightsResult } from '@/lib/services/FlightService';
 export type FlightResultsProps = {
   data: SearchFlightsResult;
   passengers: number;
+  cabinClass: CabinClass;
   outboundSort: SortSpec;
   inboundSort: SortSpec;
   onOutboundSort: (sort: SortSpec) => void;
@@ -21,6 +23,7 @@ export type FlightResultsProps = {
 export function FlightResults({
   data,
   passengers,
+  cabinClass,
   outboundSort,
   inboundSort,
   onOutboundSort,
@@ -46,6 +49,7 @@ export function FlightResults({
           title="Outbound"
           flights={outbound}
           passengers={passengers}
+          cabinClass={cabinClass}
           sort={outboundSort}
           onSort={onOutboundSort}
         />
@@ -55,6 +59,7 @@ export function FlightResults({
           title="Return"
           flights={inbound}
           passengers={passengers}
+          cabinClass={cabinClass}
           sort={inboundSort}
           onSort={onInboundSort}
         />
