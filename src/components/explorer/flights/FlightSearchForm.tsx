@@ -23,7 +23,11 @@ import { CabinClass } from '@/lib/pricing';
 
 export type FlightSearchFormProps = {
   submitting: boolean;
-  onSearch: (args: { path: string; passengers: number }) => void;
+  onSearch: (args: {
+    path: string;
+    passengers: number;
+    cabinClass: CabinClass;
+  }) => void;
 };
 
 export function FlightSearchForm({
@@ -92,6 +96,7 @@ export function FlightSearchForm({
     (departureDate.length > 0 && departureDate < today) ||
     (returnDate.length > 0 && returnDate < today);
 
+  // E.g., path might look like: "/explorer/flights?origin=ATH&destination=BER&departureDate=2024-06-01&returnDate=2024-06-05&cabinClass=economy&adults=1&children=0&nonstopOnly=false&maxPrice=undefined"
   const path = buildFlightsQuery({
     origin,
     destination,
@@ -106,7 +111,7 @@ export function FlightSearchForm({
 
   function handleSubmit() {
     if (sameAirport || hasPastDate) return;
-    onSearch({ path, passengers: adults + children });
+    onSearch({ path, passengers: adults + children, cabinClass });
   }
 
   return (

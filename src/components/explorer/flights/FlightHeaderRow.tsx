@@ -45,6 +45,9 @@ export function FlightHeaderRow({ sort, onSort }: FlightHeaderRowProps) {
         onSort={onSort}
         align="right"
       />
+      {/* No child for the trailing per-row Add-to-booking toggle column
+          — CSS Grid collapses the empty `auto` slot to 0 width, so
+          "Total" still lands over the row's total price. */}
     </Box>
   );
 }

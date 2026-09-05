@@ -15,7 +15,7 @@ import Switch from '@mui/material/Switch';
 import TextField from '@mui/material/TextField';
 import Typography from '@mui/material/Typography';
 import ContentCopyIcon from '@mui/icons-material/ContentCopy';
-import { useShareState } from '@/lib/share/ShareContext';
+import { useShareState } from '@/context/ShareContext';
 
 // Share modal (Stage 17 Phase 4). Owned by the Header's Share button.
 // Toggle at the top drives the shared flag; when on, the URL field is

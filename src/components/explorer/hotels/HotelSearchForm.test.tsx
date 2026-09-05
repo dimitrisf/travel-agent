@@ -40,9 +40,12 @@ describe('HotelSearchForm', () => {
     await user.click(screen.getByRole('button', { name: /Search hotels/ }));
 
     // Dates are empty by default; guests=2 and rooms=1 are the API's
-    // defaults so both are omitted from the built URL.
+    // defaults so both are omitted from the built URL. `stay` still
+    // carries the raw form values (empty strings for the dates) — the
+    // consumer only reads it after a successful search populates them.
     expect(onSearch).toHaveBeenCalledExactlyOnceWith({
       path: '/api/hotels?city=Athens',
+      stay: { checkin: '', checkout: '', guests: 2, rooms: 1 },
     });
   });
 
@@ -115,6 +118,7 @@ describe('HotelSearchForm', () => {
 
     expect(onSearch).toHaveBeenCalledExactlyOnceWith({
       path: '/api/hotels?city=Athens&guests=4&rooms=2&min_stars=4&max_price=250&breakfast_required=true&free_cancellation=true&pet_friendly=true',
+      stay: { checkin: '', checkout: '', guests: 4, rooms: 2 },
     });
   });
 

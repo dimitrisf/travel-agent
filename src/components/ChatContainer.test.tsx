@@ -17,7 +17,7 @@ vi.mock('@/lib/auth/client', () => ({
   useCurrentUser: vi.fn(() => null),
 }));
 
-vi.mock('@/lib/share/ShareContext', () => ({
+vi.mock('@/context/ShareContext', () => ({
   useShareState: vi.fn(() => ({
     conversationId: null,
     isOwner: false,

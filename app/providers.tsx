@@ -1,7 +1,7 @@
 'use client';
 
 import { SessionProvider } from 'next-auth/react';
-import { ShareProvider } from '@/lib/share/ShareContext';
+import { ShareProvider } from '@/context/ShareContext';
 
 // Client-only wrappers for cross-cutting React contexts. Nested so all
 // consumers can rely on both being present regardless of where they

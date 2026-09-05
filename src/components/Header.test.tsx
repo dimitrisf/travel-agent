@@ -31,7 +31,7 @@ vi.mock('@/lib/auth/client', () => ({
 }));
 
 // Mock ShareContext so ShareButton can early-return (no conversation).
-vi.mock('@/lib/share/ShareContext', () => ({
+vi.mock('@/context/ShareContext', () => ({
   useShareState: vi.fn(),
 }));
 
@@ -44,7 +44,7 @@ vi.mock('@/components/ShareModal', () => ({
 
 import { Header } from './Header';
 import { useCurrentUser } from '@/lib/auth/client';
-import { useShareState } from '@/lib/share/ShareContext';
+import { useShareState } from '@/context/ShareContext';
 
 const useCurrentUserMock = vi.mocked(useCurrentUser);
 const useShareStateMock = vi.mocked(useShareState);

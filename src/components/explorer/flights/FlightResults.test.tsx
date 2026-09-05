@@ -59,6 +59,7 @@ describe('FlightResults', () => {
       <FlightResults
         data={empty}
         passengers={1}
+        cabinClass="economy"
         outboundSort={{ mode: 'price', direction: 'asc' }}
         inboundSort={{ mode: 'price', direction: 'asc' }}
         onOutboundSort={vi.fn()}
@@ -80,6 +81,7 @@ describe('FlightResults', () => {
       <FlightResults
         data={data}
         passengers={1}
+        cabinClass="economy"
         outboundSort={{ mode: 'price', direction: 'asc' }}
         inboundSort={{ mode: 'price', direction: 'asc' }}
         onOutboundSort={vi.fn()}
@@ -99,6 +101,7 @@ describe('FlightResults', () => {
       <FlightResults
         data={{ outbound: [dear, cheap, mid], inbound: [mid, dear, cheap] }}
         passengers={1}
+        cabinClass="economy"
         outboundSort={{ mode: 'price', direction: 'asc' }}
         inboundSort={{ mode: 'price', direction: 'desc' }}
         onOutboundSort={vi.fn()}

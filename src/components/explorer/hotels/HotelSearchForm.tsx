@@ -21,7 +21,15 @@ import { usePersistedState } from '@/lib/explorer/usePersistedState';
 
 export type HotelSearchFormProps = {
   submitting: boolean;
-  onSearch: (args: { path: string }) => void;
+  onSearch: (args: {
+    path: string;
+    stay: {
+      checkin: string;
+      checkout: string;
+      guests: number;
+      rooms: number;
+    };
+  }) => void;
 };
 
 export function HotelSearchForm({
@@ -87,6 +95,7 @@ export function HotelSearchForm({
     (checkin.length > 0 && checkin < today) ||
     (checkout.length > 0 && checkout < today);
 
+  // E.g., path might look like: "/explorer/hotels?city=Athens&checkin=2024-06-01&checkout=2024-06-05&guests=2&rooms=1"
   const path = buildHotelsQuery({
     city,
     checkin,
@@ -102,7 +111,10 @@ export function HotelSearchForm({
 
   function handleSubmit() {
     if (invalidDateRange || hasPastDate) return;
-    onSearch({ path });
+    onSearch({
+      path,
+      stay: { checkin, checkout, guests, rooms },
+    });
   }
 
   return (

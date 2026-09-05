@@ -11,6 +11,7 @@ import { explorerFetch } from '@/lib/explorer/explorerFetch';
 import { DEFAULT_SORT, type SortSpec } from '@/lib/explorer/flights/sort';
 import { notLoading, type ResponseState } from '@/lib/explorer/explorerTypes';
 import { usePersistedState } from '@/lib/explorer/usePersistedState';
+import type { CabinClass } from '@/lib/pricing';
 import type { SearchFlightsResult } from '@/lib/services/FlightService';
 
 export default function FlightsExplorerPage() {
@@ -36,14 +37,25 @@ export default function FlightsExplorerPage() {
     1,
   );
 
+  // Cabin class from the LAST submitted search. Same reason as
+  // `passengers`: the selection payload snapshots the search that
+  // produced the visible prices, not the current form value.
+  const [lastCabinClass, setLastCabinClass] = usePersistedState<CabinClass>(
+    'explorer:flights:lastCabinClass',
+    'economy',
+  );
+
   async function search({
     path,
     passengers: pax,
+    cabinClass,
   }: {
     path: string;
     passengers: number;
+    cabinClass: CabinClass;
   }) {
     setPassengers(pax);
+    setLastCabinClass(cabinClass);
     setState({ kind: 'loading' });
     const next = await explorerFetch<SearchFlightsResult>({
       method: 'GET',
@@ -73,6 +85,7 @@ export default function FlightsExplorerPage() {
             <FlightResults
               data={data}
               passengers={passengers}
+              cabinClass={lastCabinClass}
               outboundSort={outboundSort}
               inboundSort={inboundSort}
               onOutboundSort={setOutboundSort}

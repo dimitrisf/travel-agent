@@ -17,7 +17,7 @@ import { SamplePrompts } from '@/components/SamplePrompts';
 import { UrlNoticeHandler } from '@/components/UrlNoticeHandler';
 import { useAgentChat } from '@/hooks/useAgentChat';
 import { useCurrentUser } from '@/lib/auth/client';
-import { useShareState } from '@/lib/share/ShareContext';
+import { useShareState } from '@/context/ShareContext';
 import {
   readAnonChatHistory,
   saveAnonChatHistory,

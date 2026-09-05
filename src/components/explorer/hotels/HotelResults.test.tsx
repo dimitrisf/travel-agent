@@ -3,8 +3,15 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { render, screen, cleanup } from '@testing-library/react';
 
-import { HotelResults } from './HotelResults';
+import { HotelResults, type StayContext } from './HotelResults';
 import type { HotelResult } from '@/lib/services/HotelService';
+
+const STAY: StayContext = {
+  checkin: '2026-09-15',
+  checkout: '2026-09-18',
+  guests: 2,
+  rooms: 1,
+};
 
 // Stub the child so this test focuses on the container's behavior:
 // count overline, empty state, and per-result rendering. HotelCard has
@@ -42,7 +49,7 @@ describe('HotelResults', () => {
   });
 
   it('renders the empty-state message when the array is empty', () => {
-    render(<HotelResults data={[]} />);
+    render(<HotelResults stay={STAY} data={[]} />);
     expect(
       screen.getByText('No hotels match those filters.'),
     ).toBeInTheDocument();
@@ -55,13 +62,13 @@ describe('HotelResults', () => {
       make({ room_type_id: 2, hotel: 'B' }),
       make({ room_type_id: 3, hotel: 'C' }),
     ];
-    render(<HotelResults data={data} />);
+    render(<HotelResults stay={STAY} data={data} />);
     expect(screen.getByText('3 hotels')).toBeInTheDocument();
     expect(screen.getAllByTestId('hotel-card')).toHaveLength(3);
   });
 
   it('uses singular "hotel" when there is exactly one', () => {
-    render(<HotelResults data={[make()]} />);
+    render(<HotelResults stay={STAY} data={[make()]} />);
     expect(screen.getByText('1 hotel')).toBeInTheDocument();
   });
 });

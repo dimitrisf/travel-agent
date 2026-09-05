@@ -1,10 +1,20 @@
 // @vitest-environment jsdom
 
-import { describe, it, expect, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { render, screen, cleanup } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 
 import { HotelCard } from './HotelCard';
+import { SelectionProvider } from '@/context/SelectionContext';
+import type { StayContext } from './HotelResults';
 import type { HotelResult } from '@/lib/services/HotelService';
+
+const DEFAULT_STAY: StayContext = {
+  checkin: '2026-09-15',
+  checkout: '2026-09-18',
+  guests: 2,
+  rooms: 1,
+};
 
 function make(overrides: Partial<HotelResult> = {}): HotelResult {
   return {
@@ -27,20 +37,35 @@ function make(overrides: Partial<HotelResult> = {}): HotelResult {
   };
 }
 
+// HotelCard reads SelectionContext via useSelection, so every render
+// needs the provider around it. Tests reset sessionStorage in
+// beforeEach so cases don't leak selection state to each other.
+function renderCard(props: { hotel?: HotelResult; stay?: StayContext } = {}) {
+  const { hotel = make(), stay = DEFAULT_STAY } = props;
+  return render(
+    <SelectionProvider>
+      <HotelCard hotel={hotel} stay={stay} />
+    </SelectionProvider>,
+  );
+}
+
 describe('HotelCard', () => {
+  beforeEach(() => {
+    sessionStorage.clear();
+  });
   afterEach(() => {
     cleanup();
   });
 
   it('renders the hotel name as an h3', () => {
-    render(<HotelCard hotel={make()} />);
+    renderCard();
     expect(
       screen.getByRole('heading', { level: 3, name: 'Athens Acropolis Suites' }),
     ).toBeInTheDocument();
   });
 
   it('renders address, room type and city', () => {
-    render(<HotelCard hotel={make()} />);
+    renderCard();
     expect(
       screen.getByText('Dionysiou Areopagitou 25, 11742 Athens'),
     ).toBeInTheDocument();
@@ -48,36 +73,72 @@ describe('HotelCard', () => {
   });
 
   it('renders one chip per amenity', () => {
-    render(<HotelCard hotel={make()} />);
+    renderCard();
     for (const a of ['Breakfast', 'Free WiFi', 'Swimming Pool']) {
       expect(screen.getByText(a)).toBeInTheDocument();
     }
   });
 
   it('renders the numeric rating with one decimal', () => {
-    render(<HotelCard hotel={make({ rating: 9 })} />);
+    renderCard({ hotel: make({ rating: 9 }) });
     expect(screen.getByText('9.0 / 10')).toBeInTheDocument();
   });
 
   it('renders total and per-night price with € prefix', () => {
-    render(<HotelCard hotel={make()} />);
+    renderCard();
     expect(screen.getByText('€435')).toBeInTheDocument();
     expect(screen.getByText('€145/night × 3 nights')).toBeInTheDocument();
   });
 
   it('renders singular "night" for a one-night stay', () => {
-    render(
-      <HotelCard hotel={make({ nights: 1, total_price: 145 })} />,
-    );
+    renderCard({ hotel: make({ nights: 1, total_price: 145 }) });
     expect(screen.getByText('€145/night × 1 night')).toBeInTheDocument();
   });
 
   it('renders the cancellation description', () => {
-    render(<HotelCard hotel={make()} />);
+    renderCard();
     expect(
-      screen.getByText(
-        'Free cancellation up to 24 hours before check-in.',
-      ),
+      screen.getByText('Free cancellation up to 24 hours before check-in.'),
     ).toBeInTheDocument();
+  });
+
+  it('renders the Add-to-booking toggle as "Add" when nothing is selected', () => {
+    renderCard();
+    const btn = screen.getByRole('button', { name: /Add .* to booking/i });
+    expect(btn).toHaveAttribute('aria-pressed', 'false');
+    expect(btn).toHaveTextContent(/Add/);
+  });
+
+  it('flips to "Selected" after a click and stores the payload with the stay context', async () => {
+    const user = userEvent.setup();
+    renderCard();
+    await user.click(screen.getByRole('button', { name: /Add .* to booking/i }));
+    const now = screen.getByRole('button', { name: /Remove .* from booking/i });
+    expect(now).toHaveAttribute('aria-pressed', 'true');
+    expect(now).toHaveTextContent(/Selected/);
+    const raw = sessionStorage.getItem('explorer:selection:v1');
+    expect(raw).not.toBeNull();
+    const parsed = JSON.parse(raw as string);
+    expect(parsed.hotel).toMatchObject({
+      room_type_id: 10,
+      checkin: '2026-09-15',
+      checkout: '2026-09-18',
+      guests: 2,
+      rooms: 1,
+      nights: 3,
+      pricePerNightEUR: 145,
+      totalEUR: 435,
+    });
+  });
+
+  it('toggles off when the currently-selected card is clicked again', async () => {
+    const user = userEvent.setup();
+    renderCard();
+    await user.click(screen.getByRole('button', { name: /Add .* to booking/i }));
+    await user.click(
+      screen.getByRole('button', { name: /Remove .* from booking/i }),
+    );
+    const btn = screen.getByRole('button', { name: /Add .* to booking/i });
+    expect(btn).toHaveAttribute('aria-pressed', 'false');
   });
 });
