@@ -132,29 +132,157 @@ export class HotelRepository {
     return this.queryDb(opts);
   }
 
-  // Cache-population probe: is there any Availability at all for a
-  // RoomType with enough capacity for `opts.guests` in this city,
-  // within the requested date range? Deliberately ignores minStars /
-  // maxPricePerNight / requiredAmenities / freeCancellationRequired —
-  // those are user-preference filters, not signals that the LLM has
-  // yet to be called for the (city, dateRange, guests) tuple.
+  // Cache-population probe: does at least one RoomType with enough
+  // capacity for `opts.guests` in this city have an Availability row
+  // for EVERY night in the requested range, each with roomsAvailable
+  // > 0? Deliberately ignores minStars / maxPricePerNight /
+  // requiredAmenities / freeCancellationRequired — those are user-
+  // preference filters, not signals that the LLM has yet to be called
+  // for the (city, dateRange, guests) tuple.
+  //
+  // Three concrete lines are doing the work. Old vs. new, side by
+  // side:
+  //
+  // Old:
+  //
+  //     const count = await this.prisma.availability.count({    // ← counts ROWS across all rooms
+  //       where: {
+  //         date: { gte: checkin, lt: checkout },
+  //         roomType: {
+  //           maxGuests: { gte: opts.guests },
+  //           hotel: { city: { name: opts.cityName } },
+  //         },
+  //       },
+  //     });
+  //
+  //     return count > 0;                                       // ← ANY row anywhere wins
+  //
+  // New (this function):
+  //
+  //     const roomTypes = await this.prisma.roomType.findMany({ // ← fetches ROOMS, not rows
+  //       where: {
+  //         maxGuests: { gte: opts.guests },
+  //         hotel: { city: { name: opts.cityName } },
+  //       },
+  //       select: {
+  //         availability: {
+  //           where: {
+  //             date: { gte: checkin, lt: checkout },
+  //             roomsAvailable: { gt: 0 },                      // ← rooms=0 no longer "covers"
+  //           },
+  //           select: { date: true },
+  //         },
+  //       },
+  //     });
+  //
+  //     return roomTypes.some((rt) => rt.availability.length === nights);  // ← THE key line
+  //
+  // The three lines that matter:
+  //
+  // 1. The pivot from `availability.count` to `roomType.findMany`.
+  //
+  //    The old code counted rows across all rooms mashed together. In
+  //    the R1/R2 example below, that's 2 — 1 from R1, 1 from R2.
+  //    Whether those two rows belonged to the same room or different
+  //    rooms was lost the moment we counted.
+  //
+  //    The new code fetches per-room, with each room's availability
+  //    rows nested underneath. Now R1 and R2 stay distinguishable,
+  //    and we can ask "does THIS room have full coverage?" one room
+  //    at a time.
+  //
+  // 2. `roomsAvailable: { gt: 0 }` — new only.
+  //
+  //    Old code counted `roomsAvailable = 0` rows as "coverage
+  //    exists". `queryDb` rejects them (see the `.every(...)` line
+  //    below). Adding this filter makes the gate reject them too.
+  //
+  // 3. `roomTypes.some((rt) => rt.availability.length === nights)` —
+  //    this is THE semantic pivot.
+  //
+  //    Read it aloud: "return true only if some room type has exactly
+  //    `nights` bookable availability rows in the range." That's the
+  //    exact condition queryDb uses to accept a room
+  //    (`if (room.availability.length !== nights) continue;` —
+  //    reject unless length equals nights). The gate now asks the
+  //    identical question queryDb asks, just phrased with
+  //    `.some(...) === true` instead of `for (...) continue`.
+  //
+  // Worked example. Request: Berlin, checkin 2026-09-07,
+  // checkout 2026-09-09, guests=2, rooms=1. So nights=2 (Sep 7 and
+  // Sep 8). Berlin already has two rooms in the DB from an earlier
+  // LLM run that generated partial data:
+  //
+  //     Room | maxGuests | Sep 7                | Sep 8
+  //     -----|-----------|----------------------|----------------------
+  //     R1   |     2     | roomsAvailable: 5    | (no row)
+  //     R2   |     2     | (no row)             | roomsAvailable: 3
+  //
+  // Two Availability rows total. Neither room has both nights
+  // covered.
+  //
+  // What queryDb accepts: "The room must have exactly `nights`
+  // availability rows in the range, AND every night must have
+  // roomsAvailable >= 1." Walking through:
+  //   - R1: availability = [Sep 7]. Length is 1, but nights = 2.
+  //     Rejected.
+  //   - R2: availability = [Sep 8]. Length is 1, but nights = 2.
+  //     Rejected.
+  // Result: [] — no hotels returned to the user.
+  //
+  // What the OLD `hasCityDateCoverage` said: "Are there ANY
+  // availability rows in the range for a capable room in this city?"
+  // It counts rows. It finds 2 (R1's Sep 7 row + R2's Sep 8 row).
+  // 2 > 0 → returns true. So the gate said "coverage exists, don't
+  // call the LLM again." But queryDb returns empty. Result: user
+  // sees "no hotels", LLM is never invoked, no console log.
+  //
+  // What the NEW `hasCityDateCoverage` says: "Is there any capable
+  // room that has ALL `nights` covered with roomsAvailable > 0?"
+  // Walking through:
+  //   - R1: covered rows in range with rooms > 0 = [Sep 7].
+  //     Length 1 ≠ 2. Not covered.
+  //   - R2: covered rows in range with rooms > 0 = [Sep 8].
+  //     Length 1 ≠ 2. Not covered.
+  // No room passes → returns false. The fallback fires, generates
+  // new Berlin hotels for Sep 7-9, upserts them, queryDb re-runs and
+  // finds rooms with both nights covered. Console prints
+  // "[LlmHotelSource] generated N offers for Berlin ...".
+  //
+  // In the R1/R2 example:
+  //   - Old: count = 2, 2 > 0 → true (skip LLM). Bug.
+  //   - New: R1's array length is 1, R2's array length is 1, neither
+  //     equals nights = 2, `.some(...)` returns false (call LLM).
+  //     Fixed.
+  //
+  // The third line is the whole fix in one expression. The first two
+  // changes just supply it with the right data to work on.
   private async hasCityDateCoverage(
     opts: HotelSearchOptions,
   ): Promise<boolean> {
     const checkin = new Date(`${opts.checkinDate}T00:00:00.000Z`);
     const checkout = new Date(`${opts.checkoutDate}T00:00:00.000Z`);
+    const nights = Math.round(
+      (checkout.getTime() - checkin.getTime()) / 86_400_000,
+    );
 
-    const count = await this.prisma.availability.count({
+    const roomTypes = await this.prisma.roomType.findMany({
       where: {
-        date: { gte: checkin, lt: checkout },
-        roomType: {
-          maxGuests: { gte: opts.guests },
-          hotel: { city: { name: opts.cityName } },
+        maxGuests: { gte: opts.guests },
+        hotel: { city: { name: opts.cityName } },
+      },
+      select: {
+        availability: {
+          where: {
+            date: { gte: checkin, lt: checkout },
+            roomsAvailable: { gt: 0 },
+          },
+          select: { date: true },
         },
       },
     });
 
-    return count > 0;
+    return roomTypes.some((rt) => rt.availability.length === nights);
   }
 
   // Existing DB query — unchanged behavior, extracted so findAvailable

@@ -1,31 +1,43 @@
 'use client';
 
 import Link from 'next/link';
+import { usePathname } from 'next/navigation';
 import Button from '@mui/material/Button';
 import Paper from '@mui/material/Paper';
 import Stack from '@mui/material/Stack';
 import Typography from '@mui/material/Typography';
 import CloseIcon from '@mui/icons-material/Close';
 import ArrowForwardIcon from '@mui/icons-material/ArrowForward';
-import FlightIcon from '@mui/icons-material/Flight';
+import FlightTakeoffIcon from '@mui/icons-material/FlightTakeoff';
+import FlightLandIcon from '@mui/icons-material/FlightLand';
 import HotelIcon from '@mui/icons-material/Hotel';
 import { formatEUR } from '@/utils/format';
 import { useSelection } from '@/context/SelectionContext';
+import { SelectionLine } from './SelectionLine';
 
 // Sticky bar visible on every /explorer page. Reads the SelectionContext
-// (flight + hotel cart) and renders "Selected: X · Y · €total  [Go to
-// booking →]". Hidden when the cart is empty so it doesn't take up
-// vertical space on the search-first happy path.
+// (outbound flight + inbound flight + hotel cart) and renders one line
+// per selection with an appropriate icon, sums totals, and offers Clear
+// + "Go to booking" buttons. Hidden when the cart is empty so it doesn't
+// take up vertical space on the search-first happy path.
 //
-// The "Go to booking →" link points to /explorer/booking, which the
-// next slice will build; until then the link 404s. That's the deliberate
-// slice-1 boundary — the wiring proves out first.
+// The "Go to booking →" link points to /explorer/booking (the page
+// that consumes this cart and calls propose_booking).
 
 export function SelectionBar() {
-  const { flight, hotel, clearAll } = useSelection();
-  if (!flight && !hotel) return null;
+  const { outboundFlight, inboundFlight, hotel, clearAll } = useSelection();
+  const pathname = usePathname();
+  if (!outboundFlight && !inboundFlight && !hotel) return null;
 
-  const total = (flight?.totalEUR ?? 0) + (hotel?.totalEUR ?? 0);
+  // Hide the "Go to booking" affordance when the user is already on
+  // the booking page — otherwise it looks like a still-actionable
+  // link that does nothing on click.
+  const onBookingPage = pathname === '/explorer/booking';
+
+  const total =
+    (outboundFlight?.totalEUR ?? 0) +
+    (inboundFlight?.totalEUR ?? 0) +
+    (hotel?.totalEUR ?? 0);
 
   return (
     <Paper
@@ -46,27 +58,29 @@ export function SelectionBar() {
         justifyContent="space-between"
       >
         <Stack spacing={0.5} sx={{ flex: 1, minWidth: 0 }}>
-          {flight && (
-            <Stack direction="row" spacing={1} alignItems="center">
-              <FlightIcon fontSize="small" color="action" />
-              <Typography
-                variant="body2"
-                sx={{ fontWeight: 600, minWidth: 0, wordBreak: 'break-word' }}
-              >
-                {flight.label}
-              </Typography>
-            </Stack>
+          {outboundFlight && (
+            <SelectionLine
+              icon={<FlightTakeoffIcon fontSize="small" color="action" />}
+              labelPrefix="Outbound"
+              label={outboundFlight.label}
+              priceEUR={outboundFlight.totalEUR}
+            />
+          )}
+          {inboundFlight && (
+            <SelectionLine
+              icon={<FlightLandIcon fontSize="small" color="action" />}
+              labelPrefix="Return"
+              label={inboundFlight.label}
+              priceEUR={inboundFlight.totalEUR}
+            />
           )}
           {hotel && (
-            <Stack direction="row" spacing={1} alignItems="center">
-              <HotelIcon fontSize="small" color="action" />
-              <Typography
-                variant="body2"
-                sx={{ fontWeight: 600, minWidth: 0, wordBreak: 'break-word' }}
-              >
-                {hotel.label}
-              </Typography>
-            </Stack>
+            <SelectionLine
+              icon={<HotelIcon fontSize="small" color="action" />}
+              labelPrefix="Hotel"
+              label={hotel.label}
+              priceEUR={hotel.totalEUR}
+            />
           )}
           <Typography variant="caption" color="text.secondary">
             Total {formatEUR(total)}
@@ -82,17 +96,20 @@ export function SelectionBar() {
           >
             Clear
           </Button>
-          <Button
-            variant="contained"
-            size="small"
-            endIcon={<ArrowForwardIcon />}
-            component={Link}
-            href="/explorer/booking"
-          >
-            Go to booking
-          </Button>
+          {!onBookingPage && (
+            <Button
+              variant="contained"
+              size="small"
+              endIcon={<ArrowForwardIcon />}
+              component={Link}
+              href="/explorer/booking"
+            >
+              Go to booking
+            </Button>
+          )}
         </Stack>
       </Stack>
     </Paper>
   );
 }
+

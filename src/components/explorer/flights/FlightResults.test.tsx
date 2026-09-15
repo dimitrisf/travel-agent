@@ -58,7 +58,8 @@ describe('FlightResults', () => {
     render(
       <FlightResults
         data={empty}
-        passengers={1}
+        adults={1}
+        children={0}
         cabinClass="economy"
         outboundSort={{ mode: 'price', direction: 'asc' }}
         inboundSort={{ mode: 'price', direction: 'asc' }}
@@ -80,7 +81,8 @@ describe('FlightResults', () => {
     render(
       <FlightResults
         data={data}
-        passengers={1}
+        adults={1}
+        children={0}
         cabinClass="economy"
         outboundSort={{ mode: 'price', direction: 'asc' }}
         inboundSort={{ mode: 'price', direction: 'asc' }}
@@ -100,7 +102,8 @@ describe('FlightResults', () => {
     render(
       <FlightResults
         data={{ outbound: [dear, cheap, mid], inbound: [mid, dear, cheap] }}
-        passengers={1}
+        adults={1}
+        children={0}
         cabinClass="economy"
         outboundSort={{ mode: 'price', direction: 'asc' }}
         inboundSort={{ mode: 'price', direction: 'desc' }}

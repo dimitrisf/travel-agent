@@ -5,7 +5,7 @@ import { render, screen, cleanup } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 
 import { FlightRow } from './FlightRow';
-import { SelectionProvider } from '@/context/SelectionContext';
+import { SelectionProvider, type FlightLeg } from '@/context/SelectionContext';
 import type { CabinClass } from '@/lib/pricing';
 import type { FlightResult } from '@/lib/services/FlightService';
 
@@ -27,22 +27,32 @@ function make(overrides: Partial<FlightResult> = {}): FlightResult {
 }
 
 // FlightRow reads SelectionContext via useSelection, so every render
-// needs the provider around it. The tests don't care about persisted
-// state across cases — sessionStorage.clear() in beforeEach resets it.
+// needs the provider around it. sessionStorage.clear() in beforeEach
+// resets cart state between cases.
 function renderRow(
-  props: { flight?: FlightResult; passengers?: number; cabinClass?: CabinClass } = {},
+  props: {
+    flight?: FlightResult;
+    adults?: number;
+    children?: number;
+    cabinClass?: CabinClass;
+    leg?: FlightLeg;
+  } = {},
 ) {
   const {
     flight = make(),
-    passengers = 1,
+    adults = 1,
+    children = 0,
     cabinClass = 'economy' as CabinClass,
+    leg = 'outbound' as FlightLeg,
   } = props;
   return render(
     <SelectionProvider>
       <FlightRow
         flight={flight}
-        passengers={passengers}
+        adults={adults}
+        children={children}
         cabinClass={cabinClass}
+        leg={leg}
       />
     </SelectionProvider>,
   );
@@ -71,8 +81,8 @@ describe('FlightRow', () => {
     expect(screen.queryByText(/× 1/)).not.toBeInTheDocument();
   });
 
-  it('multiplies price by passenger count and shows the breakdown', () => {
-    renderRow({ passengers: 3 });
+  it('multiplies price by adults + children and shows the breakdown', () => {
+    renderRow({ adults: 2, children: 1 });
     expect(screen.getByText('€414')).toBeInTheDocument();
     expect(screen.getByText('€138 × 3')).toBeInTheDocument();
   });
@@ -85,8 +95,10 @@ describe('FlightRow', () => {
       <SelectionProvider>
         <FlightRow
           flight={make({ stops: 1 })}
-          passengers={1}
+          adults={1}
+          children={0}
           cabinClass="economy"
+          leg="outbound"
         />
       </SelectionProvider>,
     );
@@ -96,8 +108,10 @@ describe('FlightRow', () => {
       <SelectionProvider>
         <FlightRow
           flight={make({ stops: 2 })}
-          passengers={1}
+          adults={1}
+          children={0}
           cabinClass="economy"
+          leg="outbound"
         />
       </SelectionProvider>,
     );
@@ -105,7 +119,10 @@ describe('FlightRow', () => {
   });
 
   it('shows a non-EUR currency ticker inline with the price', () => {
-    renderRow({ flight: make({ currency: 'USD', price: 200 }), passengers: 2 });
+    renderRow({
+      flight: make({ currency: 'USD', price: 200 }),
+      adults: 2,
+    });
     expect(screen.getByText('USD 400')).toBeInTheDocument();
   });
 
@@ -116,26 +133,55 @@ describe('FlightRow', () => {
     expect(btn).toHaveTextContent(/Add/);
   });
 
-  it('flips to "Selected" (aria-pressed=true) after a click and stores the payload', async () => {
+  it('outbound click stores under outboundFlight with adults + children preserved', async () => {
     const user = userEvent.setup();
-    renderRow({ passengers: 2, cabinClass: 'business' });
+    renderRow({ adults: 2, children: 1, cabinClass: 'business', leg: 'outbound' });
     await user.click(screen.getByRole('button', { name: /Add .* to booking/i }));
     const now = screen.getByRole('button', { name: /Remove .* from booking/i });
     expect(now).toHaveAttribute('aria-pressed', 'true');
     expect(now).toHaveTextContent(/Selected/);
-    // Payload written to sessionStorage carries the full search context —
-    // cabin + seats + per-seat and total price — so a later booking-
-    // page can build propose_booking without re-fetching.
-    const raw = sessionStorage.getItem('explorer:selection:v1');
+    const raw = sessionStorage.getItem('explorer:selection:v2');
     expect(raw).not.toBeNull();
     const parsed = JSON.parse(raw as string);
-    expect(parsed.flight).toMatchObject({
+    expect(parsed.outboundFlight).toMatchObject({
       flight_instance_id: 100,
       cabin_class: 'business',
-      seats: 2,
+      adults: 2,
+      children: 1,
       priceEUR: 138,
-      totalEUR: 276,
+      totalEUR: 414,
     });
+    expect(parsed.inboundFlight).toBeNull();
+  });
+
+  it('inbound click stores under inboundFlight, leaving outboundFlight untouched', async () => {
+    const user = userEvent.setup();
+    // Seed an outbound pick first (via storage, so the row doesn't
+    // fight React commit ordering) — proves the inbound click
+    // doesn't wipe it.
+    sessionStorage.setItem(
+      'explorer:selection:v2',
+      JSON.stringify({
+        outboundFlight: {
+          flight_instance_id: 999,
+          cabin_class: 'economy',
+          adults: 1,
+          children: 0,
+          priceEUR: 100,
+          totalEUR: 100,
+          label: 'outbound placeholder',
+        },
+        inboundFlight: null,
+        hotel: null,
+      }),
+    );
+    renderRow({ leg: 'inbound' });
+    await user.click(screen.getByRole('button', { name: /Add .* to booking/i }));
+    const parsed = JSON.parse(
+      sessionStorage.getItem('explorer:selection:v2') as string,
+    );
+    expect(parsed.outboundFlight?.flight_instance_id).toBe(999);
+    expect(parsed.inboundFlight?.flight_instance_id).toBe(100);
   });
 
   it('toggles off when the currently-selected row is clicked again', async () => {

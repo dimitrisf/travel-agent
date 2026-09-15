@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { render, screen, cleanup } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 
@@ -11,15 +11,34 @@ import {
   type SelectedHotel,
 } from '@/context/SelectionContext';
 
-const STORAGE_KEY = 'explorer:selection:v1';
+// usePathname is what SelectionBar consults to decide whether to
+// show the "Go to booking" button (hidden on /explorer/booking).
+// The mock is controllable per test via `mockPathname`.
+let mockPathname = '/explorer/flights';
+vi.mock('next/navigation', () => ({
+  usePathname: () => mockPathname,
+}));
 
-const flight: SelectedFlight = {
+const STORAGE_KEY = 'explorer:selection:v2';
+
+const outbound: SelectedFlight = {
   flight_instance_id: 101,
   cabin_class: 'economy',
-  seats: 2,
+  adults: 2,
+  children: 0,
   priceEUR: 200,
   totalEUR: 400,
   label: 'Aegean A3 824 · ATH → BER',
+};
+
+const inbound: SelectedFlight = {
+  flight_instance_id: 303,
+  cabin_class: 'economy',
+  adults: 2,
+  children: 0,
+  priceEUR: 180,
+  totalEUR: 360,
+  label: 'Aegean A3 825 · BER → ATH',
 };
 
 const hotel: SelectedHotel = {
@@ -38,13 +57,15 @@ const hotel: SelectedHotel = {
 // reads it and pushes the value into state. Avoids the "state update
 // during render" trap of calling toggle*() inside a child component.
 function seedSelection(seed: {
-  flight?: SelectedFlight;
+  outboundFlight?: SelectedFlight;
+  inboundFlight?: SelectedFlight;
   hotel?: SelectedHotel;
 }) {
   sessionStorage.setItem(
     STORAGE_KEY,
     JSON.stringify({
-      flight: seed.flight ?? null,
+      outboundFlight: seed.outboundFlight ?? null,
+      inboundFlight: seed.inboundFlight ?? null,
       hotel: seed.hotel ?? null,
     }),
   );
@@ -61,6 +82,7 @@ function renderBar() {
 describe('SelectionBar', () => {
   beforeEach(() => {
     sessionStorage.clear();
+    mockPathname = '/explorer/flights';
   });
   afterEach(() => {
     cleanup();
@@ -73,43 +95,87 @@ describe('SelectionBar', () => {
     ).toBeNull();
   });
 
-  it('summarises a flight-only cart with its total', async () => {
-    seedSelection({ flight });
+  it('summarises an outbound-only cart with its per-line price and total', async () => {
+    seedSelection({ outboundFlight: outbound });
     renderBar();
-    // Bar appears once the hydrate effect commits — findBy awaits it.
-    // Each selection is rendered on its own line with its label; when
-    // only a flight is picked, no hotel label appears.
-    expect(await screen.findByText(flight.label)).toBeInTheDocument();
+    expect(await screen.findByText(outbound.label)).toBeInTheDocument();
+    expect(screen.queryByText(inbound.label)).toBeNull();
     expect(screen.queryByText(hotel.label)).toBeNull();
-    // formatEUR renders locale-dependent glyphs (dot vs comma, symbol
-    // before vs after) — assert the amount + currency shape loosely.
+    expect(screen.getByText(/Outbound:/)).toBeInTheDocument();
+    // formatEUR renders locale-dependent glyphs — assert loosely on
+    // both the per-line price and the total (they're equal here since
+    // there's only one selection).
+    const priceNodes = screen.getAllByText(/400/);
+    expect(priceNodes.length).toBeGreaterThanOrEqual(2);
     expect(screen.getByText(/Total .*400/)).toBeInTheDocument();
   });
 
-  it('summarises a flight + hotel cart and sums their totals', async () => {
-    seedSelection({ flight, hotel });
+  it('summarises a round-trip cart (outbound + inbound), lists per-line prices, and sums totals', async () => {
+    seedSelection({ outboundFlight: outbound, inboundFlight: inbound });
     renderBar();
-    // Both labels appear on their own lines — a previous single-line
-    // "1 flight (...) · 1 hotel (...)" layout let the flight's own `·`
-    // separators swallow the boundary between the two selections.
-    expect(await screen.findByText(flight.label)).toBeInTheDocument();
-    expect(screen.getByText(hotel.label)).toBeInTheDocument();
-    // 400 + 390 = 790
-    expect(screen.getByText(/Total .*790/)).toBeInTheDocument();
+    expect(await screen.findByText(outbound.label)).toBeInTheDocument();
+    expect(screen.getByText(inbound.label)).toBeInTheDocument();
+    expect(screen.getByText(/Outbound:/)).toBeInTheDocument();
+    expect(screen.getByText(/Return:/)).toBeInTheDocument();
+    // Per-line prices appear next to each item. Match the number
+    // substring only — formatEUR renders locale-dependent glyphs
+    // ("400,00 €" vs. "€400.00") and any anchor would fight one of
+    // them. The three values (400, 360, 760) don't overlap as
+    // substrings so a bare number regex is uniquely identifying.
+    expect(screen.getByText(/400/)).toBeInTheDocument();
+    expect(screen.getByText(/360/)).toBeInTheDocument();
+    // 400 + 360 = 760
+    expect(screen.getByText(/Total .*760/)).toBeInTheDocument();
   });
 
-  it('the Go to booking button links to /explorer/booking', async () => {
-    seedSelection({ flight });
+  it('summarises a full cart (outbound + inbound + hotel) with all three per-line prices and a total', async () => {
+    seedSelection({
+      outboundFlight: outbound,
+      inboundFlight: inbound,
+      hotel,
+    });
+    renderBar();
+    expect(await screen.findByText(outbound.label)).toBeInTheDocument();
+    expect(screen.getByText(inbound.label)).toBeInTheDocument();
+    expect(screen.getByText(hotel.label)).toBeInTheDocument();
+    expect(screen.getByText(/Hotel:/)).toBeInTheDocument();
+    // Three distinct per-line prices (loose regex per glyph — the
+    // whole-number substring is enough for uniqueness at these
+    // values). No start-anchor because formatEUR renders locale-
+    // dependent glyphs (€ can be prefix or suffix).
+    expect(screen.getByText(/400/)).toBeInTheDocument();
+    expect(screen.getByText(/360/)).toBeInTheDocument();
+    expect(screen.getByText(/390/)).toBeInTheDocument();
+    // 400 + 360 + 390 = 1150
+    expect(screen.getByText(/Total .*1[,.]?150/)).toBeInTheDocument();
+  });
+
+  it('the Go to booking button links to /explorer/booking when off the booking page', async () => {
+    seedSelection({ outboundFlight: outbound });
     renderBar();
     const link = await screen.findByRole('link', { name: /go to booking/i });
     expect(link).toHaveAttribute('href', '/explorer/booking');
   });
 
+  it('hides the Go to booking button when the user is already on /explorer/booking', async () => {
+    mockPathname = '/explorer/booking';
+    seedSelection({ outboundFlight: outbound });
+    renderBar();
+    // The bar still renders (cart is non-empty) — but the "Go to
+    // booking" button is gone. The Clear button is still there.
+    expect(
+      await screen.findByRole('region', { name: /booking selection/i }),
+    ).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /clear/i })).toBeInTheDocument();
+    expect(
+      screen.queryByRole('link', { name: /go to booking/i }),
+    ).toBeNull();
+  });
+
   it('Clear empties the cart so the bar disappears', async () => {
     const user = userEvent.setup();
-    seedSelection({ flight });
+    seedSelection({ outboundFlight: outbound, hotel });
     renderBar();
-    // Precondition: bar visible after hydrate.
     expect(
       await screen.findByRole('region', { name: /booking selection/i }),
     ).toBeInTheDocument();

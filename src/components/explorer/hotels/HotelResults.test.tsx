@@ -14,11 +14,13 @@ const STAY: StayContext = {
 };
 
 // Stub the child so this test focuses on the container's behavior:
-// count overline, empty state, and per-result rendering. HotelCard has
+// count overline, empty state, and per-hotel grouping. HotelCard has
 // its own tests.
 vi.mock('./HotelCard', () => ({
-  HotelCard: ({ hotel }: { hotel: HotelResult }) => (
-    <div data-testid="hotel-card">{hotel.hotel}</div>
+  HotelCard: ({ rooms }: { rooms: HotelResult[] }) => (
+    <div data-testid="hotel-card" data-rooms={rooms.length}>
+      {rooms[0].hotel}
+    </div>
   ),
 }));
 
@@ -56,19 +58,51 @@ describe('HotelResults', () => {
     expect(screen.queryByTestId('hotel-card')).not.toBeInTheDocument();
   });
 
-  it('renders one card per hotel and a count overline', () => {
+  it('renders one card per unique hotel_id and a count overline (hotels + rooms)', () => {
     const data = [
-      make({ room_type_id: 1, hotel: 'A' }),
-      make({ room_type_id: 2, hotel: 'B' }),
-      make({ room_type_id: 3, hotel: 'C' }),
+      make({ hotel_id: 1, room_type_id: 1, hotel: 'A' }),
+      make({ hotel_id: 2, room_type_id: 2, hotel: 'B' }),
+      make({ hotel_id: 3, room_type_id: 3, hotel: 'C' }),
     ];
     render(<HotelResults stay={STAY} data={data} />);
-    expect(screen.getByText('3 hotels')).toBeInTheDocument();
+    expect(screen.getByText('3 hotels · 3 rooms')).toBeInTheDocument();
     expect(screen.getAllByTestId('hotel-card')).toHaveLength(3);
   });
 
-  it('uses singular "hotel" when there is exactly one', () => {
+  it('groups multiple room types under the same hotel_id into one card and counts them separately in the overline', () => {
+    // Same shape the API returns: 2 hotels, 2 room types each → 4
+    // flat rows in, 2 grouped cards out — but 4 rooms in the count.
+    const data = [
+      make({ hotel_id: 1, room_type_id: 1, hotel: 'A', room_type: 'Std Double' }),
+      make({ hotel_id: 1, room_type_id: 2, hotel: 'A', room_type: 'Std Twin' }),
+      make({ hotel_id: 2, room_type_id: 3, hotel: 'B', room_type: 'Std Double' }),
+      make({ hotel_id: 2, room_type_id: 4, hotel: 'B', room_type: 'Std Twin' }),
+    ];
+    render(<HotelResults stay={STAY} data={data} />);
+    expect(screen.getByText('2 hotels · 4 rooms')).toBeInTheDocument();
+    const cards = screen.getAllByTestId('hotel-card');
+    expect(cards).toHaveLength(2);
+    // Each card received 2 rooms (the stub reflects rooms.length).
+    expect(cards[0]).toHaveAttribute('data-rooms', '2');
+    expect(cards[1]).toHaveAttribute('data-rooms', '2');
+  });
+
+  it('preserves the API sort order across hotel groups (cheapest first row anchors the group)', () => {
+    // A's cheapest is 100; B's cheapest is 90. B should appear first.
+    const data = [
+      make({ hotel_id: 2, room_type_id: 3, hotel: 'B', total_price: 270, price_per_night: 90 }),
+      make({ hotel_id: 1, room_type_id: 1, hotel: 'A', total_price: 300, price_per_night: 100 }),
+      make({ hotel_id: 1, room_type_id: 2, hotel: 'A', total_price: 360, price_per_night: 120 }),
+      make({ hotel_id: 2, room_type_id: 4, hotel: 'B', total_price: 330, price_per_night: 110 }),
+    ];
+    render(<HotelResults stay={STAY} data={data} />);
+    const cards = screen.getAllByTestId('hotel-card');
+    expect(cards[0]).toHaveTextContent('B');
+    expect(cards[1]).toHaveTextContent('A');
+  });
+
+  it('uses singular "hotel" and "room" when there is exactly one of each', () => {
     render(<HotelResults stay={STAY} data={[make()]} />);
-    expect(screen.getByText('1 hotel')).toBeInTheDocument();
+    expect(screen.getByText('1 hotel · 1 room')).toBeInTheDocument();
   });
 });

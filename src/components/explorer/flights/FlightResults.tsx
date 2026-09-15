@@ -12,7 +12,8 @@ import type { SearchFlightsResult } from '@/lib/services/FlightService';
 
 export type FlightResultsProps = {
   data: SearchFlightsResult;
-  passengers: number;
+  adults: number;
+  children: number;
   cabinClass: CabinClass;
   outboundSort: SortSpec;
   inboundSort: SortSpec;
@@ -22,7 +23,8 @@ export type FlightResultsProps = {
 
 export function FlightResults({
   data,
-  passengers,
+  adults,
+  children,
   cabinClass,
   outboundSort,
   inboundSort,
@@ -48,8 +50,10 @@ export function FlightResults({
         <LegBlock
           title="Outbound"
           flights={outbound}
-          passengers={passengers}
+          adults={adults}
+          children={children}
           cabinClass={cabinClass}
+          leg="outbound"
           sort={outboundSort}
           onSort={onOutboundSort}
         />
@@ -58,8 +62,10 @@ export function FlightResults({
         <LegBlock
           title="Return"
           flights={inbound}
-          passengers={passengers}
+          adults={adults}
+          children={children}
           cabinClass={cabinClass}
+          leg="inbound"
           sort={inboundSort}
           onSort={onInboundSort}
         />
