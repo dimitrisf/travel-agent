@@ -28,10 +28,10 @@ function makeMockPrisma() {
     },
     roomType: {
       upsert: vi.fn(),
+      findMany: vi.fn(),
     },
     availability: {
       upsert: vi.fn(),
-      count: vi.fn(),
     },
     amenity: {
       findMany: vi.fn().mockResolvedValue([]),
@@ -246,7 +246,7 @@ describe('HotelRepository.findAvailable', () => {
     const { prisma, mocks } = makeMockPrisma();
     const { source, generateHotelsForCity } = makeMockLlmSource();
     mocks.hotel.findMany.mockResolvedValueOnce([]);
-    mocks.availability.count.mockResolvedValueOnce(0); // no cache coverage → falls through to Scope B
+    mocks.roomType.findMany.mockResolvedValueOnce([]); // no cache coverage → falls through to Scope B
     const repo = new HotelRepository(prisma, source);
 
     const rows = await repo.findAvailable({
@@ -264,7 +264,7 @@ describe('HotelRepository.findAvailable', () => {
     const { prisma, mocks } = makeMockPrisma();
     const { source, generateHotelsForCity } = makeMockLlmSource();
     mocks.hotel.findMany.mockResolvedValueOnce([]);
-    mocks.availability.count.mockResolvedValueOnce(0);
+    mocks.roomType.findMany.mockResolvedValueOnce([]);
     mocks.city.findUnique.mockResolvedValueOnce({ id: 1 });
     mocks.hotel.findMany.mockResolvedValueOnce([]); // existing-names query
     generateHotelsForCity.mockResolvedValueOnce(null);
@@ -286,7 +286,7 @@ describe('HotelRepository.findAvailable', () => {
       .mockResolvedValueOnce([]) // cache lookup
       .mockResolvedValueOnce([]) // existing-names for avoid list
       .mockResolvedValueOnce([SAMPLE_HOTEL_ROW]); // re-query
-    mocks.availability.count.mockResolvedValueOnce(0);
+    mocks.roomType.findMany.mockResolvedValueOnce([]);
     mocks.city.findUnique.mockResolvedValueOnce({ id: 1 });
     generateHotelsForCity.mockResolvedValueOnce(VALID_LLM_OUTPUT);
     mocks.hotel.upsert.mockResolvedValue({ id: 999 });
@@ -346,7 +346,16 @@ describe('HotelRepository.findAvailable', () => {
     const { prisma, mocks } = makeMockPrisma();
     const { source, generateHotelsForCity } = makeMockLlmSource();
     mocks.hotel.findMany.mockResolvedValueOnce([]); // filtered miss
-    mocks.availability.count.mockResolvedValueOnce(6); // city+range IS populated
+    // city+range IS populated: one room with full-nights coverage
+    // (VALID_OPTS spans 2 nights) → new gate returns true → skip LLM.
+    mocks.roomType.findMany.mockResolvedValueOnce([
+      {
+        availability: [
+          { date: new Date('2026-08-20T00:00:00Z') },
+          { date: new Date('2026-08-21T00:00:00Z') },
+        ],
+      },
+    ]);
     const repo = new HotelRepository(prisma, source);
 
     const rows = await repo.findAvailable({
@@ -362,6 +371,82 @@ describe('HotelRepository.findAvailable', () => {
     expect(mocks.city.findUnique).not.toHaveBeenCalled();
   });
 
+  it('re-fires the LLM when coverage is partial (two rooms with one night each, neither covering the full stay)', async () => {
+    // Regression for the "gate=true, query=[]" mismatch. Two rooms in
+    // the city each have one Availability row in the requested range,
+    // but neither has BOTH nights covered. The old gate counted rows
+    // and short-circuited on 2 > 0; the new gate checks per-room
+    // full-nights coverage and correctly identifies the range as not
+    // yet satisfiable, so the LLM re-fires.
+    const { prisma, mocks } = makeMockPrisma();
+    const { source, generateHotelsForCity } = makeMockLlmSource();
+    mocks.hotel.findMany
+      .mockResolvedValueOnce([]) // cache lookup: no full-coverage room
+      .mockResolvedValueOnce([]) // existing-names for avoid list
+      .mockResolvedValueOnce([SAMPLE_HOTEL_ROW]); // re-query
+    // R1 has Sep 20 only; R2 has Sep 21 only. Old gate: count 2 rows,
+    // returns true, LLM skipped. New gate: no room's availability
+    // length equals nights (2), returns false, LLM fires.
+    mocks.roomType.findMany.mockResolvedValueOnce([
+      { availability: [{ date: new Date('2026-08-20T00:00:00Z') }] },
+      { availability: [{ date: new Date('2026-08-21T00:00:00Z') }] },
+    ]);
+    mocks.city.findUnique.mockResolvedValueOnce({ id: 1 });
+    generateHotelsForCity.mockResolvedValueOnce(VALID_LLM_OUTPUT);
+    mocks.hotel.upsert.mockResolvedValue({ id: 999 });
+    mocks.roomType.upsert.mockResolvedValue({
+      id: 888,
+      defaultRoomsAvailable: 20,
+      basePrice: 145,
+    });
+    mocks.availability.upsert.mockResolvedValue({ id: 777 });
+    const repo = new HotelRepository(prisma, source);
+
+    const rows = await repo.findAvailable(VALID_OPTS);
+
+    expect(generateHotelsForCity).toHaveBeenCalledTimes(1);
+    // The re-query after the upsert returned SAMPLE_HOTEL_ROW.
+    expect(rows).toHaveLength(1);
+    expect(rows[0].hotelName).toBe('Existing Athens Hotel');
+  });
+
+  it('re-fires the LLM when every candidate room has full nights but roomsAvailable = 0 for one of them', async () => {
+    // Second half of the same regression. The gate filter
+    // `roomsAvailable: { gt: 0 }` mirrors queryDb's
+    // `.every((a) => a.roomsAvailable >= opts.rooms)` — a room where
+    // one night has 0 rooms available doesn't count as coverage. The
+    // findMany mock reflects that filter: the availability array for
+    // this room comes back empty (Prisma applied the gt:0 filter and
+    // dropped the zero-rooms row), so length !== nights and the LLM
+    // fires.
+    const { prisma, mocks } = makeMockPrisma();
+    const { source, generateHotelsForCity } = makeMockLlmSource();
+    mocks.hotel.findMany
+      .mockResolvedValueOnce([]) // cache lookup
+      .mockResolvedValueOnce([]) // existing-names
+      .mockResolvedValueOnce([SAMPLE_HOTEL_ROW]); // re-query
+    mocks.roomType.findMany.mockResolvedValueOnce([
+      // Room exists with 2 availability rows in the DB, but both were
+      // filtered out by the gt:0 predicate — simulating a room where
+      // both nights are sold out.
+      { availability: [] },
+    ]);
+    mocks.city.findUnique.mockResolvedValueOnce({ id: 1 });
+    generateHotelsForCity.mockResolvedValueOnce(VALID_LLM_OUTPUT);
+    mocks.hotel.upsert.mockResolvedValue({ id: 999 });
+    mocks.roomType.upsert.mockResolvedValue({
+      id: 888,
+      defaultRoomsAvailable: 20,
+      basePrice: 145,
+    });
+    mocks.availability.upsert.mockResolvedValue({ id: 777 });
+    const repo = new HotelRepository(prisma, source);
+
+    await repo.findAvailable(VALID_OPTS);
+
+    expect(generateHotelsForCity).toHaveBeenCalledTimes(1);
+  });
+
   it('fails open on isolated per-hotel persistence errors — logs and continues, returns the re-query result', async () => {
     // Regression: an isolated Prisma failure inside one hotel's nested
     // upsert chain must not sink the whole search. LlmHotelSource fails
@@ -374,7 +459,7 @@ describe('HotelRepository.findAvailable', () => {
       .mockResolvedValueOnce([]) // cache lookup
       .mockResolvedValueOnce([]) // existing-names
       .mockResolvedValueOnce([SAMPLE_HOTEL_ROW]); // re-query
-    mocks.availability.count.mockResolvedValueOnce(0);
+    mocks.roomType.findMany.mockResolvedValueOnce([]);
     mocks.city.findUnique.mockResolvedValueOnce({ id: 1 });
     generateHotelsForCity.mockResolvedValueOnce(VALID_LLM_OUTPUT);
     // Hotel #1 succeeds. Hotel #2's outer Hotel.upsert throws. Hotel #3 succeeds.
@@ -415,7 +500,7 @@ describe('HotelRepository.findAvailable', () => {
       .mockResolvedValueOnce([]) // cache lookup
       .mockResolvedValueOnce([]) // existing-names for avoid list
       .mockResolvedValueOnce([]); // re-query
-    mocks.availability.count.mockResolvedValueOnce(0);
+    mocks.roomType.findMany.mockResolvedValueOnce([]);
     mocks.city.findUnique.mockResolvedValueOnce({ id: 1 });
     // Single hotel, single room type, single night — keeps the assertion tight.
     generateHotelsForCity.mockResolvedValueOnce({
@@ -478,7 +563,7 @@ describe('HotelRepository.findAvailable', () => {
       .mockResolvedValueOnce([]) // cache lookup
       .mockResolvedValueOnce([]) // existing-names for avoid list
       .mockResolvedValueOnce([SAMPLE_HOTEL_ROW]); // re-query
-    mocks.availability.count.mockResolvedValueOnce(0);
+    mocks.roomType.findMany.mockResolvedValueOnce([]);
     mocks.city.findUnique.mockResolvedValueOnce({ id: 1 });
     generateHotelsForCity.mockResolvedValueOnce(VALID_LLM_OUTPUT);
     // Return a distinct hotel id per upsert call so we can verify the

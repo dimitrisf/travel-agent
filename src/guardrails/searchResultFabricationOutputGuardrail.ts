@@ -67,7 +67,7 @@ export const searchResultFabricationOutputGuardrail: OutputGuardrail = {
       return trip(
         'fabricated-hotel-name',
         fabricatedHotel,
-        `I mentioned a hotel (${fabricatedHotel}) that isn't in my search_hotels results. Please refer to the actual results.`,
+        `I mentioned a hotel or room type (${fabricatedHotel}) that isn't in my search_hotels results. Please refer to the actual results.`,
       );
     }
 
@@ -179,13 +179,26 @@ function findFabricatedHotelName(text: string, blob: string): string | null {
   return null;
 }
 
-// Extract real hotel names from the raw search_hotels blob. The blob is
-// JSON with `"hotel":"…"` fields; a light regex is enough because we
-// don't need the full parse — just the name string values.
-// E.g, if blob = '{"hotels":[{"hotel":"City Budget Inn"}, {"hotel":"Grand Berlin Plaza"}]}',
-// returns ["City Budget Inn", "Grand Berlin Plaza"].
+// Extract legitimate names from the raw search_hotels blob — both
+// hotel names (from `"hotel":"…"`) and room-type names (from
+// `"room_type":"…"`). A candidate extracted from the reply's bolded
+// phrases is considered legitimate if it matches either kind: the
+// guardrail's job is "did the tool return this?", not "is this the
+// right kind of thing?", and the grouped-by-hotel output format the
+// agent now uses can put room types like `**Junior Suite**` and
+// `**Executive Suite**` alongside hotel names — both must be allowed
+// through, since both come straight from the tool result.
+//
+// A light regex is enough because we don't need the full parse — the
+// name strings appear verbatim in the JSON.
+// E.g, if blob = '[{"hotel":"Charlottenburg Boutique","room_type":"Junior Suite"}, {"hotel":"Spree View Hotel","room_type":"Executive Suite"}]',
+// returns ["Charlottenburg Boutique", "Spree View Hotel", "Junior Suite", "Executive Suite"].
 function extractRealHotelNames(blob: string): string[] {
-  return [...blob.matchAll(/"hotel"\s*:\s*"([^"]+)"/g)].map((m) => m[1]);
+  const hotels = [...blob.matchAll(/"hotel"\s*:\s*"([^"]+)"/g)].map((m) => m[1]);
+  const roomTypes = [...blob.matchAll(/"room_type"\s*:\s*"([^"]+)"/g)].map(
+    (m) => m[1],
+  );
+  return [...hotels, ...roomTypes];
 }
 
 // Extract markdown-bold phrases that look like hotel names. Filters out

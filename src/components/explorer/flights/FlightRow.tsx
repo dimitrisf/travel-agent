@@ -10,6 +10,7 @@ import AddIcon from '@mui/icons-material/Add';
 import {
   isSelectedFlight,
   useSelection,
+  type FlightLeg,
   type SelectedFlight,
 } from '@/context/SelectionContext';
 import { FLIGHT_ROW_GRID } from '@/lib/explorer/flights/sort';
@@ -20,38 +21,63 @@ import type { FlightResult } from '@/lib/services/FlightService';
 // FLIGHT_ROW_GRID so the sortable headers above line up. The trailing
 // cell holds the "Add to booking" toggle wired to SelectionContext.
 //
-// `cabinClass` and `passengers` reflect the search that produced this
-// row (snapshotted by the page at submit time), not whatever the form
-// currently shows — otherwise the seat price + cabin captured in the
-// selection payload would drift from what the user actually saw.
+// `cabinClass`, `adults`, `children` reflect the search that produced
+// this row (snapshotted by the page at submit time), not whatever the
+// form currently shows — otherwise the seat price + cabin captured in
+// the selection payload would drift from what the user actually saw.
+//
+// `leg` tells the row which side of the cart to toggle. Outbound rows
+// call toggleOutboundFlight; inbound rows call toggleInboundFlight.
+// The two slots are independent — selecting a return doesn't touch
+// the outbound pick.
 
 export type FlightRowProps = {
   flight: FlightResult;
-  passengers: number;
+  adults: number;
+  children: number;
   cabinClass: CabinClass;
+  leg: FlightLeg;
 };
 
-export function FlightRow({ flight, passengers, cabinClass }: FlightRowProps) {
+export function FlightRow({
+  flight,
+  adults,
+  children,
+  cabinClass,
+  leg,
+}: FlightRowProps) {
   const depTime = flight.departure.slice(11, 16);
   const arrTime = flight.arrival.slice(11, 16);
   const date = flight.departure.slice(0, 10);
   const hours = Math.floor(flight.duration_minutes / 60);
   const minutes = flight.duration_minutes % 60;
+  const passengers = adults + children;
   // API price is per seat; total = seat × pax. Sort order is unaffected
   // since the multiplier is constant across the leg.
   const total = flight.price * passengers;
   const symbol = flight.currency === 'EUR' ? '€' : `${flight.currency} `;
 
+  // selection represents the current state of the user's flight selections.
+  // payload represents the flight selection that would be applied if the user toggles this row.
   const selection = useSelection();
   const payload: SelectedFlight = {
     flight_instance_id: flight.flight_instance_id,
     cabin_class: cabinClass,
-    seats: passengers,
+    adults,
+    children,
     priceEUR: flight.price,
     totalEUR: total,
     label: `${flight.airline} ${flight.flight_number} · ${flight.origin.iata} → ${flight.destination.iata} · ${date} ${depTime}`,
   };
-  const selected = isSelectedFlight(selection, payload);
+
+  // selected is true if this row's flight matches the current selection for the given leg.
+  const selected = isSelectedFlight(selection, payload, leg);
+
+  // onToggle is the function to call when the user clicks the "Add to booking" toggle for this row.
+  const onToggle =
+    leg === 'outbound'
+      ? selection.toggleOutboundFlight
+      : selection.toggleInboundFlight;
 
   return (
     <Box
@@ -112,7 +138,7 @@ export function FlightRow({ flight, passengers, cabinClass }: FlightRowProps) {
           variant={selected ? 'contained' : 'outlined'}
           color="primary"
           startIcon={selected ? <CheckIcon /> : <AddIcon />}
-          onClick={() => selection.toggleFlight(payload)}
+          onClick={() => onToggle(payload)}
           aria-pressed={selected}
           aria-label={
             selected

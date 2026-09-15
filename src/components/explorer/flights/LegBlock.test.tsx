@@ -46,8 +46,10 @@ describe('LegBlock', () => {
       <LegBlock
         title="Outbound"
         flights={[make(), make({ flight_instance_id: 101, flight_number: '825' })]}
-        passengers={1}
+        adults={1}
+        children={0}
         cabinClass="economy"
+        leg="outbound"
         sort={{ mode: 'price', direction: 'asc' }}
         onSort={vi.fn()}
       />,
@@ -65,8 +67,10 @@ describe('LegBlock', () => {
           make({ flight_instance_id: 2, flight_number: '222' }),
           make({ flight_instance_id: 3, flight_number: '333' }),
         ]}
-        passengers={1}
+        adults={1}
+        children={0}
         cabinClass="economy"
+        leg="outbound"
         sort={{ mode: 'price', direction: 'asc' }}
         onSort={vi.fn()}
       />,
@@ -79,8 +83,10 @@ describe('LegBlock', () => {
       <LegBlock
         title="Return"
         flights={[make()]}
-        passengers={1}
+        adults={1}
+        children={0}
         cabinClass="economy"
+        leg="outbound"
         sort={{ mode: 'price', direction: 'asc' }}
         onSort={vi.fn()}
       />,

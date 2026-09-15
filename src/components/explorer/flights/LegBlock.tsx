@@ -2,18 +2,25 @@ import Stack from '@mui/material/Stack';
 import Typography from '@mui/material/Typography';
 import { FlightHeaderRow } from './FlightHeaderRow';
 import { FlightRow } from './FlightRow';
+import type { FlightLeg } from '@/context/SelectionContext';
 import type { SortSpec } from '@/lib/explorer/flights/sort';
 import type { CabinClass } from '@/lib/pricing';
 import type { FlightResult } from '@/lib/services/FlightService';
 
 // One outbound or return leg: overline caption (title · date · count),
-// then the sortable header row, then the flight rows.
+// then the sortable header row, then the flight rows. `leg` is the
+// SelectionContext identity ('outbound' | 'inbound') — carried
+// through so the row can dispatch to the correct toggle without
+// LegBlock having to know which side of the cart it's a candidate
+// for.
 
 export type LegBlockProps = {
   title: string;
   flights: FlightResult[];
-  passengers: number;
+  adults: number;
+  children: number;
   cabinClass: CabinClass;
+  leg: FlightLeg;
   sort: SortSpec;
   onSort: (sort: SortSpec) => void;
 };
@@ -21,8 +28,10 @@ export type LegBlockProps = {
 export function LegBlock({
   title,
   flights,
-  passengers,
+  adults,
+  children,
   cabinClass,
+  leg,
   sort,
   onSort,
 }: LegBlockProps) {
@@ -46,8 +55,10 @@ export function LegBlock({
           <FlightRow
             key={f.flight_instance_id}
             flight={f}
-            passengers={passengers}
+            adults={adults}
+            children={children}
             cabinClass={cabinClass}
+            leg={leg}
           />
         ))}
       </Stack>

@@ -45,7 +45,8 @@ describe('FlightSearchForm', () => {
     // (adults=1, children=0, cabin=economy are all defaults and omitted).
     expect(onSearch).toHaveBeenCalledExactlyOnceWith({
       path: '/api/flights?origin=ATH&destination=BER',
-      passengers: 1,
+      adults: 1,
+      children: 0,
       cabinClass: 'economy',
     });
   });
@@ -116,7 +117,8 @@ describe('FlightSearchForm', () => {
 
     expect(onSearch).toHaveBeenCalledExactlyOnceWith({
       path: '/api/flights?origin=ATH&destination=BER&cabin_class=business&adults=2&children=1&nonstop_only=true&max_price=300',
-      passengers: 3,
+      adults: 2,
+      children: 1,
       cabinClass: 'business',
     });
   });

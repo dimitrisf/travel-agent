@@ -12,30 +12,138 @@ import {
 } from 'react';
 import type { CabinClass } from '@/lib/pricing';
 
+// ============================================================
+// WHY THIS EXISTS
+// ============================================================
+//
+// The /explorer/* surface has three sibling pages — /explorer/flights,
+// /explorer/hotels, /explorer/booking — that all read from and write
+// to the same conceptual object: the user's in-progress booking cart.
+// A single row click on the flights page has to be visible on the
+// hotels page (via the SelectionBar) and readable on the booking page
+// (via BookingPanel's propose payload). None of that fits inside a
+// single component's local state.
+//
+// Concretely, the design pressures that shaped this file:
+//
+// 1. Cross-page state
+//    /explorer/flights and /explorer/hotels are sibling routes.
+//    They have no natural common ancestor to hoist state into as
+//    props — the closest one is ExplorerLayout, which is itself a
+//    layout, not a state holder. React Context is the standard tool
+//    for "shared state across a subtree without a natural parent to
+//    hold it."
+//
+// 2. Many readers, many writers
+//    Writers: FlightRow, RoomRow (rows call toggleOutboundFlight /
+//    toggleInboundFlight / toggleHotel from anywhere in the tree).
+//    Readers: SelectionBar (always visible, needs the current cart
+//    for its top-of-page summary), BookingPanel (builds the propose
+//    payload), individual rows (need to render themselves as
+//    "Selected" or "Add" based on whether they match the current
+//    slot). Passing this as props would mean prop-drilling through
+//    ExplorerLayout → Page → ResponsePanel → FlightResults →
+//    LegBlock → FlightRow. Ten levels for a state that half the
+//    tree needs to touch.
+//
+// 3. Session persistence
+//    The cart must survive route navigation and browser refresh
+//    within a session. sessionStorage handles the "browser
+//    refresh" half — but reads from storage have to happen
+//    somewhere sensible, and one central owner beats each page
+//    duplicating hydrate/persist effects. The provider does this
+//    once for the whole tree.
+//
+// 4. Single source of truth
+//    Without a central owner, each page would keep its own
+//    `useState<Cart>` and try to synchronize via sessionStorage
+//    writes on every change. Three copies of the cart, three sets
+//    of persist/hydrate effects, and race conditions when two
+//    pages update in quick succession (e.g., the user clears the
+//    cart from SelectionBar while a row is mid-toggle). One
+//    Context, one storage owner, no coordination problem.
+//
+// 5. Decouples row logic from persistence
+//    FlightRow / RoomRow should say "toggle this pick." They
+//    shouldn't know that a match is defined as (id +
+//    cabin+adults+children) for flights and (id +
+//    dates+guests+rooms) for hotels, or that toggling a hotel
+//    triggers a sessionStorage write. All of that lives in the
+//    provider; rows call one function and forget.
+//
+// Alternatives considered:
+//
+//   - URL-encoded state (?outbound=fi_1&hotel=rt_5&...) — would
+//     survive refresh AND be linkable, but it would balloon the URL
+//     (labels, prices, metadata) and would leak the "in-progress"
+//     shape into browser history / analytics. Sessions here are
+//     transient by design.
+//
+//   - Query-through-sessionStorage only (no Context) — each page
+//     reads from and writes to storage directly. Doable but forces
+//     every consumer to handle SSR/hydration timing, and every
+//     write becomes a "notify others" problem (window events,
+//     polling, storage events across tabs, …). Context wraps
+//     everything in normal React data flow.
+//
+//   - A global store library (Zustand, Redux) — same idea as
+//     Context but with a third-party dependency for one cart on
+//     one surface. Not proportionate.
+//
+// Trade-offs we accept:
+//
+//   - The whole /explorer/* subtree re-renders when the cart
+//     changes. The provider's useMemo + per-action useCallback
+//     minimize this, but any consumer of `useSelection()` still
+//     re-renders on every cart change. For this app the tree is
+//     small enough that this is invisible.
+//
+//   - Cross-tab does NOT sync. sessionStorage is per-tab, so two
+//     Explorer tabs in the same browser have independent carts.
+//     For this demo that's actually desired: reviewers comparing
+//     two flight options can open them in separate tabs without
+//     the carts overwriting each other. See the appendix at the
+//     bottom of the file for the full sessionStorage-vs-
+//     localStorage discussion.
+//
+// ============================================================
+// WHAT / HOW
+// ============================================================
+//
 // Cross-page booking cart for /explorer/*. Users pick flights on the
 // flights page and hotels on the hotels page; the selection persists
 // across navigation and lands on /explorer/booking as the propose-
 // booking payload.
 //
-// Slice-1 constraint: at most ONE flight and ONE hotel. Clicking a
-// second row REPLACES the current slot; clicking the currently-
-// selected row CLEARS it (toggle). Multi-item is a future slice.
+// Slice-2 constraint: at most ONE outbound flight, ONE inbound flight,
+// and ONE hotel. Round-trip is native; multi-city / multi-hotel are
+// future slices. Clicking a second row in the SAME leg REPLACES that
+// leg's current slot; clicking the currently-selected row CLEARS it
+// (toggle). Outbound and inbound are independent — picking an inbound
+// never touches the outbound slot.
 //
 // Payload shape is deliberately close to what propose_booking accepts —
-// ids + query-time context (cabin_class, seats for flights;
-// checkin/checkout/guests/rooms for hotels) — so the booking page
-// builds its request body without re-fetching or re-deriving. The
+// ids + query-time context (cabin_class + adults + children for
+// flights; checkin/checkout/guests/rooms for hotels) — so the booking
+// page builds its request body without re-fetching or re-deriving. The
 // display fields (label, prices) are captured at click time so the
 // cart survives independently of the response panel's rehydration.
+//
+// adults + children are kept as separate fields (not just a `seats`
+// total) because the propose_booking payload records them separately
+// on the FlightBooking row — even though pricing is the same per seat,
+// the split is meaningful metadata on the booking record itself.
 
 export type SelectedFlight = {
   flight_instance_id: number;
   cabin_class: CabinClass;
-  seats: number;
-  // priceEUR is per-seat; totalEUR = priceEUR × seats snapshotted at
-  // click time. Captured together so the cart doesn't have to know how
-  // to multiply — and so a later change to seats (via a new search)
-  // doesn't retroactively rewrite this selection's total.
+  adults: number;
+  children: number;
+  // priceEUR is per-seat; totalEUR = priceEUR × (adults + children)
+  // snapshotted at click time. Captured together so the cart doesn't
+  // have to know how to multiply — and so a later change to passenger
+  // counts (via a new search) doesn't retroactively rewrite this
+  // selection's total.
   priceEUR: number;
   totalEUR: number;
   label: string;
@@ -53,8 +161,16 @@ export type SelectedHotel = {
   label: string;
 };
 
+// Which leg a flight selection belongs to. Round-trip searches return
+// two independent arrays (outbound + inbound), and the cart tracks
+// them separately so the user can toggle one without disturbing the
+// other. LegBlock already carries this distinction visually — we
+// just plumb the same identity down to the row-level payload.
+export type FlightLeg = 'outbound' | 'inbound';
+
 type SelectionState = {
-  flight: SelectedFlight | null;
+  outboundFlight: SelectedFlight | null;
+  inboundFlight: SelectedFlight | null;
   hotel: SelectedHotel | null;
 };
 
@@ -62,21 +178,34 @@ type SelectionContextValue = SelectionState & {
   // Set to the incoming payload if it differs from the current one, or
   // clear to null. Callers use the row-click convention: pass the
   // payload, and if it matches the current selection — same row id AND
-  // same search parameters (cabin+seats for flights, dates+guests+
-  // rooms for hotels) — the store clears, supporting the "click again
-  // to deselect" gesture without leaking that logic into rows.
-  toggleFlight: (candidate: SelectedFlight) => void;
+  // same search parameters (cabin+adults+children for flights,
+  // dates+guests+rooms for hotels) — the store clears, supporting the
+  // "click again to deselect" gesture without leaking that logic into
+  // rows. Flight toggles are per-leg so an inbound click never
+  // disturbs the outbound slot and vice versa.
+  toggleOutboundFlight: (candidate: SelectedFlight) => void;
+  toggleInboundFlight: (candidate: SelectedFlight) => void;
   toggleHotel: (candidate: SelectedHotel) => void;
-  clearFlight: () => void;
+  clearOutboundFlight: () => void;
+  clearInboundFlight: () => void;
   clearHotel: () => void;
   clearAll: () => void;
 };
 
 const SelectionContext = createContext<SelectionContextValue | null>(null);
 
-const EMPTY: SelectionState = { flight: null, hotel: null };
-// Key used to persist the selection state in sessionStorage.
-const STORAGE_KEY = 'explorer:selection:v1';
+const EMPTY: SelectionState = {
+  outboundFlight: null,
+  inboundFlight: null,
+  hotel: null,
+};
+// Key used to persist the selection state in sessionStorage. Bumped
+// to v2 alongside the outbound/inbound shape change so a v1 payload
+// from a stale tab doesn't rehydrate as { outbound: null, inbound:
+// null } and drop the user's previous single-flight pick silently.
+// The old key is left un-read; v1 carts just don't survive the
+// upgrade, which is acceptable since sessionStorage is per-tab.
+const STORAGE_KEY = 'explorer:selection:v2';
 
 // A row is "the same selection" when both the row id AND the search
 // parameters it was priced under match. Two searches for the same
@@ -88,7 +217,8 @@ function flightsMatch(a: SelectedFlight, b: SelectedFlight): boolean {
   return (
     a.flight_instance_id === b.flight_instance_id &&
     a.cabin_class === b.cabin_class &&
-    a.seats === b.seats
+    a.adults === b.adults &&
+    a.children === b.children
   );
 }
 
@@ -100,6 +230,36 @@ function hotelsMatch(a: SelectedHotel, b: SelectedHotel): boolean {
     a.guests === b.guests &&
     a.rooms === b.rooms
   );
+}
+
+// Slot-agnostic toggle rule: if the slot already holds an equivalent
+// candidate, clear it; otherwise store the new candidate (which either
+// fills an empty slot or replaces a different existing pick). Extracted
+// so outbound / inbound / hotel share one implementation instead of
+// three near-identical copies. Generic over the slot key so TypeScript
+// enforces that the `match` function's parameter type lines up with
+// what that slot stores — passing `flightsMatch` for the hotel slot
+// (or vice versa) is a compile error.
+// I.e., SlotKey → 'outboundFlight' | 'inboundFlight' | 'hotel'.
+type SlotKey = keyof SelectionState;
+// Applied to each slot:
+// SlotValue<'outboundFlight'>; // → SelectedFlight
+// SlotValue<'inboundFlight'>; // → SelectedFlight
+// SlotValue<'hotel'>; // → SelectedHotel
+type SlotValue<K extends SlotKey> = NonNullable<SelectionState[K]>;
+
+// Application:
+function withToggledSlot<K extends SlotKey>(
+  prev: SelectionState,
+  slot: K,
+  candidate: SlotValue<K>,
+  match: (a: SlotValue<K>, b: SlotValue<K>) => boolean,
+): SelectionState {
+  const current = prev[slot] as SlotValue<K> | null;
+  return {
+    ...prev,
+    [slot]: current && match(current, candidate) ? null : candidate,
+  };
 }
 
 export function SelectionProvider({ children }: { children: ReactNode }) {
@@ -179,24 +339,28 @@ export function SelectionProvider({ children }: { children: ReactNode }) {
   //   same for setShared).
   // - Future-proof: someone adding a new consumer that memoizes
   //   shouldn't have to come back and rewrite the hook.
-  const toggleFlight = useCallback((candidate: SelectedFlight) => {
-    setState((prev) => ({
-      ...prev,
-      flight:
-        prev.flight && flightsMatch(prev.flight, candidate) ? null : candidate,
-    }));
+  const toggleOutboundFlight = useCallback((candidate: SelectedFlight) => {
+    setState((prev) =>
+      withToggledSlot(prev, 'outboundFlight', candidate, flightsMatch),
+    );
+  }, []);
+
+  const toggleInboundFlight = useCallback((candidate: SelectedFlight) => {
+    setState((prev) =>
+      withToggledSlot(prev, 'inboundFlight', candidate, flightsMatch),
+    );
   }, []);
 
   const toggleHotel = useCallback((candidate: SelectedHotel) => {
-    setState((prev) => ({
-      ...prev,
-      hotel:
-        prev.hotel && hotelsMatch(prev.hotel, candidate) ? null : candidate,
-    }));
+    setState((prev) => withToggledSlot(prev, 'hotel', candidate, hotelsMatch));
   }, []);
 
-  const clearFlight = useCallback(() => {
-    setState((prev) => ({ ...prev, flight: null }));
+  const clearOutboundFlight = useCallback(() => {
+    setState((prev) => ({ ...prev, outboundFlight: null }));
+  }, []);
+
+  const clearInboundFlight = useCallback(() => {
+    setState((prev) => ({ ...prev, inboundFlight: null }));
   }, []);
 
   const clearHotel = useCallback(() => {
@@ -255,13 +419,24 @@ export function SelectionProvider({ children }: { children: ReactNode }) {
   const value = useMemo<SelectionContextValue>(
     () => ({
       ...state,
-      toggleFlight,
+      toggleOutboundFlight,
+      toggleInboundFlight,
       toggleHotel,
-      clearFlight,
+      clearOutboundFlight,
+      clearInboundFlight,
       clearHotel,
       clearAll,
     }),
-    [state, toggleFlight, toggleHotel, clearFlight, clearHotel, clearAll],
+    [
+      state,
+      toggleOutboundFlight,
+      toggleInboundFlight,
+      toggleHotel,
+      clearOutboundFlight,
+      clearInboundFlight,
+      clearHotel,
+      clearAll,
+    ],
   );
 
   return (
@@ -281,12 +456,19 @@ export function useSelection(): SelectionContextValue {
 
 // Predicate helpers used by rows to decide whether they're the
 // currently-selected one — cheap enough to inline, but naming them
-// keeps the row code readable.
+// keeps the row code readable. Flight predicate takes a `leg` so a
+// row on the outbound table doesn't consider itself selected because
+// the SAME flight is selected on the inbound side (extremely rare in
+// real data — a specific FlightInstance is a one-direction hop — but
+// the type keeps callers honest and lets FlightRow reuse one match
+// helper regardless of which table it lives in).
 export function isSelectedFlight(
   ctx: SelectionContextValue,
   candidate: SelectedFlight,
+  leg: FlightLeg,
 ): boolean {
-  return ctx.flight !== null && flightsMatch(ctx.flight, candidate);
+  const slot = leg === 'outbound' ? ctx.outboundFlight : ctx.inboundFlight;
+  return slot !== null && flightsMatch(slot, candidate);
 }
 
 export function isSelectedHotel(

@@ -6,9 +6,13 @@ import userEvent from '@testing-library/user-event';
 import type { BookingLike, BookingStatus } from '@/types/booking';
 
 // Mock next/navigation's useSearchParams — the card reads
-// ?confirm=<id> for the OAuth-return path.
+// ?confirm=<id> for the OAuth-return path. usePathname is also
+// consulted when building the OAuth callback URL so the user comes
+// back to the page they clicked Confirm on; the tests below assert
+// that behavior, so the mock has to expose a controllable pathname.
 vi.mock('next/navigation', () => ({
   useSearchParams: vi.fn(() => new URLSearchParams()),
+  usePathname: vi.fn(() => '/'),
 }));
 
 // Mock auth so we can toggle between signed-in and anon per test.
@@ -35,7 +39,7 @@ vi.mock('./HotelStayRows', () => ({
 
 import { BookingCard } from './BookingCard';
 import { useCurrentUser, signInWithGoogle } from '@/lib/auth/client';
-import { useSearchParams } from 'next/navigation';
+import { usePathname, useSearchParams } from 'next/navigation';
 
 const useCurrentUserMock = vi.mocked(useCurrentUser);
 const signInWithGoogleMock = vi.mocked(signInWithGoogle);
@@ -107,7 +111,8 @@ function makeBooking(overrides: Partial<BookingLike> = {}): BookingLike {
 describe('BookingCard', () => {
   beforeEach(() => {
     // Default: signed-in user, no ?confirm param, mount-effect
-    // fetch returns 404 (no fresh snapshot to apply).
+    // fetch returns 404 (no fresh snapshot to apply), pathname `/`
+    // (chat surface) — tests that need /explorer/booking override it.
     useCurrentUserMock.mockReturnValue({
       id: 'user-1',
       email: 'test@example.com',
@@ -117,6 +122,7 @@ describe('BookingCard', () => {
     useSearchParamsMock.mockReturnValue(
       new URLSearchParams() as unknown as ReturnType<typeof useSearchParams>,
     );
+    vi.mocked(usePathname).mockReturnValue('/');
     vi.spyOn(globalThis, 'fetch').mockResolvedValue(
       new Response(null, { status: 404 }),
     );
@@ -246,6 +252,24 @@ describe('BookingCard', () => {
 
       expect(signInWithGoogleMock).toHaveBeenCalledExactlyOnceWith(
         '/?confirm=42',
+      );
+    });
+
+    it('anchors the sign-in callback URL to the current pathname so the user returns to the same page', async () => {
+      // The card can be mounted on /explorer/booking too; a Confirm
+      // triggered there must return the user to /explorer/booking
+      // after OAuth (not /), otherwise the persisted proposal is
+      // orphaned and the auto-confirm handshake never fires.
+      const usePathnameMock = vi.mocked(usePathname);
+      usePathnameMock.mockReturnValue('/explorer/booking');
+      useCurrentUserMock.mockReturnValue(null);
+      const user = userEvent.setup();
+      render(<BookingCard initialBooking={makeBooking()} />);
+
+      await user.click(screen.getByRole('button', { name: /confirm/i }));
+
+      expect(signInWithGoogleMock).toHaveBeenCalledExactlyOnceWith(
+        '/explorer/booking?confirm=42',
       );
     });
 

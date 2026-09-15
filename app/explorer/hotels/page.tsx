@@ -69,7 +69,7 @@ export default function HotelsExplorerPage() {
           onSearch={search}
         />
 
-        <ResponsePanel
+        <ResponsePanel<HotelResult[]>
           state={state}
           renderPretty={(data) => (
             <HotelResults data={data} stay={lastStay} />

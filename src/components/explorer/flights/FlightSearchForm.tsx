@@ -25,7 +25,8 @@ export type FlightSearchFormProps = {
   submitting: boolean;
   onSearch: (args: {
     path: string;
-    passengers: number;
+    adults: number;
+    children: number;
     cabinClass: CabinClass;
   }) => void;
 };
@@ -111,7 +112,7 @@ export function FlightSearchForm({
 
   function handleSubmit() {
     if (sameAirport || hasPastDate) return;
-    onSearch({ path, passengers: adults + children, cabinClass });
+    onSearch({ path, adults, children, cabinClass });
   }
 
   return (

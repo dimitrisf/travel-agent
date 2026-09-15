@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import { useSearchParams } from 'next/navigation';
+import { usePathname, useSearchParams } from 'next/navigation';
 import Alert from '@mui/material/Alert';
 import Box from '@mui/material/Box';
 import Button from '@mui/material/Button';
@@ -60,6 +60,17 @@ export function BookingCard({
   // parallel-POST window, and a user might click Confirm again and
   // trigger the whole OAuth loop a second time.
   const searchParams = useSearchParams();
+
+  // Callback URL for the OAuth round-trip has to route back to the
+  // page the user was on when they clicked Confirm — otherwise a
+  // Confirm triggered from /explorer/booking dumps the user on `/`
+  // regardless. Reading the pathname here keeps the card portable
+  // between the chat surface (`/`, `/c/[id]`) and the explorer
+  // surface (`/explorer/booking`). Each surface owns the
+  // post-sign-in confirm handshake for its own page (see
+  // AnonChatResumeHandler on `/` and BookingPanel on
+  // `/explorer/booking`).
+  const pathname = usePathname();
 
   // oauthConfirmInFlight is true if the booking status is PROPOSED and the search params contain a confirm query parameter that matches the booking id. This indicates that the user has just completed the OAuth flow and is waiting for the AnonChatResumeHandler to complete the confirmation process. In this case, we disable both buttons and show a spinner on the Confirm button to indicate that the action is in progress.
   const oauthConfirmInFlight =
@@ -192,10 +203,14 @@ export function BookingCard({
   async function callBookingAction(action: 'confirm' | 'cancel') {
     if (action === 'confirm' && !currentUser) {
       // Kick off OAuth. Encode the pending booking id in the callback URL
-      // so PostSignInConfirmHandler can auto-complete the confirmation
-      // after sign-in — otherwise the chat state (and the BookingCard) is
-      // gone and the user would have to re-do the whole flow to confirm.
-      const callbackUrl = `/?confirm=${booking.id}`;
+      // so the surface the user was on can auto-complete the
+      // confirmation after sign-in — otherwise the state (chat history
+      // or persisted /explorer/booking proposal) is gone and the user
+      // would have to re-do the whole flow to confirm. Falls back to
+      // `/` when pathname is unavailable (e.g. static rendering
+      // sentinel) so existing chat behavior is preserved.
+      const base = pathname ?? '/';
+      const callbackUrl = `${base}?confirm=${booking.id}`;
       void signInWithGoogle(callbackUrl);
       return;
     }
@@ -208,15 +223,18 @@ export function BookingCard({
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
       });
+
       const body = (await res.json()) as BookingLike & {
         // The API may return an error message in the body if the action fails. We check for this and throw an error if present. The error message is displayed in the card below the total price.
         error?: string;
         // code is an optional field that may be returned by the API to indicate a specific error code. We don't use it in the UI, but it may be useful for debugging or logging purposes.
         code?: string;
       };
+
       if (!res.ok) {
         throw new Error(body.error ?? `HTTP ${res.status}`);
       }
+
       setBooking(body);
     } catch (err) {
       setError((err as Error).message);

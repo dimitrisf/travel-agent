@@ -29,17 +29,29 @@ export default function FlightsExplorerPage() {
     DEFAULT_SORT,
   );
 
-  // Passenger count from the LAST submitted search — sticky so per-leg
-  // totals reflect the search that actually ran, not whatever the pax
-  // steppers happen to show now. Persisted alongside the response.
-  const [passengers, setPassengers] = usePersistedState(
-    'explorer:flights:lastPassengers',
+  // Adults / children from the LAST submitted search — sticky so per-
+  // leg totals and the row-level "Add to booking" payloads reflect the
+  // search that actually ran, not whatever the pax steppers happen to
+  // show now. Persisted alongside the response.
+  //
+  // The sticky snapshot matters because a user can change the form
+  // after searching without re-submitting. The row must show the
+  // price the search returned, not the price the form is currently
+  // configured for. And the two counts are kept separately (not just
+  // a passengers total) because the propose_booking payload records
+  // adults and children as distinct fields on each FlightBooking.
+  const [lastAdults, setLastAdults] = usePersistedState(
+    'explorer:flights:lastAdults',
     1,
   );
+  const [lastChildren, setLastChildren] = usePersistedState(
+    'explorer:flights:lastChildren',
+    0,
+  );
 
-  // Cabin class from the LAST submitted search. Same reason as
-  // `passengers`: the selection payload snapshots the search that
-  // produced the visible prices, not the current form value.
+  // Cabin class from the LAST submitted search. Same reason as the
+  // pax counts: the selection payload snapshots the search that
+  // produced the visible prices.
   const [lastCabinClass, setLastCabinClass] = usePersistedState<CabinClass>(
     'explorer:flights:lastCabinClass',
     'economy',
@@ -47,14 +59,17 @@ export default function FlightsExplorerPage() {
 
   async function search({
     path,
-    passengers: pax,
+    adults,
+    children,
     cabinClass,
   }: {
     path: string;
-    passengers: number;
+    adults: number;
+    children: number;
     cabinClass: CabinClass;
   }) {
-    setPassengers(pax);
+    setLastAdults(adults);
+    setLastChildren(children);
     setLastCabinClass(cabinClass);
     setState({ kind: 'loading' });
     const next = await explorerFetch<SearchFlightsResult>({
@@ -84,7 +99,8 @@ export default function FlightsExplorerPage() {
           renderPretty={(data) => (
             <FlightResults
               data={data}
-              passengers={passengers}
+              adults={lastAdults}
+              children={lastChildren}
               cabinClass={lastCabinClass}
               outboundSort={outboundSort}
               inboundSort={inboundSort}
