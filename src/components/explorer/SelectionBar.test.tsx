@@ -117,9 +117,13 @@ describe('SelectionBar', () => {
     expect(screen.getByText(inbound.label)).toBeInTheDocument();
     expect(screen.getByText(/Outbound:/)).toBeInTheDocument();
     expect(screen.getByText(/Return:/)).toBeInTheDocument();
-    // Per-line prices appear next to each item.
-    expect(screen.getByText(/^400/)).toBeInTheDocument();
-    expect(screen.getByText(/^360/)).toBeInTheDocument();
+    // Per-line prices appear next to each item. Match the number
+    // substring only — formatEUR renders locale-dependent glyphs
+    // ("400,00 €" vs. "€400.00") and any anchor would fight one of
+    // them. The three values (400, 360, 760) don't overlap as
+    // substrings so a bare number regex is uniquely identifying.
+    expect(screen.getByText(/400/)).toBeInTheDocument();
+    expect(screen.getByText(/360/)).toBeInTheDocument();
     // 400 + 360 = 760
     expect(screen.getByText(/Total .*760/)).toBeInTheDocument();
   });
@@ -137,10 +141,11 @@ describe('SelectionBar', () => {
     expect(screen.getByText(/Hotel:/)).toBeInTheDocument();
     // Three distinct per-line prices (loose regex per glyph — the
     // whole-number substring is enough for uniqueness at these
-    // values).
-    expect(screen.getByText(/^400/)).toBeInTheDocument();
-    expect(screen.getByText(/^360/)).toBeInTheDocument();
-    expect(screen.getByText(/^390/)).toBeInTheDocument();
+    // values). No start-anchor because formatEUR renders locale-
+    // dependent glyphs (€ can be prefix or suffix).
+    expect(screen.getByText(/400/)).toBeInTheDocument();
+    expect(screen.getByText(/360/)).toBeInTheDocument();
+    expect(screen.getByText(/390/)).toBeInTheDocument();
     // 400 + 360 + 390 = 1150
     expect(screen.getByText(/Total .*1[,.]?150/)).toBeInTheDocument();
   });
