@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import Alert from '@mui/material/Alert';
 import { useCurrentUser } from '@/lib/auth/client';
+import { confirmBooking } from '@/lib/booking/bookingActions';
 import type { BookingLike } from '@/types/booking';
 import {
   clearAnonChatHistory,
@@ -11,6 +12,15 @@ import {
   savePendingConfirmedBooking,
   savePendingSnackbar,
 } from '@/utils/anonChatStorage';
+
+// Discriminated result the confirm arm of Promise.all resolves to.
+// Keeps a confirm-side failure out of Promise.all's rejection path —
+// the outer flow only rejects when conversation-create fails, which
+// is the mandatory arm. See the parallel POST block below for the
+// full rationale.
+type ConfirmArmResult =
+  | { ok: true; booking: BookingLike }
+  | { ok: false; error: string };
 
 // Bridges the Stage 17 Phase 3.5 anon-to-signed-in chat migration.
 // Contract:
@@ -77,7 +87,14 @@ export function AnonChatResumeHandler() {
         // Kick off both POSTs concurrently. Each takes ~3-4s on Neon,
         // so serial (previous impl) was ~6-8s total; parallel is
         // bounded by the slower of the two.
-        const [convRes, confirmRes] = await Promise.all([
+        //
+        // The confirm arm resolves to a discriminated ConfirmResult so
+        // its failure never rejects the outer Promise.all — a confirm
+        // failure is best-effort here (shown as a snackbar), while a
+        // conversation-create failure is mandatory (stops navigation).
+        // Rejecting the whole Promise.all on a confirm failure would
+        // strand the user on `/` with their anon history intact.
+        const [convRes, confirmResult] = await Promise.all([
           // First POST: create a new conversation with the saved anon history (savedHistory). This is mandatory for navigation to /c/[id], so we await it and check for errors. If it fails, we throw an error and bail out of the migration.
           fetch('/api/conversations', {
             method: 'POST',
@@ -85,12 +102,14 @@ export function AnonChatResumeHandler() {
             body: JSON.stringify({ history: savedHistory }),
           }),
           shouldConfirm
-            ? // This means that the user has just completed the OAuth flow and is waiting for the AnonChatResumeHandler to complete the confirmation process. We fire the booking-confirm POST in parallel with the conversation-create POST. This is best-effort: if it fails, we still navigate to /c/[id] and show a snackbar with the error message. If it succeeds, we save the confirmed booking in sessionStorage so BookingCard on /c/[id] can pick it up on mount and skip its refetch.
-              // The oAuth flow has been triggered by the user clicking the Confirm button on a BookingCard, which sets the confirm query parameter in the URL. We read that parameter here and use it to determine whether to fire the booking-confirm POST.
-              fetch(`/api/booking/${parsedConfirmId}/confirm`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-              })
+            ? // The oAuth flow has been triggered by the user clicking the Confirm button on a BookingCard, which sets the confirm query parameter in the URL. We read that parameter here and use it to determine whether to fire the booking-confirm POST. If it succeeds, we save the confirmed booking in sessionStorage so BookingCard on /c/[id] can pick it up on mount and skip its refetch.
+              confirmBooking(parsedConfirmId).then(
+                (booking): ConfirmArmResult => ({ ok: true, booking }),
+                (err: Error): ConfirmArmResult => ({
+                  ok: false,
+                  error: err.message,
+                }),
+              )
             : // If there's no confirm query parameter in the URL, we don't need to fire the booking-confirm POST. We return a resolved promise with null so that Promise.all still resolves and we can handle the conversation-create POST result.
               Promise.resolve(null),
         ]);
@@ -108,26 +127,20 @@ export function AnonChatResumeHandler() {
         // is mandatory for navigation; a confirm failure is surfaced
         // via the snackbar (still navigates so the user isn't stranded
         // on `/`).
-        if (shouldConfirm && confirmRes) {
-          const confirmBody = (await confirmRes.json()) as BookingLike & {
-            error?: string;
-          };
-
-          if (confirmRes.ok && confirmBody?.id) {
+        if (shouldConfirm && confirmResult) {
+          if (confirmResult.ok) {
             // Save the confirmed booking and a success snackbar message in sessionStorage so BookingCard on /c/[id] can pick it up on mount and skip its refetch, and PostSignInConfirmHandler can show the snackbar without re-POSTing. We use the booking reference if available, otherwise we fall back to the parsedConfirmId from the URL.
 
-            savePendingConfirmedBooking(confirmBody);
+            savePendingConfirmedBooking(confirmResult.booking);
 
             savePendingSnackbar({
               severity: 'success',
-              message: `Booking ${confirmBody.reference ?? parsedConfirmId} confirmed.`,
+              message: `Booking ${confirmResult.booking.reference ?? parsedConfirmId} confirmed.`,
             });
           } else {
             savePendingSnackbar({
               severity: 'error',
-              message: `Couldn't confirm booking: ${
-                confirmBody?.error ?? `HTTP ${confirmRes.status}`
-              }`,
+              message: `Couldn't confirm booking: ${confirmResult.error}`,
             });
           }
         }
