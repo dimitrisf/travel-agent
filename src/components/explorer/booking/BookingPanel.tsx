@@ -18,6 +18,7 @@ import {
 } from '@/lib/explorer/buildProposePayload';
 import { usePersistedState } from '@/lib/explorer/usePersistedState';
 import { useCurrentUser } from '@/lib/auth/client';
+import { confirmBooking } from '@/lib/booking/bookingActions';
 import type { BookingLike, Cart } from '@/types/booking';
 import { CartSummary } from './CartSummary';
 
@@ -142,16 +143,7 @@ export function BookingPanel() {
       try {
         // Send the confirm request to the server.
         // This is the POST the user would have made if they'd been signed in when they clicked Confirm. The server checks authorization (now the session cookie is valid) and flips the booking to PAID.
-        const res = await fetch(`/api/booking/${booking.id}/confirm`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-        });
-
-        const body = (await res.json()) as BookingLike & { error?: string };
-
-        if (!res.ok) {
-          throw new Error(body.error ?? `HTTP ${res.status}`);
-        }
+        const body = await confirmBooking(booking.id);
 
         // Updates BookingPanel's own usePersistedState cell → sessionStorage gets the PAID booking → a later reload shows the confirmed state, not the stale PROPOSED one.
         setBooking(body);

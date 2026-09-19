@@ -24,6 +24,7 @@ import { formatEUR } from '@/utils/format';
 import { FlightLegRows } from './FlightLegRows';
 import { HotelStayRows } from './HotelStayRows';
 import { useCurrentUser, signInWithGoogle } from '@/lib/auth/client';
+import { confirmBooking, cancelBooking } from '@/lib/booking/bookingActions';
 import {
   clearPendingConfirmedBooking,
   readPendingConfirmedBooking,
@@ -218,22 +219,15 @@ export function BookingCard({
     setBusy(action);
     setError(null);
     try {
-      // We call the booking action API endpoint with the booking id and action (confirm or cancel). The API returns the updated booking data, which we use to update the booking state. If the API returns an error, we throw an error to be caught in the catch block.
-      const res = await fetch(`/api/booking/${booking.id}/${action}`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-      });
-
-      const body = (await res.json()) as BookingLike & {
-        // The API may return an error message in the body if the action fails. We check for this and throw an error if present. The error message is displayed in the card below the total price.
-        error?: string;
-        // code is an optional field that may be returned by the API to indicate a specific error code. We don't use it in the UI, but it may be useful for debugging or logging purposes.
-        code?: string;
-      };
-
-      if (!res.ok) {
-        throw new Error(body.error ?? `HTTP ${res.status}`);
-      }
+      // Both actions go through the shared bookingActions helpers,
+      // which own the endpoint contract in one place (see
+      // src/lib/booking/bookingActions.ts). The wider surface here is
+      // just: show busy state, catch any error into the inline Alert,
+      // hand the returned snapshot back to setBooking.
+      const body =
+        action === 'confirm'
+          ? await confirmBooking(booking.id)
+          : await cancelBooking(booking.id);
 
       setBooking(body);
     } catch (err) {
