@@ -22,6 +22,7 @@ function mockRepo(
     findById: vi.fn(),
     findByIdempotencyKey: vi.fn(),
     findByReference: vi.fn(),
+    findByOwner: vi.fn(),
     ...overrides,
   } as unknown as BookingRepository;
 }
@@ -192,6 +193,53 @@ describe('BookingService.getBookingByReference', () => {
     let caught: unknown;
     try {
       await service.getBookingByReference('BKG-anything');
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toMatchObject({
+      name: 'BookingServiceError',
+      code: 'INTERNAL_ERROR',
+    });
+    expect((caught as { cause: unknown }).cause).toBe(rootCause);
+  });
+});
+
+// ─── listBookingsForUser ───────────────────────────────────────────
+
+describe('BookingService.listBookingsForUser', () => {
+  it('forwards the userId + limit to the repo and returns the rows verbatim', async () => {
+    const rows = [
+      booking({ id: 1, userId: 'user-1', reference: 'BKG-A' }),
+      booking({ id: 2, userId: 'user-1', reference: 'BKG-B' }),
+    ];
+    const findByOwner = vi.fn().mockResolvedValue(rows);
+    const service = new BookingService(stubPrisma, mockRepo({ findByOwner }));
+
+    const result = await service.listBookingsForUser('user-1', 10);
+
+    expect(findByOwner).toHaveBeenCalledExactlyOnceWith('user-1', 10);
+    expect(result).toBe(rows);
+  });
+
+  it('returns an empty array when the user has no bookings', async () => {
+    const service = new BookingService(
+      stubPrisma,
+      mockRepo({ findByOwner: vi.fn().mockResolvedValue([]) }),
+    );
+
+    expect(await service.listBookingsForUser('user-1', 10)).toEqual([]);
+  });
+
+  it('wraps repo throws as INTERNAL_ERROR with cause preserved', async () => {
+    const rootCause = new Error('DB timeout');
+    const service = new BookingService(
+      stubPrisma,
+      mockRepo({ findByOwner: vi.fn().mockRejectedValue(rootCause) }),
+    );
+
+    let caught: unknown;
+    try {
+      await service.listBookingsForUser('user-1', 10);
     } catch (err) {
       caught = err;
     }

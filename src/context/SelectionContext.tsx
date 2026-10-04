@@ -808,3 +808,48 @@ export function isSelectedHotel(
 // would win. For an audit tool where the workflow is
 // search → pick → book → done, all inside one sitting,
 // sessionStorage is the right fit.
+//
+//
+// ------------------------------------------------------------
+// D. Why the cart deliberately survives sign-out
+// ------------------------------------------------------------
+//
+// Signing out does NOT clear this state. That's intentional, and
+// worth writing down because it's the kind of decision a future
+// reader will second-guess ("shouldn't we reset the cart when the
+// user signs out?").
+//
+// The reasoning:
+//
+// 1. The cart is anon-safe by construction. Nothing in the
+//    SelectedFlight / SelectedHotel payloads assumes a signed-in
+//    identity — no userId, no customerName, no email. An anonymous
+//    user can build a cart, click Propose, and land on a PROPOSED
+//    booking (userId=null on the row) without ever authenticating.
+//    Signing out just returns the user to a state the cart is
+//    already valid in.
+//
+// 2. sessionStorage is per-tab, cleared on tab close. The user's
+//    "session" from the browser's perspective is the tab lifetime,
+//    not the NextAuth session. Sign-out is more like "step out for
+//    coffee" than "hand this machine to someone else"; the
+//    tab-close event is the real "reset everything" signal.
+//
+// 3. The alternative — clearing the cart on sign-out — would
+//    surprise anyone who signed in mid-flow to Confirm a booking
+//    and then signed out to check another account (or accidentally
+//    clicked Sign out). Silently discarding their picks would
+//    force a rebuild for no privacy or security gain, since the
+//    cart never held anything private in the first place.
+//
+// The BookingPanel's persisted proposed booking follows the same
+// rule and for the same reasons — see the comment near its
+// usePersistedState call for the parallel discussion. The narrow
+// exception worth revisiting IF this ever ships beyond the demo:
+// a PAID / CONFIRMED booking has customerName + customerEmail baked
+// into its snapshot. On a truly shared tab (kiosk, family
+// computer left open) that identity is visible to whoever uses
+// the tab next. The targeted fix — clear the persisted booking on
+// sign-out ONLY when its status is PAID or CONFIRMED — is ~5
+// lines and can be added the day it matters. The cart itself
+// carries no identity, so it doesn't need the same guard.

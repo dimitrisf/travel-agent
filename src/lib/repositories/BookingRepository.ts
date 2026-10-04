@@ -72,4 +72,22 @@ export class BookingRepository {
       include: bookingInclude,
     });
   }
+
+  // Most-recent bookings owned by a specific user, capped at `limit`.
+  // Ordered by createdAt desc so "recent" reads as "most recently
+  // proposed at the top." Anon-owned rows (userId=null) are excluded
+  // by the userId filter — they belong to nobody until claimed on
+  // Confirm. Uses the shared bookingInclude so callers can render a
+  // full BookingCard without a second round-trip.
+  async findByOwner(
+    userId: string,
+    limit: number,
+  ): Promise<BookingWithRelations[]> {
+    return this.prisma.booking.findMany({
+      where: { userId },
+      include: bookingInclude,
+      orderBy: { createdAt: 'desc' },
+      take: limit,
+    });
+  }
 }

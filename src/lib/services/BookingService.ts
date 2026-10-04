@@ -1121,6 +1121,25 @@ export class BookingService {
     }
     return booking;
   }
+
+  // Most-recent bookings owned by the given user, capped at `limit`.
+  // Backs GET /api/bookings (the RecentBookingsPanel data source).
+  // Deliberately does NOT expose anon PROPOSED rows (userId=null) —
+  // they belong to nobody until a Confirm claims them, and a
+  // "recent bookings" list scoped to one user should reflect only
+  // that user's ledger. Ordered by createdAt desc, so the freshest
+  // proposal shows at the top even if the user later Confirms an
+  // older one.
+  async listBookingsForUser(
+    userId: string,
+    limit: number,
+  ): Promise<BookingWithRelations[]> {
+    try {
+      return await this.repo.findByOwner(userId, limit);
+    } catch (err) {
+      throw internal('Database error while listing bookings.', err);
+    }
+  }
 }
 
 // ───────────────────────────────────────────────
