@@ -4,3 +4,4 @@ dist/
 .env.test
 .next
 *.tsbuildinfo
+Questions.md

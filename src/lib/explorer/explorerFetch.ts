@@ -10,19 +10,24 @@ export async function explorerFetch<T>(opts: {
   body?: unknown;
 }): Promise<ResponseState<T>> {
   const started = performance.now();
+
   try {
     const init: RequestInit = { method: opts.method };
+
     if (opts.method === 'POST') {
       init.headers = { 'Content-Type': 'application/json' };
       init.body = JSON.stringify(opts.body ?? {});
     }
+
     const res = await fetch(opts.path, init);
+
     const timing = Math.round(performance.now() - started);
     const status = res.status;
 
     // Parse body regardless of status — apiErrorResponse returns JSON on
     // both success and error paths.
     let parsed: unknown = null;
+
     try {
       parsed = await res.json();
     } catch {
@@ -41,6 +46,7 @@ export async function explorerFetch<T>(opts: {
     };
   } catch (err) {
     const timing = Math.round(performance.now() - started);
+
     return {
       kind: 'error',
       status: 0,

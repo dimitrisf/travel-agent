@@ -21,6 +21,7 @@ import { useCurrentUser } from '@/lib/auth/client';
 import { confirmBooking } from '@/lib/booking/bookingActions';
 import type { BookingLike, Cart } from '@/types/booking';
 import { CartSummary } from './CartSummary';
+import { RecentBookingsPanel } from './RecentBookingsPanel';
 
 // sessionStorage key for the last proposed booking. Session-scoped
 // so a fresh tab starts clean, but survives /explorer/* navigation
@@ -62,6 +63,24 @@ export function BookingPanel() {
   // restores the same proposed booking. The BookingCard reads its
   // own status on mount, so if the user Confirmed or Cancelled since,
   // the card refetches and shows the current state.
+  //
+  // Deliberately survives sign-out. A PROPOSED booking is anon-safe
+  // by construction (userId=null on the row until Confirm claims
+  // it), and the sessionStorage lifetime IS the tab lifetime — the
+  // real "reset everything" signal is closing the tab, not signing
+  // out. Clearing on sign-out would discard legitimate anonymous
+  // in-progress work for no privacy gain. See SelectionContext's
+  // Appendix D for the full rationale that also covers the cart.
+  //
+  // The one edge case that would justify a narrower clear IF this
+  // ever ships beyond the demo: a PAID / CONFIRMED booking carries
+  // customerName + customerEmail in its snapshot. On a truly
+  // shared tab (kiosk, family computer left open) that identity
+  // becomes visible to the next user. The targeted fix — clear
+  // this key on sign-out ONLY when `booking.status` is PAID or
+  // CONFIRMED — is a handful of lines and can be added the day it
+  // matters. PROPOSED bookings and the cart (which carries no
+  // identity at all) don't need the same guard.
   const [booking, setBooking] = usePersistedState<BookingLike | null>(
     PROPOSED_BOOKING_STORAGE_KEY,
     null,
@@ -289,6 +308,8 @@ export function BookingPanel() {
           </Stack>
         )}
       </Paper>
+
+      <RecentBookingsPanel />
     </Stack>
   );
 }

@@ -24,6 +24,15 @@ vi.mock('@/components/BookingCard', () => ({
   ),
 }));
 
+// RecentBookingsPanel fires its own GET /api/bookings on mount when a
+// user is signed in. Stub it so its fetch doesn't consume mocks the
+// tests below set up for the propose / confirm POSTs, and so those
+// tests don't have to reason about its rendered output. Its own
+// dedicated test file covers its behavior in isolation.
+vi.mock('./RecentBookingsPanel', () => ({
+  RecentBookingsPanel: () => <div data-testid="recent-bookings-panel-stub" />,
+}));
+
 // next/navigation is controllable per test — the resume effect reads
 // pathname, searchParams (for `?confirm=<id>`), and calls
 // router.replace when it's done. Defaulting to /explorer/booking with
