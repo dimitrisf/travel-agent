@@ -16,6 +16,7 @@ import {
 import { FLIGHT_ROW_GRID } from '@/lib/explorer/flights/sort';
 import type { CabinClass } from '@/lib/pricing';
 import type { FlightResult } from '@/lib/services/FlightService';
+import { formatFlightLabel } from '@/utils/booking';
 
 // One row in a leg's flight table. Columns are aligned to the shared
 // FLIGHT_ROW_GRID so the sortable headers above line up. The trailing
@@ -48,7 +49,6 @@ export function FlightRow({
 }: FlightRowProps) {
   const depTime = flight.departure.slice(11, 16);
   const arrTime = flight.arrival.slice(11, 16);
-  const date = flight.departure.slice(0, 10);
   const hours = Math.floor(flight.duration_minutes / 60);
   const minutes = flight.duration_minutes % 60;
   const passengers = adults + children;
@@ -60,6 +60,9 @@ export function FlightRow({
   // selection represents the current state of the user's flight selections.
   // payload represents the flight selection that would be applied if the user toggles this row.
   const selection = useSelection();
+  // Raw fields only — the display string is composed by
+  // formatFlightLabel at render time so date-format changes land
+  // without requiring a clear-and-reselect.
   const payload: SelectedFlight = {
     flight_instance_id: flight.flight_instance_id,
     cabin_class: cabinClass,
@@ -67,8 +70,13 @@ export function FlightRow({
     children,
     priceEUR: flight.price,
     totalEUR: total,
-    label: `${flight.airline} ${flight.flight_number} · ${flight.origin.iata} → ${flight.destination.iata} · ${date} ${depTime}`,
+    airline: flight.airline,
+    flight_number: flight.flight_number,
+    origin_iata: flight.origin.iata,
+    destination_iata: flight.destination.iata,
+    departure: flight.departure,
   };
+  const payloadLabel = formatFlightLabel(payload);
 
   // selected is true if this row's flight matches the current selection for the given leg.
   const selected = isSelectedFlight(selection, payload, leg);
@@ -142,8 +150,8 @@ export function FlightRow({
           aria-pressed={selected}
           aria-label={
             selected
-              ? `Remove ${payload.label} from booking`
-              : `Add ${payload.label} to booking`
+              ? `Remove ${payloadLabel} from booking`
+              : `Add ${payloadLabel} to booking`
           }
         >
           {selected ? 'Selected' : 'Add'}

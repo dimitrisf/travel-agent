@@ -1,6 +1,7 @@
 import Stack from '@mui/material/Stack';
 import Typography from '@mui/material/Typography';
 import type { Cart } from '@/types/booking';
+import { formatFlightLabel, formatHotelLabel } from '@/utils/booking';
 
 // Compact review of what's about to be proposed. Uses the labels the
 // row-click captured so the display is consistent with what the user
@@ -15,7 +16,7 @@ export function CartSummary({ cart }: { cart: Cart }) {
   if (cart.outboundFlight) {
     rows.push([
       'Outbound',
-      cart.outboundFlight.label,
+      formatFlightLabel(cart.outboundFlight),
       cart.outboundFlight.totalEUR,
     ]);
   }
@@ -23,13 +24,13 @@ export function CartSummary({ cart }: { cart: Cart }) {
   if (cart.inboundFlight) {
     rows.push([
       'Return',
-      cart.inboundFlight.label,
+      formatFlightLabel(cart.inboundFlight),
       cart.inboundFlight.totalEUR,
     ]);
   }
 
   if (cart.hotel) {
-    rows.push(['Hotel', cart.hotel.label, cart.hotel.totalEUR]);
+    rows.push(['Hotel', formatHotelLabel(cart.hotel), cart.hotel.totalEUR]);
   }
 
   const total = rows.reduce((acc, [, , v]) => acc + v, 0);

@@ -146,7 +146,17 @@ export type SelectedFlight = {
   // selection's total.
   priceEUR: number;
   totalEUR: number;
-  label: string;
+  // Raw fields used to compose the display label at render time
+  // (SelectionBar + CartSummary + FlightRow's aria-labels). Stored
+  // separately rather than as a pre-composed string so date-format
+  // changes propagate to existing cart entries without requiring a
+  // clear-and-reselect round trip. formatFlightLabel in
+  // @/utils/booking is the canonical composer.
+  airline: string;
+  flight_number: string;
+  origin_iata: string;
+  destination_iata: string;
+  departure: string; // ISO datetime
 };
 
 export type SelectedHotel = {
@@ -205,7 +215,13 @@ const EMPTY: SelectionState = {
 // null } and drop the user's previous single-flight pick silently.
 // The old key is left un-read; v1 carts just don't survive the
 // upgrade, which is acceptable since sessionStorage is per-tab.
-const STORAGE_KEY = 'explorer:selection:v2';
+// v3 bump: SelectedFlight dropped its pre-composed `label` field in
+// favour of raw fields (airline / flight_number / origin_iata /
+// destination_iata / departure) composed at render time by
+// formatFlightLabel. Old v2 entries lack those raw fields, so the
+// bump quietly discards them instead of hydrating into an undefined-
+// property render crash.
+const STORAGE_KEY = 'explorer:selection:v3';
 
 // A row is "the same selection" when both the row id AND the search
 // parameters it was priced under match. Two searches for the same

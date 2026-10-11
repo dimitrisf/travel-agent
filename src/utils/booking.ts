@@ -1,3 +1,4 @@
+import type { SelectedFlight, SelectedHotel } from '@/context/SelectionContext';
 import type { BookingLike, BookingStatus } from '@/types/booking';
 import { formatDate } from './format';
 
@@ -91,4 +92,33 @@ export function formatBookingDateRange(start: string, end: string): string {
   const startLabel = formatDate(start);
   const endLabel = formatDate(end);
   return startLabel === endLabel ? startLabel : `${startLabel} → ${endLabel}`;
+}
+
+// "1 night" / "3 nights" — small plural-aware helper so hotel labels
+// in SelectionBar + CartSummary stay consistent without each call site
+// re-doing the singular/plural check.
+export function formatNights(n: number): string {
+  return `${n} ${n === 1 ? 'night' : 'nights'}`;
+}
+
+// Composes a flight's display label from the raw fields stored on
+// SelectedFlight. Called by SelectionBar, CartSummary, and FlightRow's
+// aria-labels — never by the row-click handler, so the stored payload
+// stays pure data. Date segment uses formatDate for consistency with
+// the hotel label; the time segment is sliced from the ISO datetime so
+// a locale change doesn't shift the departure clock.
+export function formatFlightLabel(f: SelectedFlight): string {
+  const date = f.departure.slice(0, 10);
+  const depTime = f.departure.slice(11, 16);
+  return `${f.airline} ${f.flight_number} · ${f.origin_iata} → ${f.destination_iata} · ${formatDate(date)} ${depTime}`;
+}
+
+// Composes a hotel's display label — base label (hotel name · room
+// type, snapshotted at selection) + stay dates + night count. Mirrors
+// formatFlightLabel so SelectionBar and CartSummary call a single
+// helper per cart row type instead of hand-rolling the hotel template
+// at each site. The date segment and night count are composed from
+// raw fields, so format changes propagate to existing cart entries.
+export function formatHotelLabel(h: SelectedHotel): string {
+  return `${h.label} · ${formatBookingDateRange(h.checkin, h.checkout)} (${formatNights(h.nights)})`;
 }

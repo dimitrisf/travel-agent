@@ -230,7 +230,7 @@ describe('HotelCard', () => {
     const now = screen.getByRole('button', { name: /Remove .* from booking/i });
     expect(now).toHaveAttribute('aria-pressed', 'true');
     expect(now).toHaveTextContent(/Selected/);
-    const raw = sessionStorage.getItem('explorer:selection:v2');
+    const raw = sessionStorage.getItem('explorer:selection:v3');
     expect(raw).not.toBeNull();
     const parsed = JSON.parse(raw as string);
     expect(parsed.hotel).toMatchObject({
