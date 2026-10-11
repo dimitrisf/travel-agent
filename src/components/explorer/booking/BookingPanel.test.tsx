@@ -11,6 +11,7 @@ import {
   type SelectedHotel,
 } from '@/context/SelectionContext';
 import type { BookingLike } from '@/types/booking';
+import { formatFlightLabel } from '@/utils/booking';
 
 // BookingCard is a heavy client component (its own state, effects,
 // next/navigation, auth). This test focuses on BookingPanel's own
@@ -54,7 +55,7 @@ vi.mock('@/lib/auth/client', () => ({
   useCurrentUser: () => mockCurrentUser,
 }));
 
-const STORAGE_KEY = 'explorer:selection:v2';
+const STORAGE_KEY = 'explorer:selection:v3';
 
 const outbound: SelectedFlight = {
   flight_instance_id: 101,
@@ -63,7 +64,11 @@ const outbound: SelectedFlight = {
   children: 1,
   priceEUR: 200,
   totalEUR: 600,
-  label: 'Aegean A3 824 · ATH → BER',
+  airline: 'Aegean',
+  flight_number: 'A3 824',
+  origin_iata: 'ATH',
+  destination_iata: 'BER',
+  departure: '2026-09-05T09:40:00Z',
 };
 
 const inbound: SelectedFlight = {
@@ -73,7 +78,11 @@ const inbound: SelectedFlight = {
   children: 1,
   priceEUR: 180,
   totalEUR: 540,
-  label: 'Aegean A3 825 · BER → ATH',
+  airline: 'Aegean',
+  flight_number: 'A3 825',
+  origin_iata: 'BER',
+  destination_iata: 'ATH',
+  departure: '2026-09-10T18:00:00Z',
 };
 
 const hotel: SelectedHotel = {
@@ -150,9 +159,12 @@ describe('BookingPanel', () => {
     seedSelection({ outboundFlight: outbound, inboundFlight: inbound, hotel });
     renderPanel();
     // findByText waits for the hydrate effect.
-    expect(await screen.findByText(outbound.label)).toBeInTheDocument();
-    expect(screen.getByText(inbound.label)).toBeInTheDocument();
-    expect(screen.getByText(hotel.label)).toBeInTheDocument();
+    expect(await screen.findByText(formatFlightLabel(outbound))).toBeInTheDocument();
+    expect(screen.getByText(formatFlightLabel(inbound))).toBeInTheDocument();
+    // CartSummary now appends the stay dates to the hotel label with
+    // a ` · ` separator, so hotel.label appears as a prefix of a
+    // larger text node — substring match instead of exact.
+    expect(screen.getByText(hotel.label, { exact: false })).toBeInTheDocument();
     // 600 + 540 + 390 = 1530
     expect(screen.getByText('€1530')).toBeInTheDocument();
     expect(

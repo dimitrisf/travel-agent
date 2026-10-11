@@ -14,7 +14,11 @@ const outbound: SelectedFlight = {
   children: 1,
   priceEUR: 200,
   totalEUR: 600,
-  label: 'Aegean A3 824 · ATH → BER',
+  airline: 'Aegean',
+  flight_number: 'A3 824',
+  origin_iata: 'ATH',
+  destination_iata: 'BER',
+  departure: '2026-09-05T09:40:00Z',
 };
 
 const inbound: SelectedFlight = {
@@ -24,7 +28,11 @@ const inbound: SelectedFlight = {
   children: 1,
   priceEUR: 180,
   totalEUR: 540,
-  label: 'Aegean A3 825 · BER → ATH',
+  airline: 'Aegean',
+  flight_number: 'A3 825',
+  origin_iata: 'BER',
+  destination_iata: 'ATH',
+  departure: '2026-09-10T18:00:00Z',
 };
 
 const hotel: SelectedHotel = {

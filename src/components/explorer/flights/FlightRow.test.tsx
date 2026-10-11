@@ -140,7 +140,7 @@ describe('FlightRow', () => {
     const now = screen.getByRole('button', { name: /Remove .* from booking/i });
     expect(now).toHaveAttribute('aria-pressed', 'true');
     expect(now).toHaveTextContent(/Selected/);
-    const raw = sessionStorage.getItem('explorer:selection:v2');
+    const raw = sessionStorage.getItem('explorer:selection:v3');
     expect(raw).not.toBeNull();
     const parsed = JSON.parse(raw as string);
     expect(parsed.outboundFlight).toMatchObject({
@@ -160,7 +160,7 @@ describe('FlightRow', () => {
     // fight React commit ordering) — proves the inbound click
     // doesn't wipe it.
     sessionStorage.setItem(
-      'explorer:selection:v2',
+      'explorer:selection:v3',
       JSON.stringify({
         outboundFlight: {
           flight_instance_id: 999,
@@ -169,7 +169,11 @@ describe('FlightRow', () => {
           children: 0,
           priceEUR: 100,
           totalEUR: 100,
-          label: 'outbound placeholder',
+          airline: 'Placeholder',
+          flight_number: 'PL 1',
+          origin_iata: 'ATH',
+          destination_iata: 'BER',
+          departure: '2026-09-05T09:40:00Z',
         },
         inboundFlight: null,
         hotel: null,
@@ -178,7 +182,7 @@ describe('FlightRow', () => {
     renderRow({ leg: 'inbound' });
     await user.click(screen.getByRole('button', { name: /Add .* to booking/i }));
     const parsed = JSON.parse(
-      sessionStorage.getItem('explorer:selection:v2') as string,
+      sessionStorage.getItem('explorer:selection:v3') as string,
     );
     expect(parsed.outboundFlight?.flight_instance_id).toBe(999);
     expect(parsed.inboundFlight?.flight_instance_id).toBe(100);

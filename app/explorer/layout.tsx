@@ -2,7 +2,7 @@ import type { ReactNode } from 'react';
 import Box from '@mui/material/Box';
 import Stack from '@mui/material/Stack';
 import { ExplorerRail } from '@/components/explorer/ExplorerRail';
-import { SelectionBar } from '@/components/explorer/SelectionBar';
+import { SelectionBar } from '@/components/explorer/selection/SelectionBar';
 import { SelectionProvider } from '@/context/SelectionContext';
 
 // Nested layout for /explorer routes. Root layout already provides the

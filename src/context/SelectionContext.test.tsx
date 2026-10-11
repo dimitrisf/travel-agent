@@ -22,7 +22,11 @@ const outboundA = (): SelectedFlight => ({
   children: 0,
   priceEUR: 200,
   totalEUR: 400,
-  label: 'Aegean A3 824 · ATH → BER',
+  airline: 'Aegean',
+  flight_number: 'A3 824',
+  origin_iata: 'ATH',
+  destination_iata: 'BER',
+  departure: '2026-09-05T09:40:00Z',
 });
 const outboundB = (): SelectedFlight => ({
   flight_instance_id: 202,
@@ -31,7 +35,11 @@ const outboundB = (): SelectedFlight => ({
   children: 0,
   priceEUR: 900,
   totalEUR: 900,
-  label: 'Lufthansa LH 1753 · ATH → BER',
+  airline: 'Lufthansa',
+  flight_number: 'LH 1753',
+  origin_iata: 'ATH',
+  destination_iata: 'BER',
+  departure: '2026-09-05T14:20:00Z',
 });
 const inboundA = (): SelectedFlight => ({
   flight_instance_id: 303,
@@ -40,7 +48,11 @@ const inboundA = (): SelectedFlight => ({
   children: 0,
   priceEUR: 180,
   totalEUR: 360,
-  label: 'Aegean A3 825 · BER → ATH',
+  airline: 'Aegean',
+  flight_number: 'A3 825',
+  origin_iata: 'BER',
+  destination_iata: 'ATH',
+  departure: '2026-09-10T18:00:00Z',
 });
 const hotelA = (): SelectedHotel => ({
   room_type_id: 55,
@@ -181,11 +193,11 @@ describe('SelectionContext', () => {
     expect(screen.getByTestId('hotel')).toHaveTextContent('none');
   });
 
-  it('persists selection to sessionStorage under the v2 key', async () => {
+  it('persists selection to sessionStorage under the v3 key', async () => {
     const user = userEvent.setup();
     renderWithProvider();
     await user.click(screen.getByText('toggleOutboundA'));
-    const raw = sessionStorage.getItem('explorer:selection:v2');
+    const raw = sessionStorage.getItem('explorer:selection:v3');
     expect(raw).not.toBeNull();
     const parsed = JSON.parse(raw as string);
     expect(parsed.outboundFlight.flight_instance_id).toBe(101);
@@ -195,7 +207,7 @@ describe('SelectionContext', () => {
 
   it('rehydrates a previously-persisted selection on mount', () => {
     sessionStorage.setItem(
-      'explorer:selection:v2',
+      'explorer:selection:v3',
       JSON.stringify({
         outboundFlight: outboundA(),
         inboundFlight: inboundA(),
