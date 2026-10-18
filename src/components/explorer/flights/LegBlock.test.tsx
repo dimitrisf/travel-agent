@@ -5,6 +5,7 @@ import { render, screen, cleanup } from '@testing-library/react';
 
 import { LegBlock } from './LegBlock';
 import type { FlightResult } from '@/lib/services/FlightService';
+import { formatDate } from '@/utils/format';
 
 // Stub the row + header so this test focuses on LegBlock's own
 // contract: header overline (title · date · count), and rendering
@@ -54,8 +55,13 @@ describe('LegBlock', () => {
         onSort={vi.fn()}
       />,
     );
-    // Date comes from the first flight's departure (slice 0-10).
-    expect(screen.getByText('Outbound · 2026-09-15 · 2')).toBeInTheDocument();
+    // Date is formatted via useFormatDate (default 'en-GB' locale
+    // when no SettingsProvider is wrapping) — derive expected string
+    // from the same formatter so the test stays locale-agnostic.
+    const expectedDate = formatDate('2026-09-15', 'en-GB');
+    expect(
+      screen.getByText(`Outbound · ${expectedDate} · 2`),
+    ).toBeInTheDocument();
   });
 
   it('renders one FlightRow per flight', () => {

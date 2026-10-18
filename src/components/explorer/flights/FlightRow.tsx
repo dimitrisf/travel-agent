@@ -16,7 +16,7 @@ import {
 import { FLIGHT_ROW_GRID } from '@/lib/explorer/flights/sort';
 import type { CabinClass } from '@/lib/pricing';
 import type { FlightResult } from '@/lib/services/FlightService';
-import { formatFlightLabel } from '@/utils/booking';
+import { useFormatFlightLabel } from '@/context/SettingsContext';
 
 // One row in a leg's flight table. Columns are aligned to the shared
 // FLIGHT_ROW_GRID so the sortable headers above line up. The trailing
@@ -60,6 +60,7 @@ export function FlightRow({
   // selection represents the current state of the user's flight selections.
   // payload represents the flight selection that would be applied if the user toggles this row.
   const selection = useSelection();
+  const formatFlightLabel = useFormatFlightLabel();
   // Raw fields only — the display string is composed by
   // formatFlightLabel at render time so date-format changes land
   // without requiring a clear-and-reselect.

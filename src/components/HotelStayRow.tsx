@@ -3,7 +3,8 @@
 import Box from '@mui/material/Box';
 import Typography from '@mui/material/Typography';
 import type { BookingLike } from '@/types/booking';
-import { formatDate, formatEUR } from '@/utils/format';
+import { formatEUR } from '@/utils/format';
+import { useFormatDate } from '@/context/SettingsContext';
 
 // A single hotel stay row inside a BookingCard.
 // each stay is a hotel + room type + checkin/checkout + nights + guests + rooms + price, so we can render it in a single row.
@@ -14,6 +15,7 @@ export function HotelStayRow({
 }) {
   const rt = stay.roomType;
   const hotel = rt.hotel;
+  const formatDate = useFormatDate();
   return (
     <Box>
       <Typography variant="body2">

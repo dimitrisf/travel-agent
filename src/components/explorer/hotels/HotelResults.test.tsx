@@ -65,7 +65,11 @@ describe('HotelResults', () => {
       make({ hotel_id: 3, room_type_id: 3, hotel: 'C' }),
     ];
     render(<HotelResults stay={STAY} data={data} />);
-    expect(screen.getByText('3 hotels · 3 rooms')).toBeInTheDocument();
+    // Overline now carries the stay dates as a prefix, so match the
+    // hotels/rooms count as a substring rather than an exact string.
+    expect(
+      screen.getByText('3 hotels · 3 rooms', { exact: false }),
+    ).toBeInTheDocument();
     expect(screen.getAllByTestId('hotel-card')).toHaveLength(3);
   });
 
@@ -79,7 +83,9 @@ describe('HotelResults', () => {
       make({ hotel_id: 2, room_type_id: 4, hotel: 'B', room_type: 'Std Twin' }),
     ];
     render(<HotelResults stay={STAY} data={data} />);
-    expect(screen.getByText('2 hotels · 4 rooms')).toBeInTheDocument();
+    expect(
+      screen.getByText('2 hotels · 4 rooms', { exact: false }),
+    ).toBeInTheDocument();
     const cards = screen.getAllByTestId('hotel-card');
     expect(cards).toHaveLength(2);
     // Each card received 2 rooms (the stub reflects rooms.length).
@@ -103,6 +109,8 @@ describe('HotelResults', () => {
 
   it('uses singular "hotel" and "room" when there is exactly one of each', () => {
     render(<HotelResults stay={STAY} data={[make()]} />);
-    expect(screen.getByText('1 hotel · 1 room')).toBeInTheDocument();
+    expect(
+      screen.getByText('1 hotel · 1 room', { exact: false }),
+    ).toBeInTheDocument();
   });
 });

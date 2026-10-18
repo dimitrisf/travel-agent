@@ -14,6 +14,7 @@ import MenuItem from '@mui/material/MenuItem';
 import Box from '@mui/material/Box';
 import CircularProgress from '@mui/material/CircularProgress';
 import Stack from '@mui/material/Stack';
+import Tooltip from '@mui/material/Tooltip';
 import AddIcon from '@mui/icons-material/Add';
 import ChatIcon from '@mui/icons-material/Chat';
 import ExploreIcon from '@mui/icons-material/Explore';
@@ -27,6 +28,7 @@ import {
 } from '@/lib/auth/client';
 import { useShareState } from '@/context/ShareContext';
 import { ShareModal } from '@/components/ShareModal';
+import { SettingsMenu } from '@/components/SettingsMenu';
 
 // Header for both the / and /c/[id] surfaces. Signed-out: title + sign-in
 // button. Signed-in: title, "+ New chat", "Conversations" dropdown (10
@@ -81,17 +83,33 @@ export function Header() {
           Travel Assistant
         </Typography>
 
-        <Button
-          component={Link}
-          href={explorerHref}
-          size="small"
-          startIcon={inExplorer ? <ChatIcon /> : <ExploreIcon />}
-          variant="text"
-          color="inherit"
-          sx={{ mr: 1 }}
+        <SettingsMenu />
+
+        {/* Discoverability affordance for first-time users — the
+            toggle button is opaque without context. Tooltip text
+            follows the same context-aware switch as the button
+            label itself. MUI's default enter delay (100ms) is kept
+            so hover intent is required, not a momentary pointer
+            pass. */}
+        <Tooltip
+          title={
+            inExplorer
+              ? 'Chat with the travel assistant'
+              : 'Browse the API-powered travel data'
+          }
         >
-          {inExplorer ? 'Assistant' : 'Explorer'}
-        </Button>
+          <Button
+            component={Link}
+            href={explorerHref}
+            size="small"
+            startIcon={inExplorer ? <ChatIcon /> : <ExploreIcon />}
+            variant="text"
+            color="inherit"
+            sx={{ mr: 1 }}
+          >
+            {inExplorer ? 'Assistant' : 'Explorer'}
+          </Button>
+        </Tooltip>
 
         {user ? <SignedInControls /> : <SignedOutControls />}
       </Toolbar>

@@ -159,8 +159,8 @@ describe('BookingPanel', () => {
     seedSelection({ outboundFlight: outbound, inboundFlight: inbound, hotel });
     renderPanel();
     // findByText waits for the hydrate effect.
-    expect(await screen.findByText(formatFlightLabel(outbound))).toBeInTheDocument();
-    expect(screen.getByText(formatFlightLabel(inbound))).toBeInTheDocument();
+    expect(await screen.findByText(formatFlightLabel(outbound, 'en-GB'))).toBeInTheDocument();
+    expect(screen.getByText(formatFlightLabel(inbound, 'en-GB'))).toBeInTheDocument();
     // CartSummary now appends the stay dates to the hotel label with
     // a ` · ` separator, so hotel.label appears as a prefix of a
     // larger text node — substring match instead of exact.

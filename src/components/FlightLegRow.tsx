@@ -3,7 +3,8 @@
 import Box from '@mui/material/Box';
 import Typography from '@mui/material/Typography';
 import type { BookingLike } from '@/types/booking';
-import { formatDT, formatEUR } from '@/utils/format';
+import { formatEUR } from '@/utils/format';
+import { useFormatDT } from '@/context/SettingsContext';
 
 // A single flight leg row inside a BookingCard.
 // each leg is a flight instance + cabin class + seats + price, so we can render it in a single row.
@@ -18,6 +19,7 @@ export function FlightLegRow({
   // We use the flight definition to get the airline, flight number, origin and destination airports, and the flight instance to get the departure and arrival datetimes. We also display the cabin class, number of seats, and total price in EUR.
   const fi = leg.flightInstance;
   const fd = fi.flightDefinition;
+  const formatDT = useFormatDT();
   return (
     <Box>
       <Typography variant="body2">

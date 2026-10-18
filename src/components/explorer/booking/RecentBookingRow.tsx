@@ -12,11 +12,8 @@ import ExpandMoreIcon from '@mui/icons-material/ExpandMore';
 import ExpandLessIcon from '@mui/icons-material/ExpandLess';
 import { BookingCard } from '@/components/BookingCard';
 import type { BookingLike } from '@/types/booking';
-import {
-  computeBookingDateRange,
-  formatBookingDateRange,
-  statusChipColor,
-} from '@/utils/booking';
+import { computeBookingDateRange, statusChipColor } from '@/utils/booking';
+import { useFormatBookingDateRange } from '@/context/SettingsContext';
 import { formatEUR } from '@/utils/format';
 
 // One row in the ledger: compact summary on top, expandable to a full
@@ -25,6 +22,7 @@ import { formatEUR } from '@/utils/format';
 // this page). Per-row expand state so each row toggles independently.
 export function RecentBookingRow({ booking }: { booking: BookingLike }) {
   const [expanded, setExpanded] = useState(false);
+  const formatBookingDateRange = useFormatBookingDateRange();
 
   const dateRange = computeBookingDateRange(booking);
 

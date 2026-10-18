@@ -1,7 +1,12 @@
+'use client';
+
 import Stack from '@mui/material/Stack';
 import Typography from '@mui/material/Typography';
 import type { Cart } from '@/types/booking';
-import { formatFlightLabel, formatHotelLabel } from '@/utils/booking';
+import {
+  useFormatFlightLabel,
+  useFormatHotelLabel,
+} from '@/context/SettingsContext';
 
 // Compact review of what's about to be proposed. Uses the labels the
 // row-click captured so the display is consistent with what the user
@@ -11,6 +16,8 @@ import { formatFlightLabel, formatHotelLabel } from '@/utils/booking';
 // component stays purely presentational.
 
 export function CartSummary({ cart }: { cart: Cart }) {
+  const formatFlightLabel = useFormatFlightLabel();
+  const formatHotelLabel = useFormatHotelLabel();
   const rows: Array<[string, string, number]> = [];
 
   if (cart.outboundFlight) {

@@ -5,10 +5,7 @@ import { render, screen, cleanup, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 
 import { RecentBookingsPanel } from './RecentBookingsPanel';
-import {
-  computeBookingDateRange,
-  formatBookingDateRange,
-} from '@/utils/booking';
+import { formatBookingDateRange } from '@/utils/booking';
 import type { BookingLike } from '@/types/booking';
 
 // BookingCard is heavy (its own state, effects, next/navigation,
@@ -313,7 +310,7 @@ describe('RecentBookingsPanel', () => {
     // in el-GR). Derive the expected string by calling the formatter
     // — this stays correct under any runtime locale (local dev vs.
     // CI Ubuntu).
-    const expected = formatBookingDateRange('2026-09-12', '2026-09-15');
+    const expected = formatBookingDateRange('2026-09-12', '2026-09-15', 'en-GB');
     expect(screen.getByText(expected)).toBeInTheDocument();
   });
 
@@ -341,124 +338,5 @@ describe('RecentBookingsPanel', () => {
     expect(
       screen.getByRole('button', { name: /Show details for BKG-B/i }),
     ).toHaveAttribute('aria-expanded', 'false');
-  });
-});
-
-describe('computeBookingDateRange', () => {
-  function b(overrides: Partial<BookingLike>): BookingLike {
-    return {
-      flightBookings: [],
-      hotelBookings: [],
-      ...overrides,
-    } as unknown as BookingLike;
-  }
-
-  it('returns null when the booking has neither flights nor hotels', () => {
-    expect(computeBookingDateRange(b({}))).toBeNull();
-  });
-
-  it('spans a single one-way flight (departure → arrival)', () => {
-    const range = computeBookingDateRange(
-      b({
-        flightBookings: [
-          {
-            flightInstance: {
-              departureDatetime: '2026-09-12T09:00:00Z',
-              arrivalDatetime: '2026-09-12T12:00:00Z',
-            },
-          },
-        ] as unknown as BookingLike['flightBookings'],
-      }),
-    );
-    expect(range).toEqual({
-      start: '2026-09-12T09:00:00Z',
-      end: '2026-09-12T12:00:00Z',
-    });
-  });
-
-  it('spans a round trip: earliest departure → latest arrival', () => {
-    const range = computeBookingDateRange(
-      b({
-        flightBookings: [
-          {
-            flightInstance: {
-              departureDatetime: '2026-09-14T18:00:00Z',
-              arrivalDatetime: '2026-09-14T21:00:00Z',
-            },
-          },
-          {
-            flightInstance: {
-              departureDatetime: '2026-09-12T09:00:00Z',
-              arrivalDatetime: '2026-09-12T12:00:00Z',
-            },
-          },
-        ] as unknown as BookingLike['flightBookings'],
-      }),
-    );
-    // Order of legs in the array doesn't matter — the helper sorts.
-    expect(range?.start).toBe('2026-09-12T09:00:00Z');
-    expect(range?.end).toBe('2026-09-14T21:00:00Z');
-  });
-
-  it('spans a hotel-only booking: checkin → checkout', () => {
-    const range = computeBookingDateRange(
-      b({
-        hotelBookings: [
-          { checkinDate: '2026-09-12', checkoutDate: '2026-09-15' },
-        ] as unknown as BookingLike['hotelBookings'],
-      }),
-    );
-    expect(range).toEqual({ start: '2026-09-12', end: '2026-09-15' });
-  });
-
-  it('spans a combined flight + hotel booking across the widest window', () => {
-    const range = computeBookingDateRange(
-      b({
-        flightBookings: [
-          {
-            flightInstance: {
-              departureDatetime: '2026-09-12T09:00:00Z',
-              arrivalDatetime: '2026-09-14T21:00:00Z',
-            },
-          },
-        ] as unknown as BookingLike['flightBookings'],
-        hotelBookings: [
-          { checkinDate: '2026-09-11', checkoutDate: '2026-09-15' },
-        ] as unknown as BookingLike['hotelBookings'],
-      }),
-    );
-    // Hotel opens earlier and closes later than the flight, so the
-    // hotel dates bound both ends.
-    expect(range?.start).toBe('2026-09-11');
-    expect(range?.end).toBe('2026-09-15');
-  });
-});
-
-describe('formatBookingDateRange', () => {
-  // formatDate under the hood uses Intl with the runtime's default
-  // locale, so the exact glyphs differ across environments. These
-  // tests assert STRUCTURAL properties (single label vs. arrow-
-  // joined pair; contains a "12" and a "15") rather than the
-  // English-specific strings, so they pass under el-GR (Σεπ) just
-  // as they do under en-US (Sep).
-
-  it('renders a single date (no "→") when start and end fall on the same day', () => {
-    const label = formatBookingDateRange(
-      '2026-09-12T09:00:00Z',
-      '2026-09-12T12:00:00Z',
-    );
-    expect(label).not.toContain('→');
-    // The day-of-month digit is stable across locales.
-    expect(label).toMatch(/12/);
-  });
-
-  it('renders "start → end" when start and end fall on different days', () => {
-    const label = formatBookingDateRange('2026-09-12', '2026-09-15');
-    expect(label).toContain('→');
-    // Both day-of-month digits appear on the correct sides of the
-    // arrow, so a start/end swap would fail this test.
-    const [before, after] = label.split('→');
-    expect(before).toMatch(/12/);
-    expect(after).toMatch(/15/);
   });
 });

@@ -107,8 +107,8 @@ describe('SelectionBar', () => {
   it('summarises an outbound-only cart with its per-line price and total', async () => {
     seedSelection({ outboundFlight: outbound });
     renderBar();
-    expect(await screen.findByText(formatFlightLabel(outbound))).toBeInTheDocument();
-    expect(screen.queryByText(formatFlightLabel(inbound))).toBeNull();
+    expect(await screen.findByText(formatFlightLabel(outbound, 'en-GB'))).toBeInTheDocument();
+    expect(screen.queryByText(formatFlightLabel(inbound, 'en-GB'))).toBeNull();
     expect(screen.queryByText(hotel.label)).toBeNull();
     expect(screen.getByText(/Outbound:/)).toBeInTheDocument();
     // "400" appears twice: once as the per-line price, once as the
@@ -123,8 +123,8 @@ describe('SelectionBar', () => {
   it('summarises a round-trip cart (outbound + inbound), lists per-line prices, and sums totals', async () => {
     seedSelection({ outboundFlight: outbound, inboundFlight: inbound });
     renderBar();
-    expect(await screen.findByText(formatFlightLabel(outbound))).toBeInTheDocument();
-    expect(screen.getByText(formatFlightLabel(inbound))).toBeInTheDocument();
+    expect(await screen.findByText(formatFlightLabel(outbound, 'en-GB'))).toBeInTheDocument();
+    expect(screen.getByText(formatFlightLabel(inbound, 'en-GB'))).toBeInTheDocument();
     expect(screen.getByText(/Outbound:/)).toBeInTheDocument();
     expect(screen.getByText(/Return:/)).toBeInTheDocument();
     // Per-line prices appear next to each item. Match the number
@@ -146,8 +146,8 @@ describe('SelectionBar', () => {
       hotel,
     });
     renderBar();
-    expect(await screen.findByText(formatFlightLabel(outbound))).toBeInTheDocument();
-    expect(screen.getByText(formatFlightLabel(inbound))).toBeInTheDocument();
+    expect(await screen.findByText(formatFlightLabel(outbound, 'en-GB'))).toBeInTheDocument();
+    expect(screen.getByText(formatFlightLabel(inbound, 'en-GB'))).toBeInTheDocument();
     // Hotel label is now rendered as `${hotel.label} · <dates>` (one
     // text node), so match it as a substring rather than exact text.
     expect(screen.getByText(hotel.label, { exact: false })).toBeInTheDocument();
@@ -173,7 +173,11 @@ describe('SelectionBar', () => {
     // that node, which also makes the assertion locale-agnostic
     // (formatDate renders different glyphs under, say, a Greek system
     // locale).
-    const expected = formatBookingDateRange(hotel.checkin, hotel.checkout);
+    const expected = formatBookingDateRange(
+      hotel.checkin,
+      hotel.checkout,
+      'en-GB',
+    );
     expect(await screen.findByText(expected, { exact: false })).toBeInTheDocument();
   });
 
