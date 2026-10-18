@@ -1,6 +1,9 @@
+'use client';
+
 import Stack from '@mui/material/Stack';
 import Typography from '@mui/material/Typography';
 import { HotelCard } from './HotelCard';
+import { useFormatBookingDateRange } from '@/context/SettingsContext';
 import type { HotelResult } from '@/lib/services/HotelService';
 
 // Pretty view for a HotelResult[]. Groups the flat (hotel, room_type)
@@ -28,6 +31,8 @@ export type HotelResultsProps = {
 };
 
 export function HotelResults({ data, stay }: HotelResultsProps) {
+  const formatBookingDateRange = useFormatBookingDateRange();
+
   if (data.length === 0) {
     return (
       <Typography variant="body2" color="text.secondary">
@@ -67,10 +72,11 @@ export function HotelResults({ data, stay }: HotelResultsProps) {
     <Stack spacing={1.5}>
       <Typography
         variant="overline"
-        color="text.secondary"
-        sx={{ letterSpacing: '0.14em' }}
+        color="text.primary"
+        sx={{ letterSpacing: '0.14em', fontWeight: 700, fontSize: '0.875rem' }}
       >
-        {grouped.size} hotel{grouped.size === 1 ? '' : 's'} · {data.length} room
+        {formatBookingDateRange(stay.checkin, stay.checkout)} · {grouped.size}{' '}
+        hotel{grouped.size === 1 ? '' : 's'} · {data.length} room
         {data.length === 1 ? '' : 's'}
       </Typography>
 

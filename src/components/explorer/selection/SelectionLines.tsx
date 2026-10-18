@@ -1,7 +1,10 @@
 import FlightTakeoffIcon from '@mui/icons-material/FlightTakeoff';
 import FlightLandIcon from '@mui/icons-material/FlightLand';
 import HotelIcon from '@mui/icons-material/Hotel';
-import { formatFlightLabel, formatHotelLabel } from '@/utils/booking';
+import {
+  useFormatFlightLabel,
+  useFormatHotelLabel,
+} from '@/context/SettingsContext';
 import type { SelectedFlight, SelectedHotel } from '@/context/SelectionContext';
 import { SelectionLine } from './SelectionLine';
 
@@ -28,6 +31,8 @@ export function SelectionLines({
   inboundFlight,
   hotel,
 }: SelectionLinesProps) {
+  const formatFlightLabel = useFormatFlightLabel();
+  const formatHotelLabel = useFormatHotelLabel();
   return (
     <>
       {outboundFlight && (

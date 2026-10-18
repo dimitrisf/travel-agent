@@ -1,3 +1,5 @@
+'use client';
+
 import Stack from '@mui/material/Stack';
 import Typography from '@mui/material/Typography';
 import { FlightHeaderRow } from './FlightHeaderRow';
@@ -6,6 +8,7 @@ import type { FlightLeg } from '@/context/SelectionContext';
 import type { SortSpec } from '@/lib/explorer/flights/sort';
 import type { CabinClass } from '@/lib/pricing';
 import type { FlightResult } from '@/lib/services/FlightService';
+import { useFormatDate } from '@/context/SettingsContext';
 
 // One outbound or return leg: overline caption (title · date · count),
 // then the sortable header row, then the flight rows. `leg` is the
@@ -38,14 +41,16 @@ export function LegBlock({
   // All flights in a leg share the same departure date (query is
   // single-day), so surface it once in the header rather than repeating.
   const date = flights[0]?.departure.slice(0, 10);
+  const formatDate = useFormatDate();
+
   return (
     <Stack spacing={0.5}>
       <Typography
         variant="overline"
-        color="text.secondary"
-        sx={{ letterSpacing: '0.14em' }}
+        color="text.primary"
+        sx={{ letterSpacing: '0.14em', fontWeight: 700, fontSize: '0.875rem' }}
       >
-        {title} · {date} · {flights.length}
+        {title} · {date ? formatDate(date) : ''} · {flights.length}
       </Typography>
 
       <FlightHeaderRow sort={sort} onSort={onSort} />

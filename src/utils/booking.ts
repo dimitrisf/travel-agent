@@ -1,6 +1,6 @@
 import type { SelectedFlight, SelectedHotel } from '@/context/SelectionContext';
 import type { BookingLike, BookingStatus } from '@/types/booking';
-import { formatDate } from './format';
+import { formatDate, formatDateNoYear } from './format';
 
 // Booking tool names — used to switch rendering from generic accordion to a
 // rich BookingCard with Confirm / Cancel buttons.
@@ -83,15 +83,32 @@ export function computeBookingDateRange(
   return { start: starts[0], end: ends[ends.length - 1] };
 }
 
-// "Mon, 12 Sep" when start and end fall on the same day (one-way
-// same-day flight or single-night stay); "Mon, 12 Sep → Thu, 15 Sep"
-// otherwise. Reuses formatDate for consistency with the rest of the
-// app's date rendering (UTC-anchored so flight datetimes don't
-// drift by local offset).
-export function formatBookingDateRange(start: string, end: string): string {
-  const startLabel = formatDate(start);
-  const endLabel = formatDate(end);
-  return startLabel === endLabel ? startLabel : `${startLabel} → ${endLabel}`;
+// "Mon, 12 Oct 2026" when start and end fall on the same day (one-way
+// same-day flight or single-night stay); "Mon, 12 Oct → Wed, 14 Oct 2026"
+// when start and end share a year (year is dropped from the leading
+// date — the trailing date still anchors it); "Wed, 30 Dec 2026 → Sat,
+// 2 Jan 2027" when they straddle a year boundary. Reuses formatDate
+// for consistency with the rest of the app's date rendering (UTC-
+// anchored so flight datetimes don't drift by local offset).
+// start and end are ISO 8601 date strings, i.e., "YYYY-MM-DD".
+export function formatBookingDateRange(
+  start: string,
+  end: string,
+  locale?: string,
+): string {
+  const startLabel = formatDate(start, locale);
+  const endLabel = formatDate(end, locale);
+
+  if (startLabel === endLabel) return startLabel;
+
+  // Same-year span: drop the year from the start label. Compare the
+  // year directly off the ISO prefix (`YYYY-...`) rather than parsing
+  // Intl output.
+  if (start.slice(0, 4) === end.slice(0, 4)) {
+    return `${formatDateNoYear(start, locale)} → ${endLabel}`;
+  }
+
+  return `${startLabel} → ${endLabel}`;
 }
 
 // "1 night" / "3 nights" — small plural-aware helper so hotel labels
@@ -107,10 +124,10 @@ export function formatNights(n: number): string {
 // stays pure data. Date segment uses formatDate for consistency with
 // the hotel label; the time segment is sliced from the ISO datetime so
 // a locale change doesn't shift the departure clock.
-export function formatFlightLabel(f: SelectedFlight): string {
+export function formatFlightLabel(f: SelectedFlight, locale?: string): string {
   const date = f.departure.slice(0, 10);
   const depTime = f.departure.slice(11, 16);
-  return `${f.airline} ${f.flight_number} · ${f.origin_iata} → ${f.destination_iata} · ${formatDate(date)} ${depTime}`;
+  return `${f.airline} ${f.flight_number} · ${f.origin_iata} → ${f.destination_iata} · ${formatDate(date, locale)} ${depTime}`;
 }
 
 // Composes a hotel's display label — base label (hotel name · room
@@ -119,6 +136,6 @@ export function formatFlightLabel(f: SelectedFlight): string {
 // helper per cart row type instead of hand-rolling the hotel template
 // at each site. The date segment and night count are composed from
 // raw fields, so format changes propagate to existing cart entries.
-export function formatHotelLabel(h: SelectedHotel): string {
-  return `${h.label} · ${formatBookingDateRange(h.checkin, h.checkout)} (${formatNights(h.nights)})`;
+export function formatHotelLabel(h: SelectedHotel, locale?: string): string {
+  return `${h.label} · ${formatBookingDateRange(h.checkin, h.checkout, locale)} (${formatNights(h.nights)})`;
 }
