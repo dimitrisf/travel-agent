@@ -10,6 +10,7 @@ import {
   type SelectedFlight,
   type SelectedHotel,
 } from '@/context/SelectionContext';
+import { SettingsProvider } from '@/context/SettingsContext';
 import { formatBookingDateRange, formatFlightLabel } from '@/utils/booking';
 
 // usePathname is what SelectionBar consults to decide whether to
@@ -81,10 +82,16 @@ function seedSelection(seed: {
 }
 
 function renderBar() {
+  // Pin the SettingsProvider to 'eu' so useDateLocale returns the
+  // same 'en-GB' the test's expected strings use. Without this,
+  // the default ('auto') resolves to the test environment's system
+  // locale, which drifts between dev and CI.
   return render(
-    <SelectionProvider>
-      <SelectionBar />
-    </SelectionProvider>,
+    <SettingsProvider initial={{ dateFormat: 'eu' }}>
+      <SelectionProvider>
+        <SelectionBar />
+      </SelectionProvider>
+    </SettingsProvider>,
   );
 }
 

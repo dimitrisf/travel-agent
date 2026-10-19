@@ -107,6 +107,12 @@ export function SettingsMenu() {
                 fullWidth
                 aria-label="Date format"
               >
+                <ToggleButton
+                  value="auto"
+                  aria-label="Automatic date format from system locale"
+                >
+                  Auto
+                </ToggleButton>
                 <ToggleButton value="eu" aria-label="European date format">
                   EU
                 </ToggleButton>

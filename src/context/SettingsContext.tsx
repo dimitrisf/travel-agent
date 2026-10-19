@@ -24,7 +24,7 @@ import { formatDate, formatDT } from '@/utils/format';
 // deliberately deferred to a follow-up PR (requires a user-table
 // migration + API endpoint).
 
-export type DateFormat = 'us' | 'eu';
+export type DateFormat = 'auto' | 'us' | 'eu';
 export type ThemeMode = 'light' | 'dark';
 
 type SettingsState = {
@@ -37,10 +37,14 @@ type SettingsContextValue = SettingsState & {
   setThemeMode: (mode: ThemeMode) => void;
 };
 
-// EU as the default matches the day-before-month ordering most
-// non-US system locales already produce — makes the first paint
-// before localStorage hydration a no-op for most visitors.
-const DEFAULTS: SettingsState = { dateFormat: 'eu', themeMode: 'light' };
+// 'auto' as the default means rendered dates follow the user's OS
+// locale (toLocaleDateString with undefined locale) — matches what
+// native <input type="date"> pickers do and what most other sites
+// show, so first-time visitors never need to find the toggle. The
+// explicit 'us' / 'eu' overrides exist for the ~5-10% cases where
+// the user's OS locale doesn't match their preference (expats,
+// shared devices, deliberate choice).
+const DEFAULTS: SettingsState = { dateFormat: 'auto', themeMode: 'light' };
 
 // Bumped alongside any breaking change to the stored shape, so an
 // old-shape entry doesn't rehydrate as a type mismatch.
@@ -56,8 +60,21 @@ const SettingsContext = createContext<SettingsContextValue>({
   setThemeMode: () => {},
 });
 
-export function SettingsProvider({ children }: { children: ReactNode }) {
-  const [state, setState] = useState<SettingsState>(DEFAULTS);
+export function SettingsProvider({
+  children,
+  initial,
+}: {
+  children: ReactNode;
+  // Test-only convenience: pin the initial state so tests can get
+  // deterministic locale rendering without seeding localStorage.
+  // Production never passes this — the hydrate effect handles the
+  // real user preferences.
+  initial?: Partial<SettingsState>;
+}) {
+  const [state, setState] = useState<SettingsState>({
+    ...DEFAULTS,
+    ...initial,
+  });
   // Hydration guard: the first client render matches the server
   // (defaults), then the effect reads localStorage and triggers a
   // second render with the stored preferences. Persisting during
@@ -66,8 +83,15 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
   const [hydrated, setHydrated] = useState(false);
 
   // Effect to read stored settings from localStorage on mount and
-  // mark the context as hydrated afterward.
+  // mark the context as hydrated afterward. Skipped when `initial`
+  // was provided — the caller (typically a test) is pinning state
+  // explicitly and shouldn't have it clobbered by whatever happens
+  // to be in localStorage.
   useEffect(() => {
+    if (initial !== undefined) {
+      setHydrated(true);
+      return;
+    }
     try {
       const raw = localStorage.getItem(STORAGE_KEY);
       if (raw) {
@@ -82,6 +106,9 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
       // through to defaults, no reason to log.
     }
     setHydrated(true);
+    // `initial` is a mount-time concern; capturing it in deps would
+    // just make the effect never re-run anyway (we have []).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // Effect to persist settings to localStorage whenever they change,
@@ -129,10 +156,15 @@ export function useSettings(): SettingsContextValue {
 }
 
 // Intl locale string for the current date-format setting. Isolated
-// so callers don't repeat the `us → en-US`/`eu → en-GB` mapping.
-export function useDateLocale(): string {
+// so callers don't repeat the mapping. 'auto' resolves to undefined
+// so toLocaleDateString falls back to the user's OS/browser locale —
+// matches what native <input type="date"> pickers display and what
+// most other sites show.
+export function useDateLocale(): string | undefined {
   const { dateFormat } = useSettings();
-  return dateFormat === 'us' ? 'en-US' : 'en-GB';
+  if (dateFormat === 'us') return 'en-US';
+  if (dateFormat === 'eu') return 'en-GB';
+  return undefined;
 }
 
 // Date-formatter hooks: each wraps the corresponding pure helper in
