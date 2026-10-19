@@ -5,6 +5,7 @@ import { render, screen, cleanup } from '@testing-library/react';
 
 import { LegBlock } from './LegBlock';
 import type { FlightResult } from '@/lib/services/FlightService';
+import { SettingsProvider } from '@/context/SettingsContext';
 import { formatDate } from '@/utils/format';
 
 // Stub the row + header so this test focuses on LegBlock's own
@@ -43,21 +44,27 @@ describe('LegBlock', () => {
   });
 
   it('renders the overline with title, date, and count', () => {
+    // Pin SettingsProvider to 'eu' so useFormatDate renders in
+    // 'en-GB' — matches the expected string derived from
+    // `formatDate(..., 'en-GB')`. The production default is 'auto'
+    // (resolves to system locale), which would drift between dev + CI.
     render(
-      <LegBlock
-        title="Outbound"
-        flights={[make(), make({ flight_instance_id: 101, flight_number: '825' })]}
-        adults={1}
-        children={0}
-        cabinClass="economy"
-        leg="outbound"
-        sort={{ mode: 'price', direction: 'asc' }}
-        onSort={vi.fn()}
-      />,
+      <SettingsProvider initial={{ dateFormat: 'eu' }}>
+        <LegBlock
+          title="Outbound"
+          flights={[
+            make(),
+            make({ flight_instance_id: 101, flight_number: '825' }),
+          ]}
+          adults={1}
+          children={0}
+          cabinClass="economy"
+          leg="outbound"
+          sort={{ mode: 'price', direction: 'asc' }}
+          onSort={vi.fn()}
+        />
+      </SettingsProvider>,
     );
-    // Date is formatted via useFormatDate (default 'en-GB' locale
-    // when no SettingsProvider is wrapping) — derive expected string
-    // from the same formatter so the test stays locale-agnostic.
     const expectedDate = formatDate('2026-09-15', 'en-GB');
     expect(
       screen.getByText(`Outbound · ${expectedDate} · 2`),

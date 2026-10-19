@@ -10,6 +10,7 @@ import {
   type SelectedFlight,
   type SelectedHotel,
 } from '@/context/SelectionContext';
+import { SettingsProvider } from '@/context/SettingsContext';
 import type { BookingLike } from '@/types/booking';
 import { formatFlightLabel } from '@/utils/booking';
 
@@ -118,10 +119,14 @@ function seedSelection(seed: {
 }
 
 function renderPanel() {
+  // Pin SettingsProvider to 'eu' so the hook-driven locale matches
+  // the test's pure-helper expected strings (`formatFlightLabel(x, 'en-GB')`).
   return render(
-    <SelectionProvider>
-      <BookingPanel />
-    </SelectionProvider>,
+    <SettingsProvider initial={{ dateFormat: 'eu' }}>
+      <SelectionProvider>
+        <BookingPanel />
+      </SelectionProvider>
+    </SettingsProvider>,
   );
 }
 

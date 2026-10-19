@@ -5,8 +5,22 @@ import { render, screen, cleanup, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 
 import { RecentBookingsPanel } from './RecentBookingsPanel';
+import { SettingsProvider } from '@/context/SettingsContext';
 import { formatBookingDateRange } from '@/utils/booking';
 import type { BookingLike } from '@/types/booking';
+
+// Pin SettingsProvider to 'eu' so useFormatBookingDateRange renders in
+// 'en-GB' — matches the test's pure-helper expected strings. Without
+// wrapping, the hook falls back to the context default ('auto'), which
+// resolves to the test environment's system locale and drifts between
+// dev + CI.
+function renderPanel() {
+  return render(
+    <SettingsProvider initial={{ dateFormat: 'eu' }}>
+      <RecentBookingsPanel />
+    </SettingsProvider>,
+  );
+}
 
 // BookingCard is heavy (its own state, effects, next/navigation,
 // auth). This test focuses on RecentBookingsPanel's own behavior —
@@ -86,7 +100,7 @@ describe('RecentBookingsPanel', () => {
     const fetchMock = vi.fn();
     vi.stubGlobal('fetch', fetchMock);
 
-    render(<RecentBookingsPanel />);
+    renderPanel();
 
     expect(
       screen.getByText('Sign in to see your recent bookings.'),
@@ -99,7 +113,7 @@ describe('RecentBookingsPanel', () => {
     const fetchMock = vi.fn();
     vi.stubGlobal('fetch', fetchMock);
 
-    render(<RecentBookingsPanel />);
+    renderPanel();
 
     expect(
       screen.getByRole('button', { name: /Load recent bookings/i }),
@@ -122,7 +136,7 @@ describe('RecentBookingsPanel', () => {
     });
     vi.stubGlobal('fetch', fetchMock);
     const user = userEvent.setup();
-    render(<RecentBookingsPanel />);
+    renderPanel();
 
     await user.click(
       screen.getByRole('button', { name: /Load recent bookings/i }),
@@ -157,7 +171,7 @@ describe('RecentBookingsPanel', () => {
     const fetchMock = vi.fn();
     vi.stubGlobal('fetch', fetchMock);
 
-    render(<RecentBookingsPanel />);
+    renderPanel();
 
     // findByText waits for usePersistedState's hydrate effect.
     expect(await screen.findByText('BKG-CACHED')).toBeInTheDocument();
@@ -185,7 +199,7 @@ describe('RecentBookingsPanel', () => {
     });
     vi.stubGlobal('fetch', fetchMock);
     const user = userEvent.setup();
-    render(<RecentBookingsPanel />);
+    renderPanel();
 
     await screen.findByText('BKG-STALE');
     await user.click(screen.getByRole('button', { name: /Refresh/i }));
@@ -207,7 +221,7 @@ describe('RecentBookingsPanel', () => {
       }),
     );
     const user = userEvent.setup();
-    render(<RecentBookingsPanel />);
+    renderPanel();
 
     await user.click(
       screen.getByRole('button', { name: /Load recent bookings/i }),
@@ -227,7 +241,7 @@ describe('RecentBookingsPanel', () => {
       }),
     );
     const user = userEvent.setup();
-    render(<RecentBookingsPanel />);
+    renderPanel();
 
     await user.click(
       screen.getByRole('button', { name: /Load recent bookings/i }),
@@ -247,7 +261,7 @@ describe('RecentBookingsPanel', () => {
     // populated view — the Load button click is exercised elsewhere.
     seedCache([makeBooking({ id: 1, reference: 'BKG-EXPAND-ME' })]);
     const user = userEvent.setup();
-    render(<RecentBookingsPanel />);
+    renderPanel();
 
     // Wait for the row to render, then find its expand button.
     await screen.findByText('BKG-EXPAND-ME');
@@ -302,7 +316,7 @@ describe('RecentBookingsPanel', () => {
       }),
     ]);
 
-    render(<RecentBookingsPanel />);
+    renderPanel();
 
     await screen.findByText('BKG-WINDOW');
     // formatBookingDateRange returns locale-dependent glyphs (e.g.
@@ -321,7 +335,7 @@ describe('RecentBookingsPanel', () => {
       makeBooking({ id: 2, reference: 'BKG-B' }),
     ]);
     const user = userEvent.setup();
-    render(<RecentBookingsPanel />);
+    renderPanel();
 
     await screen.findByText('BKG-A');
     await user.click(
