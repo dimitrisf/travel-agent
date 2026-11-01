@@ -26,12 +26,12 @@ The current stack (active files) and the historical journey (files preserved in 
 
 | Layer | Files | Notes |
 |---|---|---|
-| **Frontend** | `app/page.tsx`, `app/layout.tsx`, `app/theme.ts`, `src/components/*`, `src/hooks/useAgentChat.ts` | React Client Component chat UI, MUI theming. Streams SSE events into the DOM. Rich `BookingCard` for booking tool outputs (Stage 8). |
-| **Explorer UI** | `app/explorer/*`, `src/components/explorer/*`, `src/lib/explorer/*` | Form-based parallel front-end over the same REST endpoints the agent calls — compare raw tool output against the agent's prose. Four sub-pages (weather, flights, hotels, booking) with a shared plumbing layer (`ResponsePanel`, `SubmitBar`, `usePersistedState`, `explorerFetch`). See the [Explorer UI section](#explorer-ui) below. |
-| **API Route Handlers** | `app/api/weather/*`, `app/api/flights/route.ts`, `app/api/hotels/route.ts`, `app/api/booking/*` (Stage 8), `app/api/agent/route.ts` | Replace the three Express `*-api.ts` servers. `/api/agent` streams the agent's turn as SSE. The `/api/booking/*` set is a booking state machine with idempotency and CAS on both inventory decrements and status transitions. |
+| **Frontend** | `app/page.tsx`, `app/layout.tsx`, `app/providers.tsx`, `src/theme.ts`, `src/components/*`, `src/context/*`, `src/hooks/useAgentChat.ts` | React Client Component chat UI, MUI theming. Streams SSE events into the DOM. Rich `BookingCard` for booking tool outputs (Stage 8). Four nested providers under `AppProviders` (SessionProvider → SettingsProvider → AppThemeProvider → ShareProvider); theme and date-format toggles live in a Header `SettingsMenu`. |
+| **Explorer UI** | `app/explorer/*`, `src/components/explorer/*`, `src/lib/explorer/*`, `src/context/SelectionContext.tsx` | Form-based parallel front-end over the same REST endpoints the agent calls — compare raw tool output against the agent's prose. Four sub-pages (weather, flights, hotels, booking) with a shared plumbing layer (`ResponsePanel`, `SubmitBar`, `usePersistedState`, `explorerFetch`), plus a cross-page cart (`SelectionContext` + `SelectionBar`) and a `/explorer/booking` terminus with a Recent Bookings panel. See the [Explorer UI section](#explorer-ui) below. |
+| **API Route Handlers** | `app/api/weather/*`, `app/api/flights/route.ts`, `app/api/hotels/route.ts`, `app/api/booking/*` (Stage 8), `app/api/bookings/route.ts`, `app/api/settings/route.ts`, `app/api/auth/*`, `app/api/conversations/*`, `app/api/agent/route.ts` | Replace the three Express `*-api.ts` servers. `/api/agent` streams the agent's turn as SSE. The `/api/booking/*` set is a booking state machine with idempotency and CAS on both inventory decrements and status transitions. `/api/bookings` lists the signed-in user's bookings; `/api/settings` persists per-user preferences; `/api/auth/*` is NextAuth's catch-all; `/api/conversations/*` is the anon→signed-in chat bridge. |
 | **MCP servers** | `app/api/mcp/travel/route.ts`, `app/api/mcp/weather/route.ts` | Route Handlers using `createMcpHttpHandler` (Stage 7 — Streamable HTTP). Tool specs live under `src/mcp/tools/{travel,weather}/` (restructure). |
 | **Agent graph** | `src/agents/build{Weather,Travel,Triage,Agent}Agent.ts`, `src/agents/buildAgentGraph.ts` | One file per agent's instructions + a wire-up (restructure). |
-| **Domain layer** | `src/lib/services/*`, `src/lib/repositories/*`, `src/lib/index.ts` | Services + typed errors + Prisma-backed repositories + barrel with factory helpers (post-Stage-8 subfolder split). Cross-cutting primitives at `src/lib/` root: `pricing.ts` (`CabinClass` + multipliers, shared by Flight and Booking so search-time and propose-time prices can't diverge — moved here from `services/` since it's not service-owned), `cities.ts` (single source of truth for the five demo cities and their IATA/country/coords), `amenities.ts` (canonical amenity names), `zodDates.ts` (`IsoDate`), plus `services/CodedServiceError.ts::internalErrorFactory` (shared `INTERNAL_ERROR` wrapper). |
+| **Domain layer** | `src/lib/services/*`, `src/lib/repositories/*`, `src/lib/index.ts` | Services + typed errors + Prisma-backed repositories + barrel with factory helpers (post-Stage-8 subfolder split). Current roster: `WeatherService`, `FlightService`, `HotelService`, `BookingService`, `SettingsService` (plus `ConversationService` for the chat bridge). Cross-cutting primitives at `src/lib/` root: `pricing.ts` (`CabinClass` + multipliers, shared by Flight and Booking so search-time and propose-time prices can't diverge — moved here from `services/` since it's not service-owned), `cities.ts` (single source of truth for the five demo cities and their IATA/country/coords), `amenities.ts` (canonical amenity names), `zodDates.ts` (`IsoDate`), plus `services/CodedServiceError.ts::internalErrorFactory` (shared `INTERNAL_ERROR` wrapper). Client-side booking helpers in `src/lib/booking/bookingActions.ts` (the single canonical POST wrapper for confirm/cancel). |
 | **Utils / config / types** | `src/utils/*` (`apiErrorResponse`, `parsers`, `dates`, `toolOutput`, `queries/`), `src/config/samplePrompts.ts`, `src/types/*` (`chat`, `booking`, `stream`, `weather`) | Stateless helpers, editable constants, shared types (restructure). Weather Row/Result types live under `src/types/weather.ts` (extracted during M1 so the Explorer client bundle doesn't drag in service or Prisma code). |
 | **Data** | `prisma/schema.prisma`, `prisma/seed.ts` | Booking, FlightBooking, HotelBooking, Payment + BookingStatus/PaymentStatus enums added in Stage 8. |
 | **Historical journey** | `legacy/index.ts` (Day 1), `legacy/weather.ts` (Day 3), `legacy/books.ts` (Day 5), `legacy/research.ts` (Day 6/7), `legacy/mcp-server.ts` (Day 7), `legacy/weather-agent.ts`, `legacy/travel-agent.ts` (CLI REPLs) | Preserved but not part of the running app. Run individually with `tsx legacy/<file>` if you want to revisit the lesson. |
@@ -3544,13 +3544,13 @@ Four sub-routes plus an index:
 |---|---|---|
 | `/explorer` | — | Index — one card per sub-route. |
 | `/explorer/weather` | `GET /api/weather/current`, `GET /api/weather/forecast` | Two panels (current + forecast), city-typed autocomplete, forecast day count 1–7. |
-| `/explorer/flights` | `GET /api/flights` | Origin/destination airports, dates, cabin class, adults/children steppers, direct-only toggle, price cap. Results split into outbound + return legs, each independently sortable. |
-| `/explorer/hotels` | `GET /api/hotels` | City, check-in/out, guests, rooms, min stars, per-night price cap, three amenity toggles. Results rendered as `HotelCard`s. |
-| `/explorer/booking` | (planned M4) | Load a booking by id or reference, render through the shared `BookingCard`. |
+| `/explorer/flights` | `GET /api/flights` | Origin/destination airports, dates, cabin class, adults/children steppers, direct-only toggle, price cap. Results split into outbound + return legs, each independently sortable. Per-row "Add" toggles push selections into the cart. |
+| `/explorer/hotels` | `GET /api/hotels` | City, check-in/out, guests, rooms, min stars, per-night price cap, three amenity toggles. Results rendered as `HotelCard`s, each with an "Add" toggle that pushes the stay into the cart. |
+| `/explorer/booking` | `POST /api/booking/propose`, `POST /api/booking/[id]/{confirm,cancel}`, `GET /api/bookings` | **Booking terminus.** Composes the current cart (outbound flight + optional return + optional hotel) into a propose/confirm/cancel flow, and renders a "Recent bookings" panel below with the signed-in user's history (explicit-load + sessionStorage-cached). |
 
 ### Folder layout
 
-Two roots — presentational components under `src/components/explorer/`, non-component helpers under `src/lib/explorer/`. The invariant is strict: `components/` holds only React components; `lib/` holds everything else (hooks, types, utility functions, comparators).
+Two roots — presentational components under `src/components/explorer/`, non-component helpers under `src/lib/explorer/`. The invariant is strict: `components/` holds only React components; `lib/` holds everything else (hooks, types, utility functions, comparators). Cross-page cart state lives in `src/context/SelectionContext.tsx`.
 
 ```
 src/components/explorer/
@@ -3560,39 +3560,54 @@ src/components/explorer/
 ├─ widgets/
 │  ├─ CitySelect.tsx, AirportSelect.tsx                   (freeSolo Autocomplete over CITIES SoT)
 │  ├─ NumberStepper.tsx, PriceSlider.tsx, StarsSelect.tsx
+├─ selection/                                             (cross-page cart surface)
+│  ├─ SelectionBar.tsx                                    (composition skeleton rendered by app/explorer/layout.tsx)
+│  ├─ SelectionLines.tsx, SelectionLine.tsx               (three conditional rows: outbound / return / hotel)
+│  ├─ SelectionTotal.tsx                                  (right-flush subtotal + total)
+│  └─ SelectionActions.tsx                                (Clear + Go-to-booking)
+├─ booking/                                               (/explorer/booking terminus)
+│  ├─ BookingPanel.tsx                                    (owns the propose → confirm/cancel flow + OAuth-return effect)
+│  ├─ CartSummary.tsx                                     (renders the composed cart via SelectionLines + total)
+│  ├─ RecentBookingsPanel.tsx + RecentBookingRow.tsx      (explicit-load, sessionStorage-cached)
 ├─ weather/
 │  ├─ CurrentWeatherPanel.tsx + CurrentWeatherResults.tsx
 │  └─ ForecastPanel.tsx + ForecastResults.tsx
 ├─ flights/
 │  ├─ FlightSearchForm.tsx                                (owns form state, emits { path, passengers })
 │  ├─ FlightResults.tsx → LegBlock.tsx → FlightHeaderRow.tsx → SortableHeader.tsx
-│  └─ FlightRow.tsx
+│  └─ FlightRow.tsx                                       (now with per-row "Add" toggle wired to SelectionContext)
 └─ hotels/
    ├─ HotelSearchForm.tsx                                 (owns form state, emits { path })
-   ├─ HotelResults.tsx → HotelCard.tsx
+   ├─ HotelResults.tsx → HotelCard.tsx                    (HotelCard also carries an "Add" toggle)
 
 src/lib/explorer/
 ├─ explorerTypes.ts                                       (ResponseState<T> discriminated union + guards + notLoading)
 ├─ explorerFetch.ts                                       (typed fetch wrapper — never throws)
 ├─ usePersistedState.ts                                   (sessionStorage-backed useState)
 ├─ buildCurl.ts                                           (curl generator for CurlButton)
+├─ buildProposePayload.ts                                 (SelectionContext → POST /api/booking/propose body)
 ├─ flights/
 │  ├─ sort.ts                                             (SortMode/SortSpec + compareFlights + toggleSort + FLIGHT_ROW_GRID)
 │  └─ buildQuery.ts                                       (buildFlightsQuery — form state → /api/flights?...)
 └─ hotels/
    └─ buildQuery.ts                                       (buildHotelsQuery — form state → /api/hotels?...)
 
+src/context/
+├─ SelectionContext.tsx                                   (cart: outboundFlight / inboundFlight / hotel + sessionStorage v3)
+└─ SettingsContext.tsx                                    (theme + date-format, localStorage + /api/settings dual-storage)
+
 app/explorer/
-├─ layout.tsx                                             (persistent rail + main content area)
+├─ layout.tsx                                             (persistent rail + main content area + SelectionBar footer)
 ├─ page.tsx                                               (index card grid)
 ├─ weather/page.tsx, flights/page.tsx, hotels/page.tsx    (thin shells — instantiate panels/forms + ResponsePanel)
+└─ booking/page.tsx                                       (BookingPanel + RecentBookingsPanel)
 ```
 
-Pages are deliberately thin: they own response state + (for flights) sort state, delegate form ownership to a self-contained `*SearchForm` component. Weather is split into two independent panels (each owns its own form state) since its two endpoints don't share inputs.
+Pages are deliberately thin: they own response state + (for flights) sort state, delegate form ownership to a self-contained `*SearchForm` component. Weather is split into two independent panels (each owns its own form state) since its two endpoints don't share inputs. The booking page owns no form at all — its inputs are whatever's currently in `SelectionContext`.
 
 ### State + persistence
 
-Every panel's inputs and last response survive Explorer↔Assistant navigation via `sessionStorage`, so a user can flip to the chat agent to compare, then flip back and find each panel exactly as they left it. Two moving parts.
+Every panel's inputs and last response survive Explorer↔Assistant navigation via `sessionStorage`, so a user can flip to the chat agent to compare, then flip back and find each panel exactly as they left it. On top of that, two cross-cutting contexts carry state across pages: `SelectionContext` (the cart) and `SettingsContext` (per-user preferences).
 
 **The `usePersistedState` hook** wraps `useState` with sessionStorage sync. Reads once on mount via `useEffect` — safe for SSR since the effect never runs server-side and `sessionStorage` (a browser API) is never touched during SSR. Persists via a wrapped setter (the returned `setValue`), *not* via a separate effect watching the value. The effect-watching pattern creates a race on mount: the persist effect fires with the stale `initial` value in its render-1 closure and overwrites what the hydrate effect just read. Wrapping the setter keeps flow strictly one-way — caller → state + storage, storage → state via hydrate, storage never touched from the hydrate path.
 
@@ -3601,6 +3616,10 @@ An optional `filter` argument skips persisting transient values. The panels pass
 **The Header's Explorer↔Assistant toggle** remembers the last visited `/explorer/*` sub-page in `sessionStorage['explorer:lastPath']`. Going Assistant → Explorer routes back to that sub-page instead of the `/explorer` index. Fresh tab → clean slate → the toggle defaults to `/explorer`.
 
 Every field in the search forms gets its own storage key (`explorer:flights:origin`, `explorer:hotels:checkin`, etc.). Response state uses `explorer:<page>:state`. The last-searched passenger count on flights is `explorer:flights:lastPassengers` — sticky so displayed per-leg totals reflect the search that actually ran, not whatever the pax steppers happen to show now.
+
+**`SelectionContext` — the cross-page cart.** Three slots: one outbound flight, one optional return flight, one optional hotel (the Slice-2 constraint is "at most one of each"; multi-city is tracked as a future PR). Setters are toggles — clicking the Add button on the currently-selected row deselects it. Persisted to `sessionStorage['explorer:selection:v3']` so a user can flip to Assistant mid-flow and return to the booking page with their cart intact; the `v3` key suffix is the shape version — v1/v2 shapes from earlier slices are silently discarded instead of crashing the hydrate effect. Cart state deliberately survives sign-out (preferences aren't credentials; forcing a reset on sign-out would be jarring) — rationale captured in Appendix D at the bottom of `SelectionContext.tsx`.
+
+**`SettingsContext` — per-user preferences.** Theme mode (`light` / `dark`) and date format (`auto` / `us` / `eu`), surfaced in the Header's `SettingsMenu`. Dual-storage: `localStorage['app:settings:v1']` always, and (when signed in) the User row via `GET` / `PATCH /api/settings`. The hydrate effect runs an auth-aware three-population policy — anon reads localStorage; signed-in with server-saved prefs → server wins (write-through to localStorage); signed-in with empty server + populated localStorage → promote local to server (one-time first-sign-in migration). Setters do a fire-and-forget `PATCH` on each change when signed in. The hydrate flow uses an `AbortController` so a mid-flight GET can't clobber state after the user signs out. A family of hooks (`useFormatDate`, `useFormatDT`, `useFormatBookingDateRange`, `useFormatFlightLabel`, `useFormatHotelLabel`) threads the current date-format locale through the pure formatters in `src/utils/{format,booking}.ts`. See the [User preferences](#user-preferences) section below for the full policy table.
 
 ### Building queries
 
@@ -3657,16 +3676,43 @@ The comparator lives in `src/lib/explorer/flights/sort.ts` and is a pure functio
 
 `SortableHeader` renders one clickable column header with an ↑ / ↓ arrow when active, keyboard-operable via Enter and Space with a matching `aria-label`. Kept fully generic (takes any `sort` + `onSort` prop) so it'll drop into hotels results too if sorting lands there.
 
+### Booking terminus
+
+`/explorer/booking` is the only Explorer page that mutates state. Composition flow:
+
+1. **Cart assembly.** User adds flights (outbound + optional return) and/or a hotel from `/explorer/flights` and `/explorer/hotels`. `SelectionContext` holds the choices; the `SelectionBar` footer renders a live-composed summary across every Explorer page.
+2. **Propose.** `BookingPanel` calls `buildProposePayload(selection)` (in `src/lib/explorer/`) to shape the context into the `/api/booking/propose` request body, POSTs it, and renders the response through the shared `BookingCard`. Idempotent via a stable `idempotency_key` persisted next to the proposed booking's id — a double-click or OAuth-return refresh re-reads the same row rather than creating a duplicate.
+3. **Confirm / Cancel.** `BookingCard`'s buttons route through `src/lib/booking/bookingActions.ts` — the single canonical POST wrapper (also used by `AnonChatResumeHandler` for the anon→signed-in bridge). Confirm requires a signed-in session; the OAuth-return effect in `BookingPanel` finishes a confirm that was triggered pre-sign-in.
+4. **Recent bookings.** Below the cart, `RecentBookingsPanel` lists the signed-in user's bookings via `GET /api/bookings`. Explicit-load (no auto-fetch on mount) + `sessionStorage['explorer:recentBookings:v1']` cache, so a round-trip Assistant → Explorer → Booking doesn't re-hit the DB. Each row expands to a full `BookingCard` so Confirm / Cancel work in-place.
+
 ### Test coverage
 
-Full component-level coverage under Vitest + React Testing Library — **112 tests across 25 colocated `.test.tsx` files**, shipped as four incremental PRs:
+Full component-level coverage under Vitest + React Testing Library — **~500 tests across 65 colocated `.test.{ts,tsx}` files**, grown in incremental waves:
 
-- **A — widgets (28 tests).** Established the pattern; discovered that controlled-`inputValue` Autocomplete needs a stateful test wrapper (otherwise typed characters replace each other instead of accumulating), and that MUI Rating's visually-hidden radios need `fireEvent.click` on the radio input queried by its `value` attribute — `user.click` on the label doesn't reliably reach the underlying input.
-- **B — presenters + headers (43 tests).** Introduced the `vi.mock('./LegBlock', ...)` pattern for composed components: parent tests focus on the composition contract (right props, right count, right order) without repeating rendering coverage that already exists in the child's own test file.
-- **C — stateful panels + fetch mock (25 tests).** `vi.stubGlobal('fetch', vi.fn())` with a `Response`-shaped resolve, `sessionStorage` pre-population as a shortcut past widget interactions when the test only cares about a validation state, `fireEvent.change` for controlled number inputs (where `parseInt('') === NaN` makes `user.clear` silently no-op).
-- **D — shared plumbing (16 tests).** Discovered `userEvent.setup()` installs its own Clipboard API stub — instead of fighting it, `CurlButton` tests read back the copied command with `await navigator.clipboard.readText()`.
+- **Explorer M3 waves (A–D).** Original 112 tests across 25 files that landed with the first Explorer surface: widgets, presenters + headers, stateful panels + fetch mock, shared plumbing. Established the patterns the rest of the suite follows (controlled-`inputValue` Autocomplete wrappers, `vi.mock` on composed children, `vi.stubGlobal('fetch', …)` with `Response`-shaped resolves, `fireEvent.change` on controlled number inputs).
+- **Booking slices 1–3.** `SelectionContext` toggles + sessionStorage v3 shape; `BookingPanel`'s propose → OAuth-return → confirm flow; `RecentBookingsPanel`'s auth-gate + explicit-load + cache + expand-row behavior; `SelectionBar`'s live-compose refactor.
+- **Settings menu + server-side persistence.** `SettingsContext.test.tsx` (23 tests) covers both anon and signed-in hydrate branches, the promotion flow, the AbortController race, PATCH-on-change, and the no-provider defaults; mocked service + repository tests sit next to the sources.
+- **Integration tier (opt-in).** `*.integration.test.ts` files under `src/lib/{services,repositories}/` run against the dockerized `postgres-test` container — `BookingService` (transactional confirm / cancel + CAS races), `FlightRepository` + `HotelRepository` (LLM-cached inventory, Scope-B guards), and `SettingsService` (full chain through Zod → Prisma → User row). Run with `npm run test:integration` after `db:test:up && db:test:migrate`.
 
-Test files sit next to the component they cover — no separate `__tests__` directory, no test-only naming convention. `Foo.tsx` → `Foo.test.tsx` in the same folder.
+Test files sit next to the component they cover — no separate `__tests__` directory, no test-only naming convention. `Foo.tsx` → `Foo.test.tsx` in the same folder; integration suites opt in via the `.integration.test.ts` suffix.
+
+---
+
+## User preferences
+
+Theme mode (`light` / `dark`) and date format (`auto` / `us` / `eu`) are per-user settings surfaced in the Header's `SettingsMenu`. Three populations, three storage policies:
+
+| Population | Reads from | Writes to | Carries across devices? |
+|---|---|---|---|
+| Anonymous | `localStorage['app:settings:v1']` | `localStorage` | No — per-browser only |
+| Signed-in with server-saved prefs | `GET /api/settings` → wins → write-through to `localStorage` | `localStorage` + `PATCH /api/settings` (fire-and-forget) | Yes |
+| Signed-in with empty server + populated local | `localStorage` snapshot | `localStorage` + one-time `PATCH /api/settings` promotion | Yes, after the first sign-in migration |
+
+The hydrate flow runs on mount **and** on every sign-in / sign-out transition (effect dep: `currentUser?.id`), guarded by an `AbortController` so a mid-flight GET can't write stale state after a fast auth transition. On sign-out, the localStorage copy is deliberately preserved — the alternative (forcing a theme reset on sign-out) would be jarring, and preferences aren't credentials. The write path uses a `useRef` for `currentUser?.id` so the setter callbacks' `useCallback` dep lists stay empty — otherwise every auth transition would churn the context value and cascade re-renders through every consumer.
+
+**The `useFormat*` hook family.** Date-format propagation isn't done by prop-threading; instead, five hooks in `SettingsContext.tsx` — `useFormatDate`, `useFormatDT`, `useFormatBookingDateRange`, `useFormatFlightLabel`, `useFormatHotelLabel` — wrap the pure helpers in `src/utils/{format,booking}.ts` with the current locale. Components call the hook and get a memoized formatter bound to the setting. The `auto` default resolves to `undefined` locale (`toLocaleDateString` falls back to the OS/browser locale), matching what native `<input type="date">` pickers display and what first-time visitors expect without ever finding the toggle.
+
+**Known trade-off: flicker on sign-in.** The context hydrates client-side, so SSR renders with `DEFAULTS` and the first client render matches, then a second render swaps to the stored/server value. A lazy `useState` initializer that reads `localStorage` synchronously would eliminate the flicker but triggers a React hydration mismatch (MUI classNames differ between SSR and the client's first render). The clean permanent fix is cookie-based SSR — write a cookie alongside the localStorage/server write, read it in `app/layout.tsx` via `cookies()`, and thread an initial value through `AppProviders` → the existing `initial` prop on `SettingsProvider`. Tracked as a future PR.
 
 ---
 
@@ -3689,8 +3735,15 @@ Everything below Stage 5 was ported to a single Next.js 15 (App Router) app. Wha
   - `data: {"type":"text_delta","delta":"..."}`
   - `data: {"type":"done","history":[...]}`
 - **`app/page.tsx`** — MUI-based Client Component chat UI. Renders user/agent bubbles, tool calls as collapsible `Accordion` entries (args + output), and streams the agent's answer token-by-token. Sample prompts as clickable chips on the empty state.
-- **`app/layout.tsx`** + **`app/theme.ts`** — MUI setup with `AppRouterCacheProvider` (required for App Router SSR of Emotion styles), custom palette.
-- **`src/lib/apiErrorResponse.ts`** — one helper mapping `ZodError` / `WeatherServiceError` / `TravelServiceError` to `NextResponse` with the right status codes. All four data-endpoint Route Handlers share it.
+- **`app/layout.tsx`** + **`app/providers.tsx`** + **`src/theme.ts`** — MUI setup with `AppRouterCacheProvider` (required for App Router SSR of Emotion styles) and custom palette. `AppProviders` nests four client-only contexts in order: `SessionProvider` → `SettingsProvider` → `AppThemeProvider` (reads `themeMode` from settings) → `ShareProvider`. The theme is memoized against `themeMode` so toggling light/dark doesn't rebuild the MUI theme on every unrelated render.
+- **`app/api/booking/*`** (Stage 8) — `POST /api/booking/propose`, `GET/PATCH /api/booking/[id]`, `POST /api/booking/[id]/{confirm,cancel}`. Transactional, idempotent, CAS on both inventory decrements and status transitions.
+- **`app/api/bookings/route.ts`** — `GET /api/bookings` lists the signed-in user's bookings for the `RecentBookingsPanel`. Auth-gated via `getCurrentUser()`.
+- **`app/api/settings/route.ts`** — `GET` / `PATCH /api/settings` for per-user theme + date-format persistence. Auth-gated (401 for anon, since anon users rely on localStorage).
+- **`app/api/auth/[...nextauth]/route.ts`** — NextAuth catch-all, Google provider, Prisma adapter, database session strategy.
+- **`app/api/conversations/*`** — the anon→signed-in chat bridge: on first sign-in, the anonymous session's conversation + any proposed booking gets claimed by the fresh user record.
+- **`src/lib/services/`** — `SettingsService` + `SettingsRepository` (Zod-validated preferences, unknown-field strip), `BookingService.listBookingsForUser` + `BookingRepository.findByOwner` (added alongside the Recent bookings panel), `ConversationService` for the chat bridge.
+- **`src/lib/booking/bookingActions.ts`** — single canonical POST wrapper for confirm/cancel; replaces four duplicate call sites across the chat and Explorer UIs.
+- **`src/utils/apiErrorResponse.ts`** — one helper mapping `ZodError` / `WeatherServiceError` / `TravelServiceError` / `BookingServiceError` / `SettingsServiceError` to `NextResponse` with the right status codes. Every data-endpoint Route Handler shares it.
 
 ### What didn't change
 
@@ -3715,28 +3768,48 @@ Emotion (which MUI uses) needs a specific setup to work with React Server Compon
 ```
 day-1/
 ├─ app/                              ← Next.js App Router
-│  ├─ layout.tsx                     ← MUI theme + CssBaseline
+│  ├─ layout.tsx                     ← Root layout; wraps children in AppProviders
+│  ├─ providers.tsx                  ← AppProviders — SessionProvider → SettingsProvider → AppThemeProvider → ShareProvider
 │  ├─ page.tsx                       ← Chat UI (Client Component)
-│  ├─ theme.ts                       ← MUI theme (client)
+│  ├─ c/[id]/page.tsx                ← Shared / resumed conversations by id
+│  ├─ signin/page.tsx                ← Custom NextAuth sign-in page
+│  ├─ explorer/                      ← Explorer sub-app (layout + weather/flights/hotels/booking pages)
 │  └─ api/
-│     ├─ weather/
-│     │  ├─ current/route.ts         ← GET /api/weather/current
-│     │  └─ forecast/route.ts        ← GET /api/weather/forecast
-│     ├─ flights/route.ts            ← GET /api/flights
-│     ├─ hotels/route.ts             ← GET /api/hotels
+│     ├─ weather/{current,forecast}/route.ts
+│     ├─ flights/route.ts, hotels/route.ts
+│     ├─ booking/{propose,[id],[id]/confirm,[id]/cancel}/route.ts
+│     ├─ bookings/route.ts           ← GET list for the Recent bookings panel
+│     ├─ settings/route.ts           ← GET / PATCH per-user prefs
+│     ├─ auth/[...nextauth]/route.ts ← NextAuth catch-all
+│     ├─ conversations/              ← Anon→signed-in chat bridge
+│     ├─ mcp/{travel,weather}/route.ts
 │     └─ agent/route.ts              ← POST /api/agent (SSE)
 ├─ legacy/                            ← historical CLI journey (still runnable via tsx)
 │  ├─ index.ts, explore.ts, weather.ts, books.ts, research.ts,
 │  ├─ mcp-server.ts, weather-agent.ts, travel-agent.ts
 ├─ src/
-│  ├─ weather-mcp.ts                 ← unchanged (URL constants updated)
-│  ├─ travel-mcp.ts                  ← unchanged (URL constants updated)
-│  └─ lib/                           ← unchanged (+ apiErrorResponse.ts)
-├─ prisma/                            ← unchanged
+│  ├─ theme.ts                       ← MUI theme (createAppTheme(mode))
+│  ├─ components/                    ← Chat UI + Explorer surfaces (BookingCard, Header, SettingsMenu, SelectionBar, …)
+│  ├─ context/                       ← SelectionContext, SettingsContext, ShareContext
+│  ├─ hooks/                         ← useAgentChat
+│  ├─ utils/                         ← apiErrorResponse, parsers, format, booking helpers, …
+│  ├─ types/                         ← Shared TS types
+│  ├─ lib/
+│  │  ├─ services/                   ← Weather/Flight/Hotel/Booking/Settings/Conversation services
+│  │  ├─ repositories/               ← + SettingsRepository
+│  │  ├─ booking/bookingActions.ts   ← Client-side confirm/cancel wrapper
+│  │  ├─ auth/                       ← session helpers (getCurrentUser, useCurrentUser)
+│  │  ├─ explorer/                   ← Explorer-specific helpers (unchanged shape, + buildProposePayload)
+│  │  └─ index.ts                    ← Barrel + factories + PrismaClient singleton
+│  ├─ mcp-servers/weather-mcp.ts, travel-mcp.ts  ← MCP tool definitions
+│  └─ mcp/                           ← Shared MCP HTTP handler + API client + tool factories
+├─ prisma/                            ← schema.prisma + migrations (incl. 20261019191142_add_user_settings)
 ├─ openapi.yaml                       ← contract remains valid; paths are now /api/…
+├─ docker-compose.yml                 ← postgres-test container for integration tests
+├─ vitest.config.mts, vitest.integration.config.mts
 ├─ next.config.mjs, next-env.d.ts    ← Next.js scaffolding
-├─ tsconfig.json                      ← Next.js compat
-└─ package.json                       ← next/react/MUI in; express out
+├─ tsconfig.json                      ← Next.js compat (`@/` → `src/`)
+└─ package.json                       ← next/react/MUI/prisma/next-auth
 ```
 
 ---
@@ -3825,6 +3898,10 @@ MUI theming happens in `app/layout.tsx` with `AppRouterCacheProvider` + `ThemePr
 
 *Booking endpoints* (Stage 8) — `app/api/booking/propose`, `/api/booking/[id]`, `/api/booking/[id]/confirm`, `/api/booking/[id]/cancel`. Same shape but POST-heavy; `[id]/confirm` is the only route deliberately unreachable from any agent tool.
 
+*Auth-gated per-user endpoints* — `app/api/bookings/route.ts` (lists the signed-in user's bookings; backs the Recent bookings panel), `app/api/settings/route.ts` (GET + PATCH per-user theme + date-format). Both call `getCurrentUser()` first and return 401 for anon callers. `/api/settings`'s PATCH goes through `SettingsService.updateForUser`, where a Zod `z.object({ dateFormat, themeMode }).refine(...)` whitelists the writable fields — a malicious client can't piggyback `email` or `isAdmin` through to Prisma.
+
+*Auth + conversation endpoints* — `app/api/auth/[...nextauth]/route.ts` is NextAuth's catch-all (Google provider, Prisma adapter, database session strategy). `app/api/conversations/*` is the anon→signed-in bridge: on first sign-in, the anon session's conversation + proposed booking are claimed by the fresh user record.
+
 `apiErrorResponse` ([src/utils/apiErrorResponse.ts](src/utils/apiErrorResponse.ts)) is one function all of them share:
 
 ```
@@ -3848,9 +3925,11 @@ The `for await (const event of stream)` block does essentially what the CLI REPL
 
 **Layer 3 — Service + Repository (`src/lib/`).** The payoff of Stage 2 (API framework as swappable outer skin), regrouped by the post-Stage-8 domain-vs-glue split.
 
-- `services/` — `WeatherService`, `FlightService`, `HotelService`, `BookingService` (Zod validation, business rules, transactional inventory reservation). Sibling error classes: `WeatherServiceError`, `TravelServiceError`, `BookingServiceError`.
-- `repositories/` — `WeatherRepository`, `FlightRepository`, `HotelRepository`, `BookingRepository`. Prisma queries + projection to plain types (no Prisma types leak upward).
+- `services/` — `WeatherService`, `FlightService`, `HotelService`, `BookingService` (Zod validation, business rules, transactional inventory reservation), `SettingsService` (per-user preferences, Zod-whitelisted PATCH), `ConversationService` (chat bridge). Sibling error classes: `WeatherServiceError`, `TravelServiceError`, `BookingServiceError`, `SettingsServiceError`. All extend `CodedServiceError` (shared `INTERNAL_ERROR` + domain-code enum) so `apiErrorResponse` has one mapping table across the whole surface.
+- `repositories/` — `WeatherRepository`, `FlightRepository`, `HotelRepository`, `BookingRepository`, `SettingsRepository`. Prisma queries + projection to plain types (no Prisma types leak upward). Options-object constructors (`new SettingsRepository({ prisma })`) so adding a dependency later isn't a breaking change at every call site.
 - `index.ts` — barrel + factory helpers (`createXxxService(prisma?)`) + `is*ServiceError` type guards + `PrismaClient` lazy singleton.
+- `auth/` — session helpers used by the auth-gated routes and the client-side `useCurrentUser`.
+- `booking/bookingActions.ts` — client-side canonical `confirmBooking` / `cancelBooking` POST wrapper (shared by `BookingCard`, `BookingPanel`'s OAuth-return effect, and `AnonChatResumeHandler`).
 
 Everything else that used to live under `src/lib/` (query parsing, HTTP error mapping, MCP transport) moved to sibling folders in the post-Stage-8 restructure:
 
@@ -3911,7 +3990,7 @@ Total wall-clock: ~4–8 seconds. Most of it is model latency; MCP + DB overhead
 | Streaming response | Route Handler's `ReadableStream` | One request lifetime |
 | OpenAI HTTPS calls | Inside Agents SDK | Per model turn (typically 2 per user turn: initial + post-tools) |
 
-Nothing here persists across process restarts except the DB. The whole app is stateless on the server side; state that matters (conversation) is client-side, and could be persisted to `localStorage` or a `Conversation` DB table as a future addition.
+Nothing in-process persists across restarts except the DB — but the DB now carries more than the demo inventory: User + Session (NextAuth), Conversation (shared / resumed chats), Booking, and the per-user settings columns. The server is still stateless *per request* (no in-memory session store); durable state lives in Postgres and is reconstituted from the session cookie + DB on every call.
 
 ### Where each design decision came from
 
@@ -3922,7 +4001,8 @@ Nothing here persists across process restarts except the DB. The whole app is st
 - **`globalThis`-cached MCP singletons.** With Streamable HTTP, connecting is much cheaper than spawning a `tsx` child, but the `tools/list` handshake still costs a request; caching in `globalThis` avoids repeating it every user turn, and the same pattern survives Next.js dev-mode HMR (mirrors how PrismaClient is cached in every Next.js template).
 - **Fresh Agent per request, not cached.** Instructions embed today's date + upcoming Fridays. If we cached the Agent, midnight would break it. Building it costs ~microseconds.
 - **`apiErrorResponse` centralized.** Four call sites; one truth. Adding a new service error code is a one-line change in the mapper.
-- **Client-side history.** Server has no session store, no user model, no auth. Adding those is a future extension; right now the browser is the source of truth per session.
+- **NextAuth with the Prisma adapter.** Database session strategy (not JWT) so a server-side token revoke is a `DELETE` on the `Session` row — matches how admin-driven sign-out should actually work. The Prisma adapter means auth lives in the same Postgres as everything else; no second connection pool.
+- **Auth-aware client contexts.** `SettingsContext` + `SelectionContext` both branch on `useCurrentUser()` output. Settings uses it to decide "localStorage only" vs "localStorage + server dual-storage"; Selection uses it only to decide what to show in the Header. The dep lists use `currentUser?.id` (primitive) rather than `currentUser` (object) because the real `useCurrentUser` returns a fresh object literal every render — a `[currentUser]` dep would retrigger the hydrate effect forever.
 - **Chat bubbles + Accordion tool cards.** MUI defaults get you clean, accessible components without hand-writing chat CSS.
 
 ### What breaks, and how it recovers
@@ -3948,6 +4028,9 @@ Nothing here persists across process restarts except the DB. The whole app is st
 | `npm run build` | Production build |
 | `npm start` | Production server (after `build`) |
 | `npm run lint` | ESLint via `next lint` |
+| `npm test` | Run the Vitest suite (unit + component tests, mocked DB) |
+| `npm run test:watch` | Vitest in watch mode |
+| `npm run test:integration` | Run `*.integration.test.ts` against the dockerized test DB (needs `db:test:up` + `db:test:migrate` first) |
 | `npm run mcp:inspect` | Launch the MCP Inspector; enter `http://localhost:3000/api/mcp/travel` or `.../weather` to hand-test either MCP (needs `npm run dev` up) |
 | `npm run db:generate` | Generate the Prisma client |
 | `npm run db:migrate` | Create/apply a dev migration (`-- --name <name>`) |
@@ -3955,6 +4038,9 @@ Nothing here persists across process restarts except the DB. The whole app is st
 | `npm run db:seed` | Populate the database (idempotent) |
 | `npm run db:reset` | Drop DB, re-apply migrations, run seed |
 | `npm run db:studio` | Open Prisma Studio (browser UI) |
+| `npm run db:test:up` | Start the dockerized `postgres-test` container for integration tests |
+| `npm run db:test:down` | Stop + remove the `postgres-test` container (volumes dropped) |
+| `npm run db:test:migrate` | Apply Prisma migrations to the test DB (dotenv-loaded from `.env.test`) |
 
 Legacy CLI scripts (Day 1–7, Travel Stage 5) live under `legacy/` and can be run directly, e.g.:
 
@@ -3972,49 +4058,65 @@ The legacy REPLs still work — the CLI travel-agent talks to the same MCP serve
 ```
 day-1/
 ├─ app/
-│  ├─ page.tsx, layout.tsx, theme.ts                     (chat UI shell)
+│  ├─ page.tsx, layout.tsx, providers.tsx                (chat UI shell + AppProviders stack)
+│  ├─ c/[id]/page.tsx                                     (shared / resumed conversations)
+│  ├─ signin/page.tsx                                     (custom NextAuth sign-in page)
 │  ├─ explorer/
-│  │  ├─ layout.tsx, page.tsx                             (persistent rail + index card grid)
+│  │  ├─ layout.tsx, page.tsx                             (persistent rail + index card grid + SelectionBar footer)
 │  │  ├─ weather/page.tsx, flights/page.tsx, hotels/page.tsx  (thin shells over the panel components)
+│  │  └─ booking/page.tsx                                 (BookingPanel + RecentBookingsPanel)
 │  └─ api/
 │     ├─ agent/route.ts                                   (SSE stream of the agent's turn)
 │     ├─ weather/{current,forecast}/route.ts              (weather REST)
 │     ├─ flights/route.ts, hotels/route.ts                (travel REST)
 │     ├─ booking/{propose,[id],[id]/confirm,[id]/cancel}/route.ts  (booking REST, Stage 8)
+│     ├─ bookings/route.ts                                (GET list for Recent bookings panel)
+│     ├─ settings/route.ts                                (GET + PATCH per-user prefs)
+│     ├─ auth/[...nextauth]/route.ts                      (NextAuth catch-all)
+│     ├─ conversations/                                   (anon→signed-in chat bridge)
 │     └─ mcp/{travel,weather}/route.ts                    (MCP as Streamable HTTP Route Handlers, Stage 7)
 ├─ src/
+│  ├─ theme.ts        (createAppTheme(mode), consumed by AppThemeProvider)
 │  ├─ agents/         (build{Weather,Travel,Triage}Agent, buildAgentGraph)
 │  ├─ components/
-│  │  ├─ (chat UI: MessageBubble(s), ToolCallView, BookingCard, FlightLegRow(s), HotelStayRow(s), SamplePrompts, Header)
+│  │  ├─ (chat UI: MessageBubble(s), ToolCallView, BookingCard, FlightLegRow(s), HotelStayRow(s), SamplePrompts, Header, SettingsMenu, AppThemeProvider, …)
 │  │  └─ explorer/                                       (Explorer sub-app UI)
 │  │     ├─ PageHeader, PanelHeader, EndpointCard, ExplorerRail
 │  │     ├─ ResponsePanel, SubmitBar, CurlButton         (shared plumbing)
 │  │     ├─ widgets/{City,Airport}Select, NumberStepper, PriceSlider, StarsSelect
+│  │     ├─ selection/SelectionBar + SelectionLine(s) + SelectionTotal + SelectionActions
+│  │     ├─ booking/BookingPanel + CartSummary + RecentBookingsPanel + RecentBookingRow
 │  │     ├─ weather/{Current,Forecast}Panel + {Current,Forecast}Results
 │  │     ├─ flights/FlightSearchForm + FlightResults → LegBlock → FlightHeaderRow → SortableHeader + FlightRow
 │  │     └─ hotels/HotelSearchForm + HotelResults + HotelCard
+│  ├─ context/        (SelectionContext, SettingsContext, ShareContext)
 │  ├─ config/         (samplePrompts.ts)
 │  ├─ hooks/          (useAgentChat)
 │  ├─ lib/
 │  │  ├─ index.ts     (barrel + factory helpers + PrismaClient singleton)
 │  │  ├─ cities.ts, amenities.ts, pricing.ts             (cross-cutting SoTs for city/airport data, amenity names, CabinClass enum)
 │  │  ├─ zodDates.ts  (shared IsoDate zod primitive)
-│  │  ├─ repositories/ (Booking, Flight, Hotel, WeatherRepository)
-│  │  ├─ services/    (Booking, Flight, Hotel, WeatherService + typed error classes)
+│  │  ├─ auth/        (getCurrentUser, useCurrentUser, NextAuth config)
+│  │  ├─ booking/     (bookingActions.ts — client-side confirm/cancel wrapper)
+│  │  ├─ repositories/ (Booking, Flight, Hotel, Weather, Settings; + testing/{prismaTestClient,seedFixtures}.ts)
+│  │  ├─ services/    (Booking, Flight, Hotel, Weather, Settings, Conversation + typed error classes)
 │  │  └─ explorer/
-│  │     ├─ explorerTypes.ts, explorerFetch.ts, usePersistedState.ts, buildCurl.ts
+│  │     ├─ explorerTypes.ts, explorerFetch.ts, usePersistedState.ts, buildCurl.ts, buildProposePayload.ts
 │  │     ├─ flights/{sort,buildQuery}.ts
 │  │     └─ hotels/buildQuery.ts
+│  ├─ mcp-servers/    (weather-mcp.ts, travel-mcp.ts)
 │  ├─ mcp/
 │  │  ├─ mcpHttpHandler.ts, mcpApiClient.ts
 │  │  └─ tools/{travel,weather}/                          (one tool spec factory per file)
 │  ├─ types/          (chat, booking, stream, weather)   (weather Row/Result types extracted here as of M1)
 │  └─ utils/
-│     ├─ apiErrorResponse.ts, parsers.ts, dates.ts, toolOutput.ts
+│     ├─ apiErrorResponse.ts, parsers.ts, dates.ts, format.ts, booking.ts, toolOutput.ts
 │     └─ queries/     (search{Flights,Hotels}Query)
-├─ prisma/            (schema + seed; Booking / FlightBooking / HotelBooking / Payment added Stage 8)
+├─ prisma/            (schema + seed + migrations; latest: 20261019191142_add_user_settings)
 ├─ legacy/            (Day 1–7 + CLI REPLs, historical)
 ├─ openapi.yaml       (contract for the REST endpoints)
+├─ docker-compose.yml (postgres-test container for integration tests)
+├─ vitest.config.mts, vitest.integration.config.mts, vitest.setup.ts
 ├─ next.config.mjs, next-env.d.ts, tsconfig.json
-└─ package.json       (Next.js + MUI + Prisma + OpenAI Agents)
+└─ package.json       (Next.js + MUI + Prisma + NextAuth + OpenAI Agents)
 ```
