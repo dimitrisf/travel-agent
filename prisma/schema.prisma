@@ -410,6 +410,15 @@ model User {
   email         String         @unique
   emailVerified DateTime?
   image         String?
+  // User preferences surfaced by the header Settings menu. Nullable
+  // because existing rows pre-date the Settings feature and because
+  // "not yet set" is distinct from "explicitly chose a value" —
+  // nulls fall through to client-side DEFAULTS, letting the default
+  // itself evolve server-side without a migration. Values are the
+  // literal strings SettingsContext uses: 'auto' | 'us' | 'eu' for
+  // dateFormat; 'light' | 'dark' for themeMode.
+  dateFormat    String?
+  themeMode     String?
   accounts      Account[]
   sessions      Session[]
   bookings      Booking[]

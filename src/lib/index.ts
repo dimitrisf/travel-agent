@@ -11,6 +11,8 @@ import { HotelRepository } from './repositories/HotelRepository';
 import { HotelService } from './services/HotelService';
 import { LiveWeatherRepository } from './repositories/LiveWeatherRepository';
 import { SeededWeatherRepository } from './repositories/SeededWeatherRepository';
+import { SettingsRepository } from './repositories/SettingsRepository';
+import { SettingsService } from './services/SettingsService';
 import { WeatherService } from './services/WeatherService';
 
 // ───── Weather ─────
@@ -166,4 +168,21 @@ export function createConversationService(
 ): ConversationService {
   const client = prisma ?? getSharedPrisma();
   return new ConversationService(new ConversationRepository(client));
+}
+
+// ───── Settings (Stage N — server-side user preferences) ─────
+export { SettingsRepository } from './repositories/SettingsRepository';
+export type { StoredSettings } from './repositories/SettingsRepository';
+export { SettingsService } from './services/SettingsService';
+export type { UpdateSettingsInput } from './services/SettingsService';
+export {
+  SettingsServiceError,
+  type SettingsServiceErrorCode,
+} from './services/SettingsServiceError';
+
+export function createSettingsService(prisma?: PrismaClient): SettingsService {
+  const client = prisma ?? getSharedPrisma();
+  return new SettingsService({
+    repo: new SettingsRepository({ prisma: client }),
+  });
 }
